@@ -1,0 +1,11 @@
+{
+  "rem_train": {
+    "file_name": "train.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "instruction": "instruction",
+      "input": "input",
+      "output": "output"
+    }
+  }
+}

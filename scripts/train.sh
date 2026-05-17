@@ -1,6 +1,8 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== REM LLM Training (CPU Mode) ==="
 
@@ -15,7 +17,7 @@ if ! ollama list | grep -q "${MODEL_TAG}"; then
 fi
 
 echo "Step 2: Creating REM model from Modelfile..."
-ollama create rem-coder -f /home/csy20/Documents/dev/rem-llm/Modelfile
+ollama create rem-coder -f "${ROOT_DIR}/Modelfile"
 
 echo "Step 3: Testing REM model..."
 echo ""

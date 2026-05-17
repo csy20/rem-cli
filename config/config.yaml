@@ -1,15 +1,36 @@
-model:
-  base_model: "deepseek-coder:1.3b"  # Already available, optimized for coding
-  name: "rem-coder"
+project:
+  name: "rem-llm"
+  seed: 42
 
-training:
-  method: "modelfile"  # Ollama Modelfile approach (CPU-compatible)
-  epochs: 3
+model:
+  base_model_hf: "deepseek-ai/deepseek-coder-1.3b-base"
+  base_model_ollama: "deepseek-coder:1.3b"
+  output_name: "rem-coder"
 
 data:
+  raw_file: "data/raw.jsonl"
   train_file: "data/train.jsonl"
   val_file: "data/val.jsonl"
+  eval_file: "data/eval.jsonl"
+  train_split: 0.9
   max_length: 2048
 
+training:
+  backend: "unsloth"
+  output_dir: "models/rem-coder-lora"
+  merged_output_dir: "models/rem-coder-merged"
+  epochs: 3
+  learning_rate: 0.0002
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  lora_rank: 16
+  lora_alpha: 16
+  lora_dropout: 0.0
+  load_in_4bit: true
+
+evaluation:
+  baseline_report: "models/evals/baseline.json"
+  post_train_report: "models/evals/post_train.json"
+
 hardware:
-  gpu_vram_gb: 0  # CPU-only mode
+  min_gpu_vram_gb_recommended: 8
