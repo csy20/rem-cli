@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MERGED_DIR="${ROOT_DIR}/models/rem-coder-merged"
 GGUF_DIR="${ROOT_DIR}/models/rem-coder-gguf"
+QUANT_LIST="${QUANT_LIST:-q4_k_m}"
 
 if [ ! -d "${MERGED_DIR}" ]; then
   echo "Merged model not found at ${MERGED_DIR}"
@@ -24,9 +25,13 @@ python "${LLAMA_CPP_PATH}/convert_hf_to_gguf.py" \
   --outfile "${GGUF_DIR}/rem-coder-f16.gguf" \
   --outtype f16
 
-"${LLAMA_CPP_PATH}/build/bin/llama-quantize" \
-  "${GGUF_DIR}/rem-coder-f16.gguf" \
-  "${GGUF_DIR}/rem-coder-q4_k_m.gguf" \
-  q4_k_m
+for quant in ${QUANT_LIST}; do
+  out_file="${GGUF_DIR}/rem-coder-${quant}.gguf"
+  echo "Quantizing ${quant} -> ${out_file}"
+  "${LLAMA_CPP_PATH}/build/bin/llama-quantize" \
+    "${GGUF_DIR}/rem-coder-f16.gguf" \
+    "${out_file}" \
+    "${quant}"
+done
 
-echo "GGUF export complete: ${GGUF_DIR}/rem-coder-q4_k_m.gguf"
+echo "GGUF export complete in ${GGUF_DIR}"

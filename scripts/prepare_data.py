@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -9,6 +10,35 @@ import yaml
 
 
 REQUIRED_KEYS = ("instruction", "input", "output")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_cache(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def write_cache(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
+def count_lines(path: Path) -> int:
+    with path.open("r", encoding="utf-8") as handle:
+        return sum(1 for _ in handle)
 
 
 def load_jsonl(path: Path):
@@ -64,6 +94,11 @@ def write_jsonl(path: Path, rows):
 def main():
     parser = argparse.ArgumentParser(description="Prepare train/val/eval datasets.")
     parser.add_argument("--config", default="config/config.yaml")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force regeneration even if cache fingerprint matches.",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -79,6 +114,29 @@ def main():
     train_path = root / data_cfg["train_file"]
     val_path = root / data_cfg["val_file"]
     eval_path = root / data_cfg["eval_file"]
+    cache_path = root / "data" / "prepare_cache.json"
+
+    dataset_fingerprint = {
+        "raw_file": str(raw_path),
+        "raw_sha256": file_sha256(raw_path),
+        "seed": seed,
+        "train_split": train_split,
+        "required_keys": list(REQUIRED_KEYS),
+        "schema_version": 1,
+    }
+    cache_payload = load_cache(cache_path)
+    outputs_exist = train_path.exists() and val_path.exists() and eval_path.exists()
+    if (
+        not args.force
+        and outputs_exist
+        and cache_payload.get("fingerprint") == dataset_fingerprint
+    ):
+        print("Data preparation skipped (cache hit)")
+        print(f"Fingerprint: {dataset_fingerprint['raw_sha256']}")
+        print(f"Train rows: {count_lines(train_path)} -> {train_path}")
+        print(f"Val rows: {count_lines(val_path)} -> {val_path}")
+        print(f"Eval rows: {count_lines(eval_path)} -> {eval_path}")
+        return
 
     raw_rows = load_jsonl(raw_path)
     cleaned_rows, dropped = validate_rows(raw_rows)
@@ -97,12 +155,27 @@ def main():
     write_jsonl(val_path, val_rows)
     write_jsonl(eval_path, eval_rows)
 
+    write_cache(
+        cache_path,
+        {
+            "fingerprint": dataset_fingerprint,
+            "stats": {
+                "raw_rows": len(raw_rows),
+                "dropped_rows": dropped,
+                "train_rows": len(train_rows),
+                "val_rows": len(val_rows),
+                "eval_rows": len(eval_rows),
+            },
+        },
+    )
+
     print("Data preparation complete")
     print(f"Raw rows: {len(raw_rows)}")
     print(f"Dropped rows: {dropped}")
     print(f"Train rows: {len(train_rows)} -> {train_path}")
     print(f"Val rows: {len(val_rows)} -> {val_path}")
     print(f"Eval rows: {len(eval_rows)} -> {eval_path}")
+    print(f"Fingerprint: {dataset_fingerprint['raw_sha256']}")
 
 
 if __name__ == "__main__":

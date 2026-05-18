@@ -14,23 +14,30 @@ data:
   eval_file: "data/eval.jsonl"
   train_split: 0.9
   max_length: 2048
+  pack_sequences: true
 
 training:
   backend: "unsloth"
   output_dir: "models/rem-coder-lora"
   merged_output_dir: "models/rem-coder-merged"
-  epochs: 3
-  learning_rate: 0.0002
+  epochs: 2
+  learning_rate: 0.00012
   per_device_train_batch_size: 2
-  gradient_accumulation_steps: 8
-  lora_rank: 16
-  lora_alpha: 16
-  lora_dropout: 0.0
+  gradient_accumulation_steps: 16
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  lora_rank: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
   load_in_4bit: true
 
 evaluation:
   baseline_report: "models/evals/baseline.json"
   post_train_report: "models/evals/post_train.json"
+  baseline_exec_report: "models/evals/baseline_exec.json"
+  post_train_exec_report: "models/evals/post_train_exec.json"
 
 hardware:
   min_gpu_vram_gb_recommended: 8

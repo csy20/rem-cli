@@ -31,12 +31,15 @@ rem-llm/
 │   ├── prepare_data.py
 │   ├── evaluate_model.py
 │   ├── compare_reports.py
+│   ├── benchmark_models.py
+│   ├── evaluate_exec.py
 │   ├── train_unsloth.py
 │   ├── train_llamafactory.sh
 │   ├── merge_adapter.py
 │   ├── export_gguf.sh
 │   ├── package_ollama.sh
 │   ├── run_pipeline.sh
+│   ├── write_run_metadata.py
 │   └── train.sh             # old CPU-only Modelfile flow
 ├── Modelfile                # base prompt-tuned model
 ├── Modelfile.trained        # for GGUF-trained model packaging
@@ -76,13 +79,22 @@ Run the full orchestrator:
 bash scripts/run_pipeline.sh deepseek-coder:1.3b rem-coder-trained
 ```
 
+Fast iteration mode (skip dependency install and cached baseline eval):
+
+```bash
+SKIP_DEPS=1 SKIP_BASELINE_IF_EXISTS=1 bash scripts/run_pipeline.sh deepseek-coder:1.3b rem-coder-trained
+```
+
 Pipeline outputs:
 
 - baseline report: `models/evals/baseline.json`
+- baseline executable report: `models/evals/baseline_exec.json`
 - post-train report: `models/evals/post_train.json`
+- post-train executable report: `models/evals/post_train_exec.json`
 - adapter: `models/rem-coder-lora/`
 - merged HF model: `models/rem-coder-merged/`
 - gguf: `models/rem-coder-gguf/rem-coder-q4_k_m.gguf`
+- run metadata: `models/experiments/<run-id>/metadata.json`
 
 ## Manual Step-by-Step
 
@@ -94,6 +106,15 @@ Edit `data/raw.jsonl` with your coding tasks, then:
 python3 scripts/prepare_data.py --config config/config.yaml
 ```
 
+The data prep step now uses fingerprint caching and skips work when `data/raw.jsonl`
+and split settings are unchanged.
+
+Force regeneration:
+
+```bash
+python3 scripts/prepare_data.py --config config/config.yaml --force
+```
+
 ### 2) Baseline Evaluation
 
 ```bash
@@ -101,6 +122,11 @@ python3 scripts/evaluate_model.py \
   --config config/config.yaml \
   --model deepseek-coder:1.3b \
   --report models/evals/baseline.json
+
+python3 scripts/evaluate_exec.py \
+  --config config/config.yaml \
+  --model deepseek-coder:1.3b \
+  --report models/evals/baseline_exec.json
 ```
 
 ### 3) Train (Unsloth)
@@ -129,6 +155,19 @@ bash scripts/export_gguf.sh
 bash scripts/package_ollama.sh rem-coder-trained
 ```
 
+Export multiple quantizations in one pass:
+
+```bash
+export LLAMA_CPP_PATH=/path/to/llama.cpp
+QUANT_LIST="q4_k_m q5_k_m q8_0" bash scripts/export_gguf.sh
+```
+
+Package a specific quant:
+
+```bash
+bash scripts/package_ollama.sh rem-coder-trained-q5 q5_k_m
+```
+
 ### 7) Post-Train Evaluation + Compare
 
 ```bash
@@ -137,9 +176,42 @@ python3 scripts/evaluate_model.py \
   --model rem-coder-trained \
   --report models/evals/post_train.json
 
+python3 scripts/evaluate_exec.py \
+  --config config/config.yaml \
+  --model rem-coder-trained \
+  --report models/evals/post_train_exec.json
+
 python3 scripts/compare_reports.py \
   --baseline models/evals/baseline.json \
-  --post models/evals/post_train.json
+  --post models/evals/post_train.json \
+  --baseline-exec models/evals/baseline_exec.json \
+  --post-exec models/evals/post_train_exec.json
+```
+
+## Experiment Metadata
+
+`scripts/run_pipeline.sh` now writes run metadata for reproducible comparisons:
+
+```bash
+models/experiments/<run-id>/metadata.json
+```
+
+Set a custom run id:
+
+```bash
+RUN_ID=exp-20260518-01 bash scripts/run_pipeline.sh deepseek-coder:1.3b rem-coder-trained
+```
+
+## Benchmark Model Variants
+
+Benchmark multiple Ollama models on shared prompts for latency and throughput:
+
+```bash
+python3 scripts/benchmark_models.py \
+  --models rem-coder-trained-q4,rem-coder-trained-q5,rem-coder-trained-q8 \
+  --eval-file data/eval.jsonl \
+  --max-samples 20 \
+  --report models/evals/benchmark.json
 ```
 
 ## Notes
@@ -147,6 +219,7 @@ python3 scripts/compare_reports.py \
 - `scripts/train.sh` and `Modelfile` are still useful for CPU-only prompt-tuning.
 - Actual learning from your dataset happens in QLoRA (Unsloth or LlamaFactory), not `ollama create` alone.
 - Increase dataset size and quality for meaningful coding improvements.
+- `evaluate_exec.py` supports executable checks for Python, JavaScript (Node syntax check), and SQL (SQLite execution shape).
 
 ## Evaluation Rubric (Upgraded)
 

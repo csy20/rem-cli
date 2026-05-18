@@ -1,0 +1,21 @@
+{
+  "fingerprint": {
+    "raw_file": "data/raw.jsonl",
+    "raw_sha256": "f40e30fe08be3792afb086f262b53fe3e7a6d313b8feaabc93d83290daea1102",
+    "seed": 42,
+    "train_split": 0.9,
+    "required_keys": [
+      "instruction",
+      "input",
+      "output"
+    ],
+    "schema_version": 1
+  },
+  "stats": {
+    "raw_rows": 10,
+    "dropped_rows": 0,
+    "train_rows": 9,
+    "val_rows": 1,
+    "eval_rows": 1
+  }
+}

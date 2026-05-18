@@ -16,6 +16,8 @@ def main():
     )
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--post", required=True)
+    parser.add_argument("--baseline-exec", default="")
+    parser.add_argument("--post-exec", default="")
     args = parser.parse_args()
 
     baseline = load_report(Path(args.baseline))
@@ -45,6 +47,28 @@ def main():
             bq = baseline_lang.get(lang, {}).get("avg_quality_score", 0.0)
             pq = post_lang.get(lang, {}).get("avg_quality_score", 0.0)
             print(f"- {lang}: baseline={bq} post={pq} delta={pq - bq:+.4f}")
+
+    if args.baseline_exec and args.post_exec:
+        baseline_exec = load_report(Path(args.baseline_exec))
+        post_exec = load_report(Path(args.post_exec))
+        print("\nExecutable comparison")
+        exec_metrics = ["executable_checked_rate", "executable_pass_rate"]
+        for key in exec_metrics:
+            b = baseline_exec.get("rates", {}).get(key, 0.0)
+            p = post_exec.get("rates", {}).get(key, 0.0)
+            print(f"- {key}: baseline={b} post={p} delta={p - b:+.4f}")
+
+        baseline_exec_lang = baseline_exec.get("language_rates", {})
+        post_exec_lang = post_exec.get("language_rates", {})
+        exec_langs = sorted(set(baseline_exec_lang) | set(post_exec_lang))
+        if exec_langs:
+            print("\nPer-language executable pass rate")
+            for lang in exec_langs:
+                b_rate = baseline_exec_lang.get(lang, {}).get("exec_pass_rate", 0.0)
+                p_rate = post_exec_lang.get(lang, {}).get("exec_pass_rate", 0.0)
+                print(
+                    f"- {lang}: baseline={b_rate} post={p_rate} delta={p_rate - b_rate:+.4f}"
+                )
 
 
 if __name__ == "__main__":
