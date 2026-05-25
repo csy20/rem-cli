@@ -22,7 +22,13 @@ It is designed for:
 - beginner-safe terminal command guidance
 - patch preview workflows with file context
 
-Build and run:
+Quick install (recommended):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/csy20/rem-llm/main/install.sh | bash
+```
+
+Build and run from source:
 
 ```bash
 cd rem-cli
