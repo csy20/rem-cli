@@ -21,6 +21,8 @@ It is designed for:
 - basic HTML/CSS coding help
 - beginner-safe terminal command guidance
 - patch preview workflows with file context
+- **Three interactive modes**: CHAT (conversation), CODE (generation), PLAN (analysis)
+- **Slash commands**: `/help`, `/mode`, `/plan`, `/clear`, `/explain`, `/test`, `/refactor`, `/write`, `/save`, `/dir`, `/search`, `/code`, `/files`, `/undo`, `/diff`, `/tokens`, `/config`, `/why`
 
 Quick install (recommended):
 
@@ -51,7 +53,12 @@ rem-llm/
 │   ├── val.jsonl
 │   ├── eval.jsonl
 │   ├── sample.jsonl
-│   └── dataset_info.json
+│   ├── dataset_info.json
+│   └── domains/
+│       ├── beginner/         # HTML/CSS/terminal domain training data
+│       ├── nextjs/
+│       ├── prisma/
+│       └── typescript/
 ├── models/                  # ignored in git
 ├── scripts/
 │   ├── prepare_data.py
@@ -147,6 +154,20 @@ Generate beginner web + terminal synthetic dataset:
 python3 -m remllm.cli data generate \
   --domain beginner \
   --output data/domains/beginner/raw.generated.jsonl
+```
+
+This generates 7 training examples across HTML, CSS, and terminal domains. Available domains include: `beginner`, `nextjs`, `backend`, `devops`, `mobile`, `analysis`, and language-specific domains (python, rust, go, etc.).
+
+After generation, prepare the dataset for training:
+
+```bash
+python3 -m remllm.cli data prepare --config config/config.yaml
+```
+
+Or target a specific domain's config:
+
+```bash
+python3 -m remllm.cli data prepare --config config/domains/beginner_web_cli.yaml
 ```
 
 ### 2) Baseline Evaluation

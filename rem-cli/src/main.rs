@@ -116,6 +116,20 @@ Each file MUST have its own ### heading with the full path, then a code fence.
 Always provide complete, runnable code. Do NOT use JSON format — use the multi-file format above.
 "##;
 
+const CHAT_SYSTEM_PROMPT_PLAN: &str = r##"You are REM, a coding assistant in planning mode.
+
+[MODE: PLAN]
+RULES — follow strictly:
+1. The user wants a strategic plan before any code is written.
+2. FIRST: analyze the request and context. What needs to be built/fixed?
+3. SECOND: explore the codebase — mention relevant files and patterns you see.
+4. THIRD: propose an approach with alternatives and trade-offs.
+5. FOURTH: recommend a concrete next step.
+6. DO NOT generate any code. DO NOT output files. NO code fences. NO JSON.
+7. Respond in clear markdown sections: ## Analysis, ## Approach, ## Trade-offs, ## Recommendation.
+8. End with: "Should I proceed with this plan? Type /mode to switch to CODE when ready."
+"##;
+
 const BLOCKED_COMMAND_PATTERNS: [&str; 10] = [
     "rm -rf /", "rm -rf", "rm  -rf", "mkfs", "dd if=",
     ":(){:|:&};:", "shutdown", "reboot", "curl ", "sudo ",
@@ -127,7 +141,7 @@ const BLOCKED_COMMAND_PATTERNS: [&str; 10] = [
 #[command(
     name = "rem",
     version,
-    about = "REM — Coding assistant CLI. Run `rem` to start interactive chat. Type /mode to toggle CHAT ↔ CODE.",
+    about = "REM — Coding assistant CLI. Run `rem` to start interactive chat. Type /mode to toggle CHAT ↔ CODE ↔ PLAN.",
     long_about = None,
 )]
 struct Cli {
@@ -548,6 +562,8 @@ struct ChatSession {
     history: Vec<(String, String)>,
     feedback: FeedbackTracker,
     mode: RunMode,
+    last_tokens: u32,
+    last_elapsed: std::time::Duration,
 }
 
 impl ChatSession {
@@ -566,6 +582,8 @@ impl ChatSession {
             history: Vec::new(),
             feedback: FeedbackTracker::new(model),
             mode: RunMode::Chat,
+            last_tokens: 0,
+            last_elapsed: std::time::Duration::from_secs(0),
         })
     }
 
@@ -867,7 +885,7 @@ fn print_welcome(client: &OllamaClient) {
         style!(C_CYAN, "\u{2502}"),
         style!(C_GREEN, "┃ mode: CHAT"),
         style!(C_CYAN, "│"),
-        style!(C_DIM, "type /mode to switch → CODE"));
+        style!(C_DIM, "/mode to switch → CODE → PLAN → CHAT"));
     println!();
 }
 
@@ -953,6 +971,7 @@ fn build_prompt(session: &ChatSession, client: &OllamaClient) -> String {
     let mode_color = match session.mode {
         RunMode::Chat => C_GREEN,
         RunMode::Code => C_MAGENTA,
+        RunMode::Plan => C_BLUE,
     };
     let mut p = String::new();
     p.push_str("\x01");
@@ -1087,10 +1106,12 @@ async fn run_chat(client: &OllamaClient, cfg: &mut AppConfig, verbose: bool) -> 
             let mode_color = match session.mode {
                 RunMode::Chat => C_GREEN,
                 RunMode::Code => C_MAGENTA,
+                RunMode::Plan => C_BLUE,
             };
             let hint = match session.mode {
                 RunMode::Chat => "reply in plain text — ask questions, chat",
                 RunMode::Code => "generate code/files — create, fix, build",
+                RunMode::Plan => "explore & plan — analyze, propose approach, no code",
             };
             println!("{}", style!(C_DIM, "│"));
             println!("{} {} {}",
@@ -1099,6 +1120,47 @@ async fn run_chat(client: &OllamaClient, cfg: &mut AppConfig, verbose: bool) -> 
                 style!(C_DIM, ""));
             println!("{} {} {}", style!(C_CYAN, "│"), style!(C_DIM, "\u{2502}"), style!(C_DIM, "{}", hint));
             println!("{}", style!(C_DIM, "│"));
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/plan") {
+            session.mode = RunMode::Plan;
+            println!("{}", style!(C_DIM, "│"));
+            println!("{} {} {}",
+                style!(C_CYAN, "│"),
+                style!(C_BLUE, "switched to PLAN mode"),
+                style!(C_DIM, ""));
+            println!("{} {} {}", style!(C_CYAN, "│"), style!(C_DIM, "\u{2502}"), style!(C_DIM, "explore & plan — analyze, propose approach, no code"));
+            println!("{}", style!(C_DIM, "│"));
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/clear") {
+            session.history.clear();
+            session.last_search.clear();
+            session.last_tokens = 0;
+            println!("{}", style!(C_DIM, "│"));
+            println!("{} {}", style!(C_CYAN, "│"), style!(C_GREEN, "conversation cleared"));
+            println!("{}", style!(C_DIM, "│"));
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/config") {
+            handle_config(&session, client);
+            continue;
+        }
+        if let Some(tail) = trimmed.strip_prefix("/config ") {
+            handle_config_set(&mut session, client, tail.trim());
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/diff") {
+            handle_diff(&session);
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/tokens") {
+            handle_tokens(&session);
             continue;
         }
 
@@ -1156,6 +1218,9 @@ async fn run_chat(client: &OllamaClient, cfg: &mut AppConfig, verbose: bool) -> 
         if session.mode == RunMode::Code {
             print!("{} ", style!(C_CYAN, "\u{2502}"));
             println!("{}", style!(C_MAGENTA, "generating code..."));
+        } else if session.mode == RunMode::Plan {
+            print!("{} ", style!(C_CYAN, "\u{2502}"));
+            println!("{}", style!(C_BLUE, "analyzing & planning..."));
         } else if intent == TaskIntent::CodeAction {
             print!("{} ", style!(C_CYAN, "\u{2502}"));
             println!("{}", style!(C_CYAN, "Analyzing..."));
@@ -1185,6 +1250,7 @@ async fn run_chat(client: &OllamaClient, cfg: &mut AppConfig, verbose: bool) -> 
         let system_prompt = match session.mode {
             RunMode::Chat => CHAT_SYSTEM_PROMPT_CONVERSATIONAL,
             RunMode::Code => CHAT_SYSTEM_PROMPT_CODE,
+            RunMode::Plan => CHAT_SYSTEM_PROMPT_PLAN,
         };
 
         let lang_guidance = if let Some(ref dir) = session.project_dir {
@@ -1207,8 +1273,16 @@ async fn run_chat(client: &OllamaClient, cfg: &mut AppConfig, verbose: bool) -> 
                 style!(C_CYAN, "this looks like a code request — type /mode to switch to CODE"));
             println!("{}", style!(C_DIM, "\u{2502}"));
         }
+        if session.mode == RunMode::Plan && intent == TaskIntent::CodeAction {
+            println!("{}", style!(C_DIM, "\u{2502}"));
+            println!("{} {}",
+                style!(C_YELLOW, "\u{2502}  hint:"),
+                style!(C_BLUE, "in PLAN mode — I'll analyze first, then you can switch to CODE"));
+            println!("{}", style!(C_DIM, "\u{2502}"));
+        }
         let result = client.complete_chat_stream(&full_prompt, &system_prompt, &history_ctx).await;
         let elapsed = start.elapsed();
+        session.last_elapsed = elapsed;
 
         match result {
             Ok(text) => {
@@ -1216,7 +1290,7 @@ async fn run_chat(client: &OllamaClient, cfg: &mut AppConfig, verbose: bool) -> 
                     eprintln!("\n  {} raw response:\n{}\n", style!(C_DIM, "verbose:"), text);
                 }
 
-                let (was_validated, validated_text) = validate_chat_response(&text, &intent);
+                let (was_validated, validated_text) = validate_chat_response(&text, &intent, &session.mode);
                 let cleaned = if was_validated && session.mode != RunMode::Code {
                     println!("{} {}", style!(C_YELLOW, "│"), style!(C_DIM, "(response contained unexpected code — showing text only)"));
                     println!("{}", style!(C_CYAN, "│"));
@@ -1224,6 +1298,8 @@ async fn run_chat(client: &OllamaClient, cfg: &mut AppConfig, verbose: bool) -> 
                 } else {
                     text.trim().to_string()
                 };
+
+                session.last_tokens = (cleaned.len() / 4) as u32;
 
                 let treat_as_code = intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
 
@@ -1309,13 +1385,15 @@ async fn run_chat(client: &OllamaClient, cfg: &mut AppConfig, verbose: bool) -> 
 enum RunMode {
     Chat,
     Code,
+    Plan,
 }
 
 impl RunMode {
     fn toggle(&self) -> RunMode {
         match self {
             RunMode::Chat => RunMode::Code,
-            RunMode::Code => RunMode::Chat,
+            RunMode::Code => RunMode::Plan,
+            RunMode::Plan => RunMode::Chat,
         }
     }
 
@@ -1323,12 +1401,13 @@ impl RunMode {
         match self {
             RunMode::Chat => "CHAT",
             RunMode::Code => "CODE",
+            RunMode::Plan => "PLAN",
         }
     }
 }
 
-fn validate_chat_response(response: &str, intent: &TaskIntent) -> (bool, String) {
-    if *intent != TaskIntent::CodeAction {
+fn validate_chat_response(response: &str, intent: &TaskIntent, mode: &RunMode) -> (bool, String) {
+    if *intent != TaskIntent::CodeAction && *mode != RunMode::Code {
         let has_code_fences = response.contains("```");
         let has_multi_file = response.contains("### ") && has_code_fences;
         let has_json = response.trim().starts_with('{') && (response.contains("\"code\"") || response.contains("\"files\""));
@@ -1889,6 +1968,160 @@ async fn handle_refactor(client: &OllamaClient, session: &mut ChatSession, path:
     }
 }
 
+fn handle_config(session: &ChatSession, client: &OllamaClient) {
+    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}  {}{}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "\u{2500}\u{2500} CONFIG \u{2500}\u{2500}"), style!(C_DIM, ""));
+    println!("{}   {:<18} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "model:"), style!(C_DIM, "{}", client.model));
+    println!("{}   {:<18} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "ollama url:"), style!(C_DIM, "{}", client.base_url));
+    println!("{}   {:<18} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "mode:"), style!(C_DIM, "{}", session.mode.label()));
+    println!("{}   {:<18} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "workspace:"), style!(C_DIM, "{}", session.project_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "none".to_string())));
+    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{} {} {}",
+        style!(C_CYAN, "\u{2502}"), style!(C_DIM, ""), style!(C_DIM, "use /config model <name> to switch models"));
+    println!("{}", style!(C_CYAN, "\u{2502}"));
+}
+
+fn handle_config_set(session: &mut ChatSession, client: &OllamaClient, args: &str) {
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.is_empty() {
+        handle_config(session, client);
+        return;
+    }
+    match parts[0] {
+        "workspace" | "dir" => {
+            if parts.len() > 1 {
+                handle_dir(session, parts[1]);
+            } else {
+                println!("{} usage: /config workspace <path>", style!(C_YELLOW, "│"));
+            }
+        }
+        other => {
+            println!("{} unknown config key: {}", style!(C_YELLOW, "│"), other);
+            println!("{} available: model, workspace", style!(C_DIM, "│"));
+        }
+    }
+}
+
+fn handle_diff(session: &ChatSession) {
+    if session.last_files.is_empty() {
+        println!("{} No generated files to compare.", style!(C_YELLOW, "│"));
+        return;
+    }
+
+    let base_dir = session.project_dir.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_default()
+    });
+
+    println!("{}", style!(C_DIM, "│"));
+    println!("{} {}{}", style!(C_CYAN, "│"), style!(C_WHITE_B, "--- DIFF ---"), style!(C_DIM, ""));
+    println!("{}", style!(C_DIM, "│"));
+
+    for f in &session.last_files {
+        if f.path.is_empty() { continue; }
+        let rel_path = PathBuf::from(&f.path);
+        let abs_path = if rel_path.is_relative() {
+            base_dir.join(&rel_path)
+        } else {
+            rel_path
+        };
+
+        let icon = file_icon(&f.path);
+        if abs_path.exists() {
+            let existing = fs::read_to_string(&abs_path).unwrap_or_default();
+            if existing == f.content {
+                println!("{} {} {} {}",
+                    style!(C_CYAN, "│"), icon,
+                    style!(C_WHITE_B, "{}", f.path),
+                    style!(C_DIM, "(unchanged)"));
+            } else {
+                let added = f.content.lines().count().saturating_sub(existing.lines().count());
+                let removed = existing.lines().count().saturating_sub(f.content.lines().count());
+                println!("{} {} {} {}",
+                    style!(C_CYAN, "│"), icon,
+                    style!(C_WHITE_B, "{}", f.path),
+                    style!(C_DIM, ""));
+                if added > 0 {
+                    println!("{}   {} {}", style!(C_CYAN, "│"), style!(C_GREEN, "+{} lines", added), style!(C_DIM, ""));
+                }
+                if removed > 0 {
+                    println!("{}   {} {}", style!(C_CYAN, "│"), style!(C_RED, "-{} lines", removed), style!(C_DIM, ""));
+                }
+            }
+        } else {
+            println!("{} {} {} {}",
+                style!(C_CYAN, "│"), icon,
+                style!(C_WHITE_B, "{}", f.path),
+                style!(C_GREEN, "(new file) {} bytes", f.content.len()));
+        }
+    }
+
+    let cmd = std::process::Command::new("git")
+        .args(["diff", "--stat", "--"])
+        .current_dir(&base_dir)
+        .output();
+
+    if let Ok(output) = cmd {
+        if !output.stdout.is_empty() {
+            println!("{}", style!(C_CYAN, "│"));
+            println!("{} {}", style!(C_CYAN, "│"), style!(C_DIM, "git diff --stat:"));
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                println!("{}   {}", style!(C_CYAN, "│"), style!(C_DIM, "{}", line));
+            }
+        }
+    }
+
+    println!("{}", style!(C_CYAN, "│"));
+}
+
+fn handle_tokens(session: &ChatSession) {
+    let tokens = session.last_tokens;
+    let elapsed = session.last_elapsed.as_secs_f64();
+    let history_tokens: usize = session.history.iter()
+        .map(|(u, a)| (u.len() + a.len()) / 4)
+        .sum();
+
+    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}  {}{}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "\u{2500}\u{2500} TOKENS \u{2500}\u{2500}"), style!(C_DIM, ""));
+    println!("{}   {:<18} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "last response:"),
+        style!(C_DIM, "~{} tokens", tokens));
+
+    if elapsed > 0.0 && tokens > 0 {
+        let tps = tokens as f64 / elapsed;
+        println!("{}   {:<18} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_WHITE_B, "speed:"),
+            style!(C_DIM, "~{:.0} tok/s", tps));
+    }
+
+    if session.last_elapsed.as_secs() > 0 {
+        println!("{}   {:<18} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_WHITE_B, "elapsed:"),
+            style!(C_DIM, "{:.1}s", elapsed));
+    }
+
+    if history_tokens > 0 {
+        println!("{}   {:<18} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_WHITE_B, "context history:"),
+            style!(C_DIM, "~{} tokens ({} turns)", history_tokens, session.history.len()));
+
+        let pct = (history_tokens as f64 / 2048.0 * 100.0).min(100.0);
+        println!("{}   {:<18} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_WHITE_B, "context window:"),
+            style!(C_DIM, "{:.0}% used (2048 limit)", pct));
+    } else {
+        println!("{}   {:<18} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_WHITE_B, "context:"),
+            style!(C_DIM, "empty (no history)"));
+    }
+    println!("{}", style!(C_DIM, "\u{2502}"));
+}
+
 fn print_chat_help() {
     let v = C_CYAN;
     let d = C_DIM;
@@ -1896,7 +2129,9 @@ fn print_chat_help() {
     println!("{}", style!(d, "\u{2502}"));
     println!("{}  {}{}", style!(v, "\u{2502}"), style!(h, "\u{2500}\u{2500} COMMANDS \u{2500}\u{2500}"), style!(d, ""));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/help"),          style!(d, "show this help"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/mode"),          style!(d, "toggle CHAT ↔ CODE mode"));
+    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/mode"),          style!(d, "toggle CHAT → CODE → PLAN"));
+    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/plan"),          style!(d, "switch to PLAN mode (explore & analyze)"));
+    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/clear"),         style!(d, "reset conversation history"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/explain <code>"),style!(d, "explain what code does"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/test <file>"),   style!(d, "generate tests for a file"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/refactor <file>"),style!(d, "suggest refactoring for a file"));
@@ -1907,11 +2142,15 @@ fn print_chat_help() {
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/code"),          style!(d, "show last generated code"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/files"),         style!(d, "list project files tree"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/undo"),          style!(d, "delete last written files"));
+    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/diff"),          style!(d, "compare generated vs existing files"));
+    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/tokens"),        style!(d, "show token usage & context stats"));
+    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/config"),        style!(d, "view current configuration"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/why"),           style!(d, "show why last intent was chosen"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "exit / quit"),    style!(d, "exit REM"));
     println!("{}", style!(v, "\u{2502}"));
     println!("{}  {}", style!(v, "\u{2502}"), style!(h, "\u{2500}\u{2500} TIPS \u{2500}\u{2500}"));
-    println!("{}   {} use {} to toggle between chat and code modes", style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "/mode"));
+    println!("{}   {} use {} to toggle between chat, code, and plan modes", style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "/mode"));
+    println!("{}   {} {} for analysis first — REM explores codebase before coding", style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "/plan"));
     println!("{}   {} describe what you want \u{2014} REM detects intent", style!(v, "\u{2502}"), style!(d, "\u{2022}"));
     println!("{}   {} multi-file intent and auto-writes after confirmation", style!(v, "\u{2502}"), style!(d, "\u{2022}"));
     println!("{}   {} use {} {} {} for analysis, tests, and refactoring",
@@ -3375,7 +3614,7 @@ h1 { color: red; }
     #[test]
     fn validate_chat_response_strips_code() {
         let response = "Here is your site:\n\n### index.html\n```html\n<div>hi</div>\n```";
-        let (was_validated, text) = validate_chat_response(response, &TaskIntent::FastAnswer);
+        let (was_validated, text) = validate_chat_response(response, &TaskIntent::FastAnswer, &RunMode::Chat);
         assert!(was_validated);
         assert!(text.contains("Here is your site"));
         assert!(!text.contains("<div>hi</div>"));
@@ -3384,14 +3623,14 @@ h1 { color: red; }
     #[test]
     fn validate_chat_response_passes_valid() {
         let response = "Hi there! How can I help you today?";
-        let (was_validated, _) = validate_chat_response(response, &TaskIntent::FastAnswer);
+        let (was_validated, _) = validate_chat_response(response, &TaskIntent::FastAnswer, &RunMode::Chat);
         assert!(!was_validated);
     }
 
     #[test]
     fn validate_chat_allows_code_action() {
         let response = "### app.js\n```js\nconst x = 1;\n```";
-        let (was_validated, _) = validate_chat_response(response, &TaskIntent::CodeAction);
+        let (was_validated, _) = validate_chat_response(response, &TaskIntent::CodeAction, &RunMode::Code);
         assert!(!was_validated);
     }
 }
