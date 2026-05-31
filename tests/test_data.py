@@ -9,8 +9,11 @@ from remllm.data.loader import (
     count_lines,
     validate_rows,
     format_training_row,
+    format_conversation_row,
     build_dataset_fingerprint,
     file_sha256,
+    QWEN_IM_START,
+    QWEN_IM_END,
 )
 from remllm.data.prepper import prepare_data
 
@@ -72,6 +75,51 @@ def test_format_training_row_with_input():
     result = format_training_row(row)
     assert "Context:" in result["text"]
     assert "context here" in result["text"]
+
+
+def test_format_training_row_chat_template():
+    row = {"instruction": "write foo", "input": "", "output": "bar"}
+    result = format_training_row(row, chat_template=True)
+    text = result["text"]
+    assert f"{QWEN_IM_START}system" in text
+    assert f"{QWEN_IM_END}" in text
+    assert f"{QWEN_IM_START}user" in text
+    assert f"{QWEN_IM_START}assistant" in text
+    assert "write foo" in text
+    assert "bar" in text
+    assert text.endswith(QWEN_IM_END)
+    assert "You are REM" in text
+
+
+def test_format_conversation_row():
+    row = {
+        "turns": [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+    }
+    result = format_conversation_row(row)
+    text = result["text"]
+    assert f"{QWEN_IM_START}system" in text
+    assert f"{QWEN_IM_START}user" in text
+    assert f"{QWEN_IM_START}assistant" in text
+    assert "You are helpful." in text
+    assert "Hello" in text
+    assert "Hi there!" in text
+    assert QWEN_IM_END in text
+
+
+def test_format_conversation_row_empty():
+    row = {"turns": []}
+    result = format_conversation_row(row)
+    assert result["text"] == ""
+
+
+def test_format_conversation_row_unknown_role():
+    row = {"turns": [{"role": "bot", "content": "beep"}]}
+    result = format_conversation_row(row)
+    assert "### Bot:" in result["text"]
 
 
 def test_file_sha256(temp_dir):

@@ -10,9 +10,8 @@ from typing import Any
 FIM_PREFIX = "<|fim_begin|>"
 FIM_SUFFIX = "<|fim_hole|>"
 FIM_MIDDLE = "<|fim_end|>"
-DEEPSEEK_CHAT_USER = "<|user|>"
-DEEPSEEK_CHAT_ASSISTANT = "<|assistant|>"
-DEEPSEEK_CHAT_SYSTEM = "<|system|>"
+QWEN_IM_START = "<|im_start|>"
+QWEN_IM_END = "<|im_end|>"
 
 REQUIRED_KEYS = ("instruction", "input", "output")
 
@@ -111,7 +110,11 @@ def format_training_row(row: dict, chat_template: bool = False) -> dict:
     if row.get("input"):
         prompt += f"\n\nContext:\n{row['input']}"
     if chat_template:
-        text = f"{DEEPSEEK_CHAT_SYSTEM}\nYou are REM, a helpful coding assistant.\n\n{DEEPSEEK_CHAT_USER}\n{prompt}\n\n{DEEPSEEK_CHAT_ASSISTANT}\n{row['output']}"
+        text = (
+            f"{QWEN_IM_START}system\nYou are REM, a helpful coding assistant.{QWEN_IM_END}\n"
+            f"{QWEN_IM_START}user\n{prompt}{QWEN_IM_END}\n"
+            f"{QWEN_IM_START}assistant\n{row['output']}{QWEN_IM_END}"
+        )
     else:
         text = f"### Instruction:\n{prompt}\n\n### Response:\n{row['output']}"
     return {"text": text}
@@ -189,11 +192,11 @@ def format_conversation_row(row: dict) -> dict:
         role = turn.get("role", "user")
         content = turn.get("content", "")
         if role == "user":
-            text_parts.append(f"{DEEPSEEK_CHAT_USER}\n{content}")
+            text_parts.append(f"{QWEN_IM_START}user\n{content}{QWEN_IM_END}")
         elif role == "assistant":
-            text_parts.append(f"{DEEPSEEK_CHAT_ASSISTANT}\n{content}")
+            text_parts.append(f"{QWEN_IM_START}assistant\n{content}{QWEN_IM_END}")
         elif role == "system":
-            text_parts.append(f"{DEEPSEEK_CHAT_SYSTEM}\n{content}")
+            text_parts.append(f"{QWEN_IM_START}system\n{content}{QWEN_IM_END}")
         else:
             text_parts.append(f"### {role.capitalize()}:\n{content}")
     return {"text": "\n\n".join(text_parts)}
