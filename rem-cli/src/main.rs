@@ -17,14 +17,14 @@ use walkdir::WalkDir;
 mod feedback;
 mod intent;
 mod memory;
-mod ollama;
 mod provider;
 mod agentic;
+mod parsing;
 use feedback::FeedbackTracker;
 use intent::{classify_intent, has_creation_intent, has_file_path, intent_instruction, TaskIntent};
 use memory::ProjectMemory;
-use ollama::OllamaResponse;
-use provider::{Provider, api_url};
+use parsing::{current_name_from_bold, extract_code_block, guess_filename, strip_code_blocks};
+use provider::{Provider, api_url, OllamaJsonResponse};
 use agentic::{build_agentic_prompt, build_tool_context, extract_goal_signal, run_lint, run_test};
 
 static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
@@ -378,27 +378,6 @@ impl ModelReply {
 
 }
 
-fn extract_code_block(text: &str) -> String {
-    let mut in_fence = false;
-    let mut _fence_lang = String::new();
-    let mut code_lines: Vec<&str> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            if in_fence {
-                break;
-            }
-            in_fence = true;
-            _fence_lang = trimmed.trim_start_matches("```").to_string();
-            continue;
-        }
-        if in_fence {
-            code_lines.push(line);
-        }
-    }
-    if code_lines.is_empty() { String::new() } else { code_lines.join("\n") }
-}
-
 fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
     let mut files = Vec::new();
     let mut current_name = String::new();
@@ -457,61 +436,6 @@ fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
     }
 
     files
-}
-
-fn current_name_from_bold(line: &str) -> Option<String> {
-    let re = Regex::new(r"\*\*(.+?)\*\*").ok()?;
-    if let Some(cap) = re.captures(line) {
-        let name = cap.get(1)?.as_str().trim().to_lowercase();
-        if name.contains('.') {
-            return Some(name);
-        }
-    }
-    None
-}
-
-fn guess_filename(lines: &[&str]) -> String {
-    for line in lines.iter().take(3) {
-        let trimmed = line.trim();
-        if trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html") || trimmed.contains("<head") {
-            return "index.html".to_string();
-        }
-        if trimmed.starts_with("fn ") || trimmed.starts_with("pub ") || trimmed.starts_with("use ")
-            || trimmed.starts_with("mod ") || trimmed.starts_with("impl ") || trimmed.starts_with("trait ")
-            || trimmed.starts_with("#![") || trimmed.starts_with("extern crate")
-        {
-            return "main.rs".to_string();
-        }
-        if trimmed.starts_with("def ") || trimmed.starts_with("import ") || trimmed.starts_with("from ")
-            || trimmed.starts_with("class ") || trimmed.starts_with("if __name__")
-        {
-            return "main.py".to_string();
-        }
-        if trimmed.starts_with("package ") || trimmed.starts_with("func ") || trimmed.starts_with("type ")
-            || trimmed.starts_with("var (")
-        {
-            return "main.go".to_string();
-        }
-        if trimmed.starts_with("interface ") || trimmed.starts_with("export type")
-            || trimmed.starts_with("export interface") || trimmed.starts_with("declare ")
-            || trimmed.starts_with("namespace ") || trimmed.starts_with("import type")
-        {
-            return "index.ts".to_string();
-        }
-        if trimmed.starts_with("const ") || trimmed.starts_with("let ") || trimmed.starts_with("var ")
-            || trimmed.starts_with("function ") || trimmed.starts_with("document.")
-            || trimmed.starts_with("fetch(") || trimmed.starts_with("addEventListener")
-        {
-            return "script.js".to_string();
-        }
-        if trimmed.starts_with("body ") || trimmed.starts_with(".") || trimmed.starts_with("#")
-            || trimmed.starts_with("@media") || trimmed.starts_with(":root")
-            || (trimmed.contains("{") && trimmed.contains("}") && !trimmed.contains("function"))
-        {
-            return "style.css".to_string();
-        }
-    }
-    String::new()
 }
 
 fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
@@ -899,6 +823,8 @@ async fn main() -> Result<()> {
         client.set_model(fallback);
     }
 
+    check_system_resources();
+
     match cli.command {
         Some(Commands::Ask(args))    => run_ask(&client, &cfg, args, verbose).await,
         Some(Commands::Explain(args)) => run_explain(&client, args).await,
@@ -1020,7 +946,7 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
                 let body = resp.text().await.unwrap_or_default();
                 return Err(anyhow!("Ollama error: {}", body));
             }
-            let raw: OllamaResponse = resp.json().await.context("invalid Ollama response")?;
+            let raw: OllamaJsonResponse = resp.json().await.context("invalid Ollama response")?;
             Ok(ModelReply {
                 explanation: raw.response.trim().to_string(),
                 code: String::new(),
@@ -1726,29 +1652,6 @@ fn validate_chat_response(response: &str, intent: &TaskIntent, mode: &RunMode) -
     }
 
     (false, String::new())
-}
-
-fn strip_code_blocks(text: &str) -> String {
-    let mut result = String::new();
-    let mut in_fence = false;
-
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
-        if line.starts_with("### ") || line.starts_with("## ") {
-            continue;
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    result.trim().to_string()
 }
 
 fn prompt_for_path(session: &mut ChatSession) -> io::Result<String> {
@@ -4281,12 +4184,12 @@ mod tests {
 
     #[test]
     fn api_url_plain_base() {
-        assert_eq!(ollama::api_url("http://localhost:11434", "generate"), "http://localhost:11434/api/generate");
+        assert_eq!(api_url("http://localhost:11434", "generate"), "http://localhost:11434/api/generate");
     }
 
     #[test]
     fn api_url_with_api() {
-        assert_eq!(ollama::api_url("http://localhost:11434/api", "generate"), "http://localhost:11434/api/generate");
+        assert_eq!(api_url("http://localhost:11434/api", "generate"), "http://localhost:11434/api/generate");
     }
 
     #[test]
@@ -4454,5 +4357,41 @@ h1 { color: red; }
         let response = "### app.js\n```js\nconst x = 1;\n```";
         let (was_validated, _) = validate_chat_response(response, &TaskIntent::CodeAction, &RunMode::Code);
         assert!(!was_validated);
+    }
+
+    #[test]
+    fn resolve_safe_path_allows_workspace_relative_path() {
+        let base = std::env::temp_dir().join(format!(
+            "rem-cli-safe-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).expect("temp base should be created");
+
+        let result = resolve_safe_path(&base, "main.rs");
+        assert!(result.is_some());
+        let resolved = result.expect("path should resolve");
+        assert!(resolved.starts_with(&base));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_safe_path_blocks_parent_traversal() {
+        let base = std::env::temp_dir().join(format!(
+            "rem-cli-traversal-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).expect("temp base should be created");
+
+        let result = resolve_safe_path(&base, "../escape.txt");
+        assert!(result.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

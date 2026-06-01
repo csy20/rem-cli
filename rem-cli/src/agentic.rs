@@ -158,6 +158,7 @@ pub fn run_test(path: &str) -> ToolResult {
     }
 }
 
+#[allow(dead_code)]
 pub fn run_command(cmd: &str, args: &[&str], _timeout_s: u64) -> ToolResult {
     let start = Instant::now();
     match Command::new(cmd).args(args).output() {

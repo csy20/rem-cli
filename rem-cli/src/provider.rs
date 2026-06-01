@@ -8,13 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{C_DIM, C_RESET, C_YELLOW, style};
-
-#[derive(Debug, Deserialize)]
-struct LlmStreamChunk {
-    response: Option<String>,
-    done: Option<bool>,
-}
+use crate::{C_DIM, C_YELLOW, style};
 
 #[derive(Debug, Deserialize)]
 struct LlmErrorResponse {
@@ -134,10 +128,6 @@ impl Provider {
 
     pub fn set_model(&mut self, model: String) {
         self.model = model;
-    }
-
-    pub fn set_api_key(&mut self, api_key: String) {
-        self.api_key = Some(api_key);
     }
 
     pub async fn list_models(&self) -> Result<Vec<String>> {

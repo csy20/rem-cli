@@ -280,3 +280,41 @@ pub(crate) fn is_question_about(input: &str, action_phrase: &str) -> bool {
     }
     has_question_prefix(lowered.as_str())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_code_action_for_fix() {
+        assert_eq!(classify_intent("fix this function"), TaskIntent::CodeAction);
+    }
+
+    #[test]
+    fn classify_planning_for_strategy_prompt() {
+        assert_eq!(
+            classify_intent("what's the best way to structure this backend"),
+            TaskIntent::Planning
+        );
+    }
+
+    #[test]
+    fn classify_web_needed_for_latest_release() {
+        assert_eq!(
+            classify_intent("what is the latest release of react"),
+            TaskIntent::WebNeeded
+        );
+    }
+
+    #[test]
+    fn creation_intent_ignores_question_form() {
+        assert!(!has_creation_intent("how do i create a file"));
+        assert!(has_creation_intent("create a file called app.js"));
+    }
+
+    #[test]
+    fn detects_file_paths_with_extensions() {
+        assert!(has_file_path("update src/main.rs"));
+        assert!(!has_file_path("explain how rust ownership works"));
+    }
+}
