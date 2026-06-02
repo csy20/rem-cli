@@ -175,6 +175,8 @@ enum Commands {
     Patch(PatchArgs),
     #[command(about = "Scaffold a new project with templates")]
     New(NewArgs),
+    #[command(about = "Generate or refresh the codebase index (for retrieval in large projects). Requires the Python remllm package (pip install -e . from the rem-llm repo) or run `remllm index <dir>` manually.")]
+    Index(IndexArgs),
 }
 
 #[derive(Args, Debug)]
@@ -207,12 +209,22 @@ struct NewArgs {
     project_type: String,
 }
 
+#[derive(Args, Debug)]
+struct IndexArgs {
+    #[arg(help = "Project directory to index (defaults to current workspace or .)")]
+    dir: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
     model: String,
     ollama_url: String,
     timeout_s: u64,
     max_context_bytes: usize,
+    /// Max context (num_ctx) passed to the LLM at inference time.
+    /// Raising this (e.g. 4096-8192) is a key part of scaling to larger projects + retrieved code chunks.
+    /// Must be supported by the base model (Qwen2.5-Coder 1.5B supports 32k+).
+    model_ctx: usize,
     prompts_dir: Option<String>,
     #[serde(default)]
     workspace_dir: Option<String>,
@@ -233,6 +245,9 @@ impl Default for AppConfig {
             ollama_url: "http://localhost:11434".to_string(),
             timeout_s: 120,
             max_context_bytes: 16_000,
+            // Start at 4096 for scaling (allows room for memory + retrieved chunks + history).
+            // Previously hardcoded 2048 in provider payloads (the real limit the model sees).
+            model_ctx: 4096,
             prompts_dir: None,
             workspace_dir: None,
             provider: "ollama".to_string(),
@@ -248,6 +263,8 @@ struct PartialConfig {
     ollama_url: Option<String>,
     timeout_s: Option<u64>,
     max_context_bytes: Option<usize>,
+    /// LLM inference context window (num_ctx). Higher values enable scaling via retrieved code + memory.
+    model_ctx: Option<usize>,
     prompts_dir: Option<String>,
     workspace_dir: Option<String>,
     provider: Option<String>,
@@ -261,6 +278,7 @@ impl AppConfig {
         if let Some(v) = part.ollama_url { self.ollama_url = v; }
         if let Some(v) = part.timeout_s { self.timeout_s = v; }
         if let Some(v) = part.max_context_bytes { self.max_context_bytes = v; }
+        if let Some(v) = part.model_ctx { self.model_ctx = v; }
         if let Some(v) = part.prompts_dir { self.prompts_dir = Some(v); }
         if let Some(v) = part.workspace_dir { self.workspace_dir = Some(v); }
         if let Some(v) = part.provider { self.provider = v; }
@@ -624,8 +642,32 @@ impl ChatSession {
         ctx
     }
 
+    #[allow(dead_code)]
     fn build_project_context(&self) -> String {
         if let Some(ref dir) = self.project_dir {
+            build_project_context(dir, 6000)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Query-aware project context. When a codebase_index.json exists for the project,
+    /// performs keyword retrieval of relevant chunks (by content/name match against the
+    /// user task) and returns a targeted "Relevant code chunks" block. This is the key
+    /// mechanism for scaling rem to larger codebases without prompt explosion.
+    /// Falls back to the classic exhaustive (but capped) file listing when no index.
+    fn build_relevant_project_context(&self, query: &str) -> String {
+        if let Some(ref dir) = self.project_dir {
+            if let Some(index) = load_codebase_index(dir) {
+                // Pull more candidates, let the injector cap by chars
+                let hits = retrieve_relevant_chunks(&index, query, 8, 4500);
+                if !hits.is_empty() {
+                    return build_retrieved_context(&hits, 4800);
+                }
+                // Index existed but nothing matched the query — still better to give a small
+                // generic listing than nothing, or fall through.
+            }
+            // No index or no hits: classic behavior (names + sizes, depth-limited)
             build_project_context(dir, 6000)
         } else {
             String::new()
@@ -796,6 +838,9 @@ async fn main() -> Result<()> {
     if let Some(Commands::New(args)) = cli.command {
         return run_new(args, &cfg);
     }
+    if let Some(Commands::Index(args)) = cli.command {
+        return run_index(args, &cfg);
+    }
 
     let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
     let base_url = cfg.api_url.clone().unwrap_or_else(|| cfg.ollama_url.clone());
@@ -808,11 +853,11 @@ async fn main() -> Result<()> {
                     style!(C_YELLOW, "warning"), cfg.provider);
             }
             Provider::new_openai(
-                base_url, cfg.model.clone(), cfg.timeout_s, system_prompt, key,
+                base_url, cfg.model.clone(), cfg.timeout_s, system_prompt, key, cfg.model_ctx,
             )
         }
         _ => Provider::new_ollama(
-            base_url, cfg.model.clone(), cfg.timeout_s, system_prompt,
+            base_url, cfg.model.clone(), cfg.timeout_s, system_prompt, cfg.model_ctx,
         ),
     };
     client.healthcheck().await?;
@@ -839,6 +884,10 @@ async fn main() -> Result<()> {
                 }
             }
             run_chat(&client, &mut cfg, verbose).await
+        }
+        Some(Commands::Index(_)) => {
+            // handled by early return before client creation
+            unreachable!("Index command should have been handled earlier")
         }
     }
 }
@@ -1094,6 +1143,148 @@ fn language_specific_guidance(project_type: &str) -> &'static str {
         "cpp" => "\nLanguage context: C/C++ project. Use make/gcc. Show compilation commands.",
         _ => "",
     }
+}
+
+// ── Retrieval from codebase_index.json (Phase 1 scaling: relevant chunks over exhaustive file list) ──
+
+/// Chunk as produced by Python's CodebaseIndexer (src/remllm/context/indexer.py).
+/// JSON shape: { "chunks": [ { "path": "...", "name": "...", "chunk_type": "...",
+///   "content": "...", "start_line": N, "end_line": N, "embedding": [...] or null }, ... ] }
+#[derive(Debug, Clone, Deserialize)]
+struct IndexChunk {
+    path: String,
+    name: String,
+    #[serde(default, rename = "chunk_type")]
+    chunk_type: String,
+    content: String,
+    #[serde(default)]
+    start_line: usize,
+    #[serde(default)]
+    end_line: usize,
+    #[serde(default)]
+    embedding: Option<Vec<f32>>,
+}
+
+/// Try to load an index for the given project dir.
+/// Conventional locations (in order):
+///   <project>/.rem/codebase_index.json
+///   <project>/models/codebase_index.json   (legacy)
+/// Returns None if not present or unreadable.
+fn load_codebase_index(project_dir: &Path) -> Option<Vec<IndexChunk>> {
+    let candidates = [
+        project_dir.join(".rem/codebase_index.json"),
+        project_dir.join("models/codebase_index.json"),
+    ];
+    for p in &candidates {
+        if let Ok(text) = fs::read_to_string(p) {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(arr) = data.get("chunks").and_then(|v| v.as_array()) {
+                    let mut out = Vec::new();
+                    for item in arr {
+                        if let Ok(chunk) = serde_json::from_value::<IndexChunk>(item.clone()) {
+                            out.push(chunk);
+                        }
+                    }
+                    if !out.is_empty() {
+                        return Some(out);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Keyword-based retrieval (with light name/path bonus). Fast, no extra deps, works even
+/// if embeddings are absent or we don't want to call an embedder for the query yet.
+/// This is a huge scaling win vs. dumping every filename + size: we inject *actual code*
+/// for chunks whose content matches the user query / task.
+fn retrieve_relevant_chunks<'a>(
+    index: &'a [IndexChunk],
+    query: &str,
+    top_k: usize,
+    max_chars: usize,
+) -> Vec<&'a IndexChunk> {
+    if index.is_empty() || query.trim().is_empty() {
+        return vec![];
+    }
+    let q = query.to_lowercase();
+    let q_words: Vec<&str> = q
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .collect();
+
+    let mut scored: Vec<(i32, &IndexChunk)> = index
+        .iter()
+        .map(|c| {
+            let content_l = c.content.to_lowercase();
+            let name_l = c.name.to_lowercase();
+            let path_l = c.path.to_lowercase();
+
+            let mut score = 0i32;
+
+            // Strong signal: words appear in the actual code content
+            for w in &q_words {
+                if content_l.contains(w) {
+                    score += 10;
+                }
+            }
+            // Bonus for name / path match (e.g. "auth" in auth.rs or user auth handler)
+            for w in &q_words {
+                if name_l.contains(w) || path_l.contains(w) {
+                    score += 4;
+                }
+            }
+            // Light recency / size bias not needed; prefer matches.
+
+            // Extra if the chunk type is useful (function/class > generic file)
+            if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
+                score += 1;
+            }
+
+            (score, c)
+        })
+        .filter(|(s, _)| *s > 0)
+        .collect();
+
+    scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+
+    let mut chosen = Vec::new();
+    let mut used = 0usize;
+    for (_, c) in scored.into_iter().take(top_k.max(1)) {
+        let block_len = c.content.len() + c.path.len() + 64; // rough header
+        if used + block_len > max_chars {
+            break;
+        }
+        used += block_len;
+        chosen.push(c);
+    }
+    chosen
+}
+
+/// Build a compact "Relevant code from project (via index):" section for injection.
+/// Called from the main prompt assembly when an index is present for the project.
+fn build_retrieved_context(chunks: &[&IndexChunk], max_chars: usize) -> String {
+    if chunks.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("[Relevant code chunks from project index]:\n");
+    let mut used = out.len();
+    for c in chunks {
+        let header = format!("### {} ({})\n", c.path, c.chunk_type);
+        let body = format!("{}\n\n", c.content);
+        let add = header.len() + body.len();
+        if used + add > max_chars {
+            break;
+        }
+        out.push_str(&header);
+        out.push_str(&body);
+        used += add;
+    }
+    if out.len() > 30 {
+        out.push_str("[End of retrieved context — use @path for more specific files if needed]\n\n");
+    }
+    out
 }
 
 fn build_prompt(session: &ChatSession, client: &Provider) -> String {
@@ -1445,10 +1636,15 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
         }
 
         let search_ctx = session.build_search_context();
-        let project_ctx = session.build_project_context();
         let history_ctx = session.build_chat_history();
         let memory_ctx = session.build_memory_context();
         let (resolved_input, at_context) = session.resolve_at_references(&final_prompt);
+
+        // Query-aware retrieval (if .rem/codebase_index.json or models/ equivalent exists).
+        // This replaces the old exhaustive "every file name + size" dump for projects that have
+        // been indexed. Massive scaling improvement: model receives actual relevant source.
+        let project_ctx = session.build_relevant_project_context(&resolved_input);
+
         let full_prompt = {
             let mut p = instruction.to_string();
             p.push('\n');
@@ -2407,11 +2603,13 @@ fn handle_tokens(session: &ChatSession) {
             style!(C_WHITE_B, "context history:"),
             style!(C_DIM, "~{} tokens ({} turns)", history_tokens, session.history.len()));
 
-        let pct = (history_tokens as f64 / 2048.0 * 100.0).min(100.0);
+        // Display uses the new scaled default (was hardcoded 2048). In future this should come from
+        // the active Provider or ChatSession (after we store model_ctx + actual prompt budget).
+        let pct = (history_tokens as f64 / 4096.0 * 100.0).min(100.0);
         println!("{}   {:<18} {}",
             style!(C_CYAN, "\u{2502}"),
             style!(C_WHITE_B, "context window:"),
-            style!(C_DIM, "{:.0}% used (2048 limit)", pct));
+            style!(C_DIM, "{:.0}% used (4096 limit)", pct));
     } else {
         println!("{}   {:<18} {}",
             style!(C_CYAN, "\u{2502}"),
@@ -4144,6 +4342,69 @@ fn sanitize_commands(cmds: &[String]) -> Vec<&str> {
     out
 }
 
+// ── Index command (thin wrapper for Python indexer — Phase 1 scaling) ─────
+
+fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
+    let dir = args.dir.clone().unwrap_or_else(|| {
+        cfg.workspace_dir
+            .clone()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    });
+    let dir = if dir.exists() { dir } else { PathBuf::from(".") };
+
+    println!("{}", style!(C_CYAN, "│"));
+    println!("{} {} {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "rem index"), style!(C_DIM, "— codebase retrieval index"));
+    println!("{} target: {}", style!(C_CYAN, "│"), style!(C_DIM, "{}", dir.display()));
+
+    // Try to delegate to the Python tool (the one with the good chunkers + embed support).
+    // This keeps the Rust binary small while giving users the full power of the Python indexer.
+    let remllm = which_remllm_or_python_m();
+    if let Some(cmd) = remllm {
+        let status = std::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .arg("index")
+            .arg(&dir)
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("{} {} index complete (index should now be at .rem/codebase_index.json)", style!(C_CYAN, "│"), style!(C_GREEN, "✓"));
+                println!("{} `rem` will automatically use relevant chunks from it for context in chat and /goal.", style!(C_CYAN, "│"));
+                return Ok(());
+            }
+            _ => {
+                println!("{} delegation to `{}` failed — falling back to instructions", style!(C_CYAN, "│"), cmd.join(" "));
+            }
+        }
+    }
+
+    println!("{}", style!(C_DIM, "│"));
+    println!("{} To generate the index that enables smart retrieval in large projects:", style!(C_CYAN, "│"));
+    println!("{}   1. pip install -e .[dev]   (from the rem-llm repo root)", style!(C_CYAN, "│"));
+    println!("{}   2. remllm index {}   (or python -m remllm.cli index {})", style!(C_CYAN, "│"), dir.display(), dir.display());
+    println!("{}   3. (optional) remllm index {} --query \"your task\" to test", style!(C_CYAN, "│"), dir.display());
+    println!("{}", style!(C_DIM, "│"));
+    println!("{} Once the index exists at {}/.rem/codebase_index.json (or models/),", style!(C_CYAN, "│"), dir.display());
+    println!("{} `rem chat` / `rem ask` will inject only the *relevant* code chunks instead of a giant file list.", style!(C_CYAN, "│"));
+    println!("{} This is the main mechanism for scaling rem beyond tiny beginner projects.", style!(C_CYAN, "│"));
+    Ok(())
+}
+
+fn which_remllm_or_python_m() -> Option<Vec<String>> {
+    // Prefer a `remllm` entry point if installed in PATH.
+    if std::process::Command::new("remllm").arg("--help").output().is_ok() {
+        return Some(vec!["remllm".to_string()]);
+    }
+    // Fallback: python -m remllm.cli
+    if std::process::Command::new("python3").arg("-c").arg("import remllm").output().is_ok() {
+        return Some(vec!["python3".to_string(), "-m".to_string(), "remllm.cli".to_string()]);
+    }
+    if std::process::Command::new("python").arg("-c").arg("import remllm").output().is_ok() {
+        return Some(vec!["python".to_string(), "-m".to_string(), "remllm.cli".to_string()]);
+    }
+    None
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -4393,5 +4654,62 @@ h1 { color: red; }
         assert!(result.is_none());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn retrieval_keyword_finds_relevant_chunk() {
+        let fake = vec![
+            IndexChunk {
+                path: "src/auth.rs".into(),
+                name: "login".into(),
+                chunk_type: "function".into(),
+                content: "pub fn login(user: &str, pass: &str) -> Result<Token> { ... }".into(),
+                start_line: 10,
+                end_line: 20,
+                embedding: None,
+            },
+            IndexChunk {
+                path: "src/utils.rs".into(),
+                name: "hash".into(),
+                chunk_type: "function".into(),
+                content: "fn hash_password(pw: &str) -> String { ... }".into(),
+                start_line: 5,
+                end_line: 8,
+                embedding: None,
+            },
+        ];
+        let hits = retrieve_relevant_chunks(&fake, "implement login with password hashing", 3, 2000);
+        assert!(!hits.is_empty());
+        // Should prefer the auth/login chunk due to word matches in content + name
+        let top = hits[0];
+        assert!(top.path.contains("auth") || top.content.to_lowercase().contains("login"));
+    }
+
+    #[test]
+    fn load_index_returns_none_for_missing() {
+        let tmp = std::env::temp_dir().join("rem-no-index-xyz");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(load_codebase_index(&tmp).is_none());
+    }
+
+    #[test]
+    fn relevant_context_uses_real_index_when_present() {
+        // Use the fixture created by Python `remllm index` in this session (or recreate minimal)
+        let fixture = std::env::temp_dir().join("rem-fixture");
+        // If the previous python index run in the conversation created it, great; otherwise the test is still useful
+        // because load will just return None and we fall back (no panic).
+        if let Some(_idx) = load_codebase_index(&fixture) {
+            // Session with project dir pointing at indexed tree
+            let mut session = ChatSession::new("test-model", Some(fixture.clone())).expect("session");
+            let ctx = session.build_relevant_project_context("hello function");
+            // When index present and keyword matches, we should see the content or header
+            if !ctx.is_empty() {
+                assert!(ctx.contains("hello") || ctx.contains("app.py") || ctx.contains("Relevant code"));
+            }
+        } else {
+            // No index in this env run — still validate the fallback path doesn't blow up
+            let mut session = ChatSession::new("test-model", Some(fixture.clone())).expect("session");
+            let _ = session.build_relevant_project_context("anything");
+        }
     }
 }

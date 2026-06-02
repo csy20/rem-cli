@@ -93,10 +93,14 @@ pub struct Provider {
     pub model: String,
     pub system_prompt: String,
     api_key: Option<String>,
+    /// num_ctx passed to Ollama (or max_tokens guidance for OpenAI compat).
+    /// Configurable via rem config (model_ctx). Key scaling knob: higher => model can use
+    /// project memory + retrieved relevant code chunks from indexer.
+    pub model_ctx: usize,
 }
 
 impl Provider {
-    pub fn new_ollama(base_url: String, model: String, timeout_s: u64, system_prompt: String) -> Self {
+    pub fn new_ollama(base_url: String, model: String, timeout_s: u64, system_prompt: String, model_ctx: usize) -> Self {
         Self {
             kind: ProviderKind::Ollama,
             client: Client::builder()
@@ -107,11 +111,12 @@ impl Provider {
             model,
             system_prompt,
             api_key: None,
+            model_ctx,
         }
     }
 
     pub fn new_openai(
-        base_url: String, model: String, timeout_s: u64, system_prompt: String, api_key: String,
+        base_url: String, model: String, timeout_s: u64, system_prompt: String, api_key: String, model_ctx: usize,
     ) -> Self {
         Self {
             kind: ProviderKind::OpenAI,
@@ -123,6 +128,7 @@ impl Provider {
             model,
             system_prompt,
             api_key: Some(api_key),
+            model_ctx,
         }
     }
 
@@ -207,7 +213,7 @@ impl Provider {
             "model": self.model,
             "prompt": final_prompt,
             "stream": false,
-            "options": { "num_predict": 512, "num_ctx": 2048, "num_thread": 4 },
+            "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": 4 },
             "format": {
                 "type": "object",
                 "properties": {
@@ -305,7 +311,7 @@ impl Provider {
             "model": self.model,
             "prompt": final_prompt,
             "stream": true,
-            "options": { "num_predict": 512, "num_ctx": 2048, "num_thread": 4 }
+            "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": 4 }
         });
         let resp = self.client.post(&url).json(&payload).send().await.context("failed to call Ollama")?;
         if !resp.status().is_success() {

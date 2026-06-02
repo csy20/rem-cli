@@ -99,7 +99,11 @@ class CodeChunk:
 
 class CodebaseIndexer:
     def __init__(self, index_path: Optional[Path] = None):
-        self.index_path = index_path or Path("models/codebase_index.json")
+        # Prefer .rem/ layout (co-located with memory.md) so that `rem` (Rust CLI) can
+        # discover the index automatically for retrieval at scale. models/ kept for
+        # backward compat with old pipeline runs.
+        default = Path(".rem/codebase_index.json")
+        self.index_path = index_path or default
         self.chunks: list[CodeChunk] = []
 
     def _chunk_file(self, file_path: Path) -> list[CodeChunk]:

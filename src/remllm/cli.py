@@ -341,6 +341,10 @@ def cmd_agent(args: argparse.Namespace) -> None:
 def cmd_index(args: argparse.Namespace) -> None:
     project_dir = Path(args.project_dir)
     index_path = Path(args.index_path)
+    # If user got the new .rem default (relative), resolve it inside the target project
+    # so `remllm index /path/to/bigproj` writes /path/to/bigproj/.rem/codebase_index.json
+    if str(index_path) in {".rem/codebase_index.json", "models/codebase_index.json"}:
+        index_path = project_dir / index_path
     if args.chromadb:
         from remllm.indexing import index_to_chromadb
 
@@ -699,8 +703,8 @@ def main():
     idx.add_argument("project_dir", help="Project directory to index")
     idx.add_argument(
         "--index-path",
-        default="models/codebase_index.json",
-        help="Output index JSON path",
+        default=".rem/codebase_index.json",
+        help="Output index JSON path (default: .rem/ so the Rust `rem` CLI discovers it automatically)",
     )
     idx.add_argument(
         "--query", default=None, help="Optional query to search after indexing"
@@ -712,7 +716,7 @@ def main():
     sr = sub.add_parser("search", help="Search indexed codebase")
     sr.add_argument("query", help="Search query")
     sr.add_argument(
-        "--index-path", default="models/codebase_index.json", help="Index JSON path"
+        "--index-path", default=".rem/codebase_index.json", help="Index JSON path (prefers .rem/ layout for `rem` CLI)"
     )
     sr.add_argument("--top-k", type=int, default=5, help="Number of results")
     sr.add_argument("--raw", action="store_true", help="Output raw JSON")
