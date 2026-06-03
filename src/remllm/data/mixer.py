@@ -39,10 +39,13 @@ def mix_datasets(
 
     total_ratio = sum(ratios.get(k, 0) for k in pool)
     if total_ratio == 0:
+        if not pool:
+            return []
         max_size = max(len(v) for v in pool.values())
         combined = []
         for rows in pool.values():
             combined.extend(rows[:max_size])
+        random.shuffle(combined)
         return combined
 
     max_requested = 0

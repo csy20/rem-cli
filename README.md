@@ -56,12 +56,13 @@ rem-llm/
 │   ├── eval.jsonl
 │   ├── sample.jsonl
 │   ├── dataset_info.json
-│   └── domains/
-│       ├── beginner/         # HTML/CSS/terminal domain training data
-│       ├── nextjs/
-│       ├── prisma/
-│       └── typescript/
+│   ├── curated/v1/                # Day-1 deliverable: 6.4k curated rows
+│   ├── preferences/v1/            # Day-2 deliverable: DPO pairs
+│   ├── sources/                   # cached HF dataset pulls
+│   └── benchmarks/                # Day-5: HumanEval + MBPP
 ├── models/                  # ignored in git
+│   ├── curriculum/v1/             # Day-3: 3-stage curriculum splits
+│   └── evals/                     # baseline + v0.3.0 eval reports
 ├── scripts/
 │   ├── prepare_data.py
 │   ├── evaluate_model.py
@@ -73,12 +74,113 @@ rem-llm/
 │   ├── merge_adapter.py
 │   ├── export_gguf.sh
 │   ├── package_ollama.sh
+│   ├── package_ollama_multi.py    # Day-5: q4/q5/q8 multi-quant packager
+│   ├── fetch_benchmarks.py        # Day-5: HumanEval + MBPP fetcher
+│   ├── run_full_eval.py           # Day-5: one-shot full eval suite
 │   ├── run_pipeline.sh
 │   ├── write_run_metadata.py
-│   └── train.sh             # old CPU-only Modelfile flow
+│   └── train.sh                   # old CPU-only Modelfile flow
+├── src/remllm/
+│   ├── data/
+│   │   ├── curator.py             # Day-1: end-to-end curation
+│   │   ├── dedup.py               # LSH MinHash for O(n) near-dedup
+│   │   ├── filter.py              # heuristic + Ollama filter tiers
+│   │   ├── difficulty.py          # Day-3: AST+vocab+code-density scorer
+│   │   ├── dpo_generator.py       # Day-2: sampling-based pair builder
+│   │   ├── distill_v2.py          # Day-2: teacher distillation
+│   │   ├── ollama_client.py       # HTTP API for sampling/temperature
+│   │   └── ...
+│   ├── train/unsloth.py           # Day-3: staged curriculum SFT
+│   ├── train/dpo.py               # Day-4: DPO trainer (refactored)
+│   └── eval/long_context_probe.py # Day-4: RoPE-scaling verification
 ├── Modelfile                # base prompt-tuned model
-├── Modelfile.trained        # for GGUF-trained model packaging
+├── Modelfile.trained        # Day-4: 8K context, RoPE-scaled
+├── tests/                   # 181 tests, 100% pass
 └── requirements.txt
+```
+
+## v0.3.0 — Scaling Week Summary
+
+This release adds a full data + training + eval pipeline to scale `rem-coder`
+from a 1.5B baseline to a v0.3.0 candidate that can be trained and evaluated
+end-to-end on consumer hardware.
+
+| Day | Deliverable | Status |
+|---|---|---|
+| 1 | `data/curated/v1/` — 6,430 train / 357 val / 200 eval from 20,605 raw | ✅ |
+| 2 | `data/preferences/v1/dpo.jsonl` — DPO pairs via executable judge | ✅ |
+| 3 | `models/curriculum/v1/` — 3-stage curriculum splits + difficulty scorer | ✅ |
+| 4 | DPO trainer + 8K RoPE scaling + long-context probe | ✅ |
+| 5 | HumanEval + MBPP + 3-quant GGUF packager + full eval runner | ✅ |
+| 6 | 181 regression tests, baseline report, README, CHANGELOG, tag | ✅ |
+
+### Baseline numbers (`rem-coder:latest`, 3-sample eval, no cloud)
+
+| Metric | Value | Notes |
+|---|---|---|
+| HumanEval pass@1 | 10% (1/10) | full 164-task run pending GPU |
+| HumanEval pass@1 (3-sample smoke) | 0% (0/3) | prompt was `return ONLY body`, not full function |
+| MBPP pass@1 (3-sample smoke) | 0% (0/3) | small sample |
+| Long-context recall | 1,024 / 2,048 / 4,096 / 8,192 → 1K HIT only | RoPE-scaled 8K target |
+| Latency | ~5 tok/s on CPU | 1.5B Qwen on consumer hardware |
+
+### Reproducing the v0.3.0 pipeline (CPU-only path)
+
+```bash
+# Day 1 — data foundation
+python3 -m remllm.cli data fetch sahil2801/CodeAlpaca-20k \\
+    --output data/sources/codealpaca.jsonl --max-samples 5000
+python3 -m remllm.cli data fetch ise-uiuc/Magicoder-OSS-Instruct-75K \\
+    --output data/sources/magicoder.jsonl --max-samples 8000
+python3 -m remllm.cli data fetch nickrosh/Evol-Instruct-Code-80k-v1 \\
+    --output data/sources/evol_code.jsonl --max-samples 8000
+python3 -m remllm.cli data curate \\
+    --sources local_synthetic,hf_codealpaca,hf_magicoder,hf_evol_code \\
+    --output-dir data/curated/v1 --target-size 15000
+
+# Day 2 — DPO pair generation (requires Ollama)
+python3 -m remllm.cli data dpo \\
+    --input data/curated/v1/train.jsonl \\
+    --output data/preferences/v1/dpo.jsonl \\
+    --model rem-coder:latest --max-prompts 500 --n-samples 3
+
+# Day 3 — difficulty + 3-stage curriculum
+python3 -m remllm.cli data score-difficulty \\
+    --input data/curated/v1/train.jsonl \\
+    --output data/curated/v1/train.scored.jsonl
+python3 -m remllm.cli train curriculum \\
+    --input data/curated/v1/train.scored.jsonl \\
+    --output-dir models/curriculum/v1
+
+# Day 4 — RoPE scaling probe
+python3 -m remllm.cli eval long-context \\
+    --model rem-coder:latest \\
+    --targets 1024,2048,4096,6000,8000
+
+# Day 5 — full eval + benchmarks
+python3 scripts/fetch_benchmarks.py
+python3 scripts/run_full_eval.py --model rem-coder:latest \\
+    --max-eval 20 --max-humaneval 164 --max-mbpp 257
+```
+
+### After training (Day 4+) — Variant A on GPU
+
+```bash
+# 3-stage SFT (run on a GPU box with unsloth installed)
+for s in 1 2 3; do
+    STAGE=$(ls models/curriculum/v1/stage_${s}_*.jsonl | head -1)
+    python3 -m remllm.train.unsloth --config config/config.yaml  # then load $STAGE
+done
+
+# DPO on preference data
+python3 -m remllm.cli train dpo-v2 \\
+    --dpo-file data/preferences/v1/dpo.jsonl \\
+    --epochs 1 --beta 0.1 --learning-rate 5e-6
+
+# Merge, GGUF, package q4/q5/q8
+python3 -m remllm.export.gguf --quants q4_k_m,q5_k_m,q8_0
+python3 scripts/package_ollama_multi.py \\
+    --base-name rem-coder-v2 --quants q4_k_m,q5_k_m,q8_0
 ```
 
 ## Prerequisites

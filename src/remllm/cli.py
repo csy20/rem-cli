@@ -158,6 +158,168 @@ def cmd_data_augment(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_data_curate(args: argparse.Namespace) -> None:
+    from remllm.data.curator import CurateConfig, curate
+
+    sources = [s.strip() for s in args.sources.split(",") if s.strip()]
+    source_limits: dict[str, int] = {}
+    if args.source_limits:
+        for pair in args.source_limits.split(","):
+            if ":" in pair:
+                name, lim = pair.split(":", 1)
+                source_limits[name.strip()] = int(lim.strip())
+
+    cfg = CurateConfig(
+        sources=sources,
+        output_dir=Path(args.output_dir),
+        cache_dir=Path(args.cache_dir) if args.cache_dir else None,
+        target_train_size=args.target_size,
+        train_split=args.train_split,
+        val_split=args.val_split,
+        eval_split=args.eval_split,
+        seed=args.seed,
+        near_dedup_threshold=args.near_threshold,
+        heuristic_threshold=args.heuristic_threshold,
+        source_limits=source_limits,
+    )
+    curate(cfg)
+
+
+def cmd_data_sources_list(_args: argparse.Namespace) -> None:
+    from remllm.data.curator import list_sources
+
+    for s in list_sources():
+        print(f"{s['name']}\t{s['default_limit']}\t{s['description']}")
+
+
+def cmd_data_fetch(args: argparse.Namespace) -> None:
+    from remllm.data.curator import fetch_hf_dataset
+
+    n = fetch_hf_dataset(
+        args.dataset,
+        Path(args.output),
+        split=args.split,
+        max_samples=args.max_samples,
+        config=args.config or None,
+    )
+    if n == 0:
+        print(f"Failed to fetch {args.dataset}. Install `datasets` and check network.")
+    else:
+        print(f"Fetched {n} rows -> {args.output}")
+
+
+def cmd_data_dpo(args: argparse.Namespace) -> None:
+    from remllm.data.dpo_generator import DPOPairConfig, generate_dpo_pairs
+
+    cfg = DPOPairConfig(
+        input_path=Path(args.input),
+        output_path=Path(args.output),
+        generator_model=args.model,
+        n_samples=args.n_samples,
+        temperature=args.temperature,
+        max_prompts=args.max_prompts,
+        seed=args.seed,
+        min_score_gap=args.min_gap,
+        timeout_s=args.timeout_s,
+        base_url=args.ollama_url,
+        num_predict=args.num_predict,
+        skip_non_code=args.code_only,
+        require_exec_judge=args.require_exec,
+    )
+    generate_dpo_pairs(cfg)
+
+
+def cmd_data_distill_v2(args: argparse.Namespace) -> None:
+    from remllm.data.distill_v2 import DistillConfig, distill_dataset_v2
+
+    cfg = DistillConfig(
+        input_path=Path(args.input),
+        output_path=Path(args.output),
+        teacher_model=args.teacher,
+        student_model=args.student,
+        n_samples=args.n_samples,
+        temperature=args.temperature,
+        max_samples=args.max_samples,
+        seed=args.seed,
+        timeout_s=args.timeout_s,
+        base_url=args.ollama_url,
+        num_predict=args.num_predict,
+    )
+    distill_dataset_v2(cfg)
+
+
+def cmd_data_score_difficulty(args: argparse.Namespace) -> None:
+    from remllm.data.difficulty import annotate_difficulty
+
+    stats = annotate_difficulty(
+        Path(args.input),
+        Path(args.output),
+        adaptive=not args.fixed_bands,
+    )
+    print(json.dumps(stats, indent=2))
+
+
+def cmd_train_curriculum(args: argparse.Namespace) -> None:
+    """Split data into 3 curriculum stages and write per-stage JSONLs + manifest.
+
+    The actual GPU training is then invoked per-stage:
+        for s in 1 2 3; do python3 -m remllm.train.unsloth --config ... ; done
+    """
+    from remllm.data.loader import load_jsonl
+    from remllm.train.unsloth import split_curriculum_stages
+
+    rows = load_jsonl(Path(args.input))
+    manifest = split_curriculum_stages(
+        rows,
+        Path(args.output_dir),
+        stages=tuple(args.stages.split(",")),
+        seed=args.seed,
+    )
+    manifest_path = Path(args.output_dir) / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"Wrote curriculum manifest → {manifest_path}")
+    print(json.dumps(manifest, indent=2))
+
+
+def cmd_train_dpo_v2(args: argparse.Namespace) -> None:
+    """Run DPO training on the v2 preference dataset.
+
+    The output is `models/rem-coder-dpo/` (a LoRA adapter) that can be
+    merged on top of the base SFT adapter from Day 3.
+    """
+    from remllm.config import load_config_dict
+    from remllm.train.dpo import train_dpo
+
+    config_path = Path(args.config)
+    cfg = load_config_dict(config_path)
+    cfg.setdefault("training", {})["dpo_enabled"] = True
+    cfg["data"]["dpo_file"] = args.dpo_file
+    if "dpo_output_dir" not in cfg["training"]:
+        cfg["training"]["dpo_output_dir"] = "models/rem-coder-dpo"
+    cfg["training"]["dpo_epochs"] = args.epochs
+    cfg["training"]["dpo_beta"] = args.beta
+    cfg["training"]["dpo_learning_rate"] = args.learning_rate
+    cfg["training"]["dpo_learning_rate"] = args.learning_rate
+    cfg["data"]["train_file"] = args.dpo_file
+    if args.run_id:
+        os.environ["RUN_ID"] = args.run_id
+    train_dpo(config_path, run_id=args.run_id)
+
+
+def cmd_eval_long_context(args: argparse.Namespace) -> None:
+    """Run the long-context RoPE probe (Day-4 verification)."""
+    from remllm.eval.long_context_probe import run_probe_suite
+
+    targets = [int(t) for t in args.targets.split(",") if t.strip()]
+    run_probe_suite(
+        model=args.model,
+        token_targets=targets,
+        timeout_s=args.timeout_s,
+        ollama_url=args.ollama_url,
+        output_path=Path(args.report) if args.report else None,
+    )
+
+
 def cmd_data_scrape(args: argparse.Namespace) -> None:
     from remllm.data.scraper import scrape
 
@@ -591,6 +753,44 @@ def main():
     dp_aug.add_argument("--output", required=True, help="Output JSONL path")
     dp_aug.add_argument("--factor", type=int, default=3, help="Augmentation factor")
     dp_aug.add_argument("--seed", type=int, default=42)
+    dp_curate = dp_sub.add_parser(
+        "curate",
+        help="Build the curated training set v1 from registered sources (Day-1 deliverable)",
+    )
+    dp_curate.add_argument(
+        "--sources",
+        default="local_synthetic,hf_codealpaca,hf_magicoder,hf_evol_code",
+        help="Comma-separated source names (see `remllm data sources list`)",
+    )
+    dp_curate.add_argument(
+        "--source-limits",
+        default="",
+        help="Per-source row caps, e.g. 'hf_codealpaca:20000,hf_magicoder:30000'",
+    )
+    dp_curate.add_argument("--output-dir", default="data/curated/v1")
+    dp_curate.add_argument("--cache-dir", default="data/sources")
+    dp_curate.add_argument("--target-size", type=int, default=30000)
+    dp_curate.add_argument("--train-split", type=float, default=0.9)
+    dp_curate.add_argument("--val-split", type=float, default=0.05)
+    dp_curate.add_argument("--eval-split", type=float, default=0.05)
+    dp_curate.add_argument("--seed", type=int, default=42)
+    dp_curate.add_argument("--near-threshold", type=float, default=0.85)
+    dp_curate.add_argument("--heuristic-threshold", type=float, default=5.0)
+    dp_sources = dp_sub.add_parser("sources", help="List registered data sources")
+    dp_sources_sub = dp_sources.add_subparsers(dest="sources_command")
+    dp_sources_list = dp_sources_sub.add_parser("list", help="List available sources")
+    dp_fetch = dp_sub.add_parser(
+        "fetch", help="Download a HuggingFace dataset to data/sources/"
+    )
+    dp_fetch.add_argument(
+        "dataset", help="HF dataset id, e.g. sahil2801/CodeAlpaca-20k"
+    )
+    dp_fetch.add_argument("--output", required=True, help="Output JSONL path")
+    dp_fetch.add_argument("--split", default="train")
+    dp_fetch.add_argument("--max-samples", type=int, default=0)
+    dp_fetch.add_argument(
+        "--config", default="", help="Optional HF dataset config name"
+    )
     dp_scrape = dp_sub.add_parser("scrape", help="Scrape code from public sources")
     dp_scrape.add_argument(
         "--sources", default="github_trending", help="Comma-separated source names"
@@ -599,6 +799,65 @@ def main():
     dp_scrape.add_argument("--count", type=int, default=10, help="Number of results")
     dp_scrape.add_argument(
         "--output", default="data/scraped.jsonl", help="Output JSONL path"
+    )
+    dp_dpo = dp_sub.add_parser(
+        "dpo",
+        help="Generate DPO preference pairs via sampling + quality+exec judge (Day-2)",
+    )
+    dp_dpo.add_argument(
+        "--input", default="data/curated/v1/train.jsonl", help="Source prompts JSONL"
+    )
+    dp_dpo.add_argument(
+        "--output", default="data/preferences/v1/dpo.jsonl", help="Output DPO pairs"
+    )
+    dp_dpo.add_argument("--model", default="qwen2.5-coder:1.5b", help="Generator model")
+    dp_dpo.add_argument("--n-samples", type=int, default=4)
+    dp_dpo.add_argument("--temperature", type=float, default=0.8)
+    dp_dpo.add_argument("--max-prompts", type=int, default=10000)
+    dp_dpo.add_argument("--seed", type=int, default=42)
+    dp_dpo.add_argument(
+        "--min-gap", type=float, default=0.1, help="Min chosen-rejected score gap"
+    )
+    dp_dpo.add_argument("--timeout-s", type=int, default=60)
+    dp_dpo.add_argument("--num-predict", type=int, default=512)
+    dp_dpo.add_argument(
+        "--code-only", action="store_true", help="Skip non-code prompts"
+    )
+    dp_dpo.add_argument(
+        "--require-exec",
+        action="store_true",
+        help="Only keep pairs where chosen passes exec check and rejected fails",
+    )
+    dp_dpo.add_argument(
+        "--ollama-url", default="http://localhost:11434", help="Ollama base URL"
+    )
+    dp_distill = dp_sub.add_parser(
+        "distill-v2",
+        help="Generate teacher-distilled completions with temperature sampling",
+    )
+    dp_distill.add_argument("--input", required=True, help="Source prompts JSONL")
+    dp_distill.add_argument("--output", required=True, help="Output JSONL path")
+    dp_distill.add_argument("--teacher", default="qwen2.5-coder:7b")
+    dp_distill.add_argument("--student", default="qwen2.5-coder:1.5b")
+    dp_distill.add_argument("--n-samples", type=int, default=1)
+    dp_distill.add_argument("--temperature", type=float, default=0.7)
+    dp_distill.add_argument("--max-samples", type=int, default=0)
+    dp_distill.add_argument("--seed", type=int, default=42)
+    dp_distill.add_argument("--timeout-s", type=int, default=120)
+    dp_distill.add_argument("--num-predict", type=int, default=1024)
+    dp_distill.add_argument("--ollama-url", default="http://localhost:11434")
+    dp_score = dp_sub.add_parser(
+        "score-difficulty",
+        help="Annotate each row with a difficulty score + band (Day-3)",
+    )
+    dp_score.add_argument("--input", required=True, help="Input JSONL")
+    dp_score.add_argument(
+        "--output", required=True, help="Output JSONL with difficulty field"
+    )
+    dp_score.add_argument(
+        "--fixed-bands",
+        action="store_true",
+        help="Use fixed 0.33/0.66 bands (default: adaptive percentiles)",
     )
 
     # eval
@@ -652,6 +911,19 @@ def main():
     eq_all.add_argument("--output-dir", default="models/evals")
     eq_all.add_argument("--prefix", default="eval")
     eq_all.add_argument("--timeout-s", type=int, default=30)
+    eq_lc = eq_sub.add_parser(
+        "long-context",
+        help="Run the long-context RoPE probe (Day-4 verification)",
+    )
+    eq_lc.add_argument("--model", required=True)
+    eq_lc.add_argument(
+        "--targets",
+        default="1024,2048,4096,6000,8000",
+        help="Comma-separated token sizes to probe",
+    )
+    eq_lc.add_argument("--timeout-s", type=int, default=180)
+    eq_lc.add_argument("--ollama-url", default="http://localhost:11434")
+    eq_lc.add_argument("--report", default="")
 
     # compare
     cmp = sub.add_parser("compare", help="Compare baseline and post-train reports")
@@ -667,6 +939,34 @@ def main():
     tr_qlora.add_argument("--config", default="config/config.yaml")
     tr_grpo = tr_sub.add_parser("grpo", help="Run GRPO reasoning training")
     tr_grpo.add_argument("--config", default="config/config.yaml")
+    tr_curriculum = tr_sub.add_parser(
+        "curriculum",
+        help="Split data into 3 staged curriculum JSONLs (Day-3 deliverable)",
+    )
+    tr_curriculum.add_argument("--input", required=True, help="Scored training JSONL")
+    tr_curriculum.add_argument(
+        "--output-dir",
+        default="models/curriculum/v1",
+        help="Where to write stage JSONLs",
+    )
+    tr_curriculum.add_argument(
+        "--stages",
+        default="easy,intermediate,advanced",
+        help="Comma-separated stage names",
+    )
+    tr_curriculum.add_argument("--seed", type=int, default=42)
+    tr_dpo = tr_sub.add_parser(
+        "dpo-v2",
+        help="Run DPO training on Day-2 preference data (Day-4 deliverable)",
+    )
+    tr_dpo.add_argument("--config", default="config/config.yaml")
+    tr_dpo.add_argument(
+        "--dpo-file", default="data/preferences/v1/dpo.jsonl", help="Preference JSONL"
+    )
+    tr_dpo.add_argument("--epochs", type=int, default=1)
+    tr_dpo.add_argument("--beta", type=float, default=0.1)
+    tr_dpo.add_argument("--learning-rate", type=float, default=5e-6)
+    tr_dpo.add_argument("--run-id", default="")
     tr_distill = tr_sub.add_parser("distill", help="Run knowledge distillation")
     tr_distill.add_argument("input", help="Input JSONL with instructions")
     tr_distill.add_argument("--output", required=True, help="Output JSONL path")
@@ -716,7 +1016,9 @@ def main():
     sr = sub.add_parser("search", help="Search indexed codebase")
     sr.add_argument("query", help="Search query")
     sr.add_argument(
-        "--index-path", default=".rem/codebase_index.json", help="Index JSON path (prefers .rem/ layout for `rem` CLI)"
+        "--index-path",
+        default=".rem/codebase_index.json",
+        help="Index JSON path (prefers .rem/ layout for `rem` CLI)",
     )
     sr.add_argument("--top-k", type=int, default=5, help="Number of results")
     sr.add_argument("--raw", action="store_true", help="Output raw JSON")
@@ -761,6 +1063,16 @@ def main():
             "mix": cmd_data_mix,
             "augment": cmd_data_augment,
             "scrape": cmd_data_scrape,
+            "curate": cmd_data_curate,
+            "sources": lambda a2: {
+                "list": cmd_data_sources_list,
+            }.get(
+                str(getattr(a2, "sources_command", "") or "list"),
+                cmd_data_sources_list,
+            )(a2),
+            "fetch": cmd_data_fetch,
+            "dpo": cmd_data_dpo,
+            "distill-v2": cmd_data_distill_v2,
         }.get(str(getattr(a, "data_command", "") or ""), lambda _: dp.print_help())(a),
         "eval": lambda a: {
             "quality": cmd_eval_quality,
@@ -770,6 +1082,7 @@ def main():
             "typescript": cmd_eval_typescript,
             "all": cmd_eval_all,
             "benchmark": cmd_eval_benchmark,
+            "long-context": cmd_eval_long_context,
         }.get(str(getattr(a, "eval_command", "") or ""), lambda _: eq.print_help())(a),
         "compare": cmd_compare,
         "index": cmd_index,
@@ -779,6 +1092,8 @@ def main():
             "qlora": cmd_train,
             "grpo": cmd_train_grpo,
             "distill": cmd_train_distill,
+            "curriculum": cmd_train_curriculum,
+            "dpo-v2": cmd_train_dpo_v2,
         }.get(str(getattr(a, "train_command", "") or "qlora"), cmd_train)(a),
         "merge": cmd_merge,
         "export": lambda a: {"gguf": cmd_export_gguf}.get(

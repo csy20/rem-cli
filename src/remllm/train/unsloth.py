@@ -15,6 +15,7 @@ import json
 import os
 import random
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -33,6 +34,12 @@ def _detect_report_to(config: dict) -> list[str]:
 
 
 def _apply_curriculum(rows: list[dict], config: dict) -> list[dict]:
+    """Sort rows by difficulty for a single-pass curriculum.
+
+    For staged training (3 separate runs), use `split_curriculum_stages`
+    which writes per-stage JSONL files and a manifest. The SFT trainer can
+    then be called once per stage with a stage-specific config.
+    """
     stages = config.get("curriculum_stages", ["easy", "intermediate", "advanced"])
     if not config.get("curriculum", False) or not stages:
         return rows
@@ -40,6 +47,53 @@ def _apply_curriculum(rows: list[dict], config: dict) -> list[dict]:
     rows.sort(key=lambda r: stage_order.get(r.get("difficulty", ""), 99))
     print(f"Curriculum stages: {' → '.join(stages)}")
     return rows
+
+
+def split_curriculum_stages(
+    rows: list[dict],
+    output_dir: Path,
+    stages: list[str] | tuple[str, ...] = ("easy", "intermediate", "advanced"),
+    seed: int = 42,
+) -> dict:
+    """Split rows by difficulty band and write per-stage JSONL files.
+
+    Each stage progressively includes more difficulty:
+      stage 1 (easy)            : only easy rows
+      stage 2 (intermediate)    : easy + intermediate
+      stage 3 (advanced)        : easy + intermediate + advanced
+
+    Returns a manifest dict with per-stage row counts and output paths.
+    """
+    import random
+    from collections import Counter
+    from remllm.data.loader import write_jsonl
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rng = random.Random(seed)
+    difficulty_counts = Counter(r.get("difficulty", "easy") for r in rows)
+    cumulative: list[str] = []
+    manifest_stages: list[dict] = []
+    for i, stage in enumerate(stages):
+        cumulative.append(stage)
+        stage_rows = [r for r in rows if r.get("difficulty", "easy") in cumulative]
+        rng.shuffle(stage_rows)
+        stage_path = output_dir / f"stage_{i + 1}_{stage}.jsonl"
+        write_jsonl(stage_path, stage_rows)
+        manifest_stages.append(
+            {
+                "stage": i + 1,
+                "name": stage,
+                "includes": list(cumulative),
+                "rows": len(stage_rows),
+                "path": str(stage_path),
+            }
+        )
+        print(f"  Stage {i + 1} ({stage}): {len(stage_rows)} rows → {stage_path}")
+    return {
+        "stages": manifest_stages,
+        "difficulty_distribution": dict(difficulty_counts),
+        "output_dir": str(output_dir),
+    }
 
 
 def train_unsloth(config_path: Path) -> None:

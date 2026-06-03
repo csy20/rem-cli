@@ -16,18 +16,23 @@ data:
   train_split: 0.9
   max_length: 4096
   pack_sequences: true
-  rope_scaling: false
+  rope_scaling: true
   rope_scaling_factor: 2.0
   rope_scaling_type: "linear"
   deduplicate: true
   perplexity_filter: false
   perplexity_threshold: 5.0
+  # Day-1 curated data (v0.3.0+)
+  curated_dir: "data/curated/v1"
+  # Day-2 preference data (v0.3.0+)
+  dpo_file: "data/preferences/v1/dpo.jsonl"
 
 training:
   backend: "unsloth"
   output_dir: "models/rem-coder-lora"
   merged_output_dir: "models/rem-coder-merged"
   grpo_output_dir: "models/rem-coder-grpo"
+  dpo_output_dir: "models/rem-coder-dpo"
   epochs: 2
   learning_rate: 0.00012
   per_device_train_batch_size: 2
@@ -46,10 +51,15 @@ training:
   fim_rate: 0.8
   dynamic_quantization: false
   offload_gradient_checkpointing: false
-  curriculum: false
+  curriculum: true
   curriculum_stages: ["easy", "intermediate", "advanced"]
   save_total_limit: 3
   logging_steps: 10
+  # Day-4 DPO settings
+  dpo_beta: 0.1
+  dpo_learning_rate: 5.0e-6
+  dpo_epochs: 1
+  dpo_enabled: false
 
 evaluation:
   baseline_report: "models/evals/baseline.json"
