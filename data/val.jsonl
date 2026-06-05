@@ -1,1 +1,0 @@
-{"instruction": "Refactor this JavaScript function to handle empty input safely.", "input": "function avg(arr){ return arr.reduce((a,b)=>a+b,0)/arr.length }", "output": "function avg(arr) {\n  if (!Array.isArray(arr) || arr.length === 0) return 0;\n  const sum = arr.reduce((a, b) => a + b, 0);\n  return sum / arr.length;\n}"}

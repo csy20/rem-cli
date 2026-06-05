@@ -1,5 +1,12 @@
 venv/
-models/
 __pycache__/
 *.pyc
-*.log
+
+# Rust
+rem-cli/target/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+.DS_Store

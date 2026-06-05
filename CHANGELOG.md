@@ -1,13 +1,40 @@
 # Changelog
 
-All notable changes to rem-llm are documented here. Versions follow
+All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] — Scaling Week
+## [Unreleased]
 
-A full data + training + eval pipeline that scales `rem-coder` from a 1.5B
-baseline to a v0.3.0 candidate. All code is wired and tested; training
-itself needs a GPU to fully validate.
+### Removed
+
+- **Python training pipeline** — the entire QLoRA fine-tuning, data
+  curation, GGUF export, and eval harness that previously lived at the
+  repo root has been removed. The repo is now exclusively the `rem`
+  Rust CLI (`rem-cli/`). The CLI is fully self-contained: it talks to
+  Ollama and does not need any Python tooling to run.
+
+  Specifically deleted:
+  - `src/remllm/` (Python package: data, train, eval, context, export, cli)
+  - `scripts/` (prepare_data, train_*, merge_adapter, export_gguf,
+    package_ollama*, fetch_benchmarks, run_full_eval, run_pipeline, etc.)
+  - `tests/` (181 pytest cases)
+  - `data/` (raw, train, val, eval, sources, curated, preferences, domains)
+  - `models/` (curriculum, evals, experiments, codebase_index.json)
+  - `config/` (config.yaml, llamafactory_qlora.yaml, domains/)
+  - `Modelfile`, `Modelfile.trained`
+  - `pyproject.toml`, `requirements.txt`
+
+### Changed
+
+- `README.md` rewritten to focus on `rem` CLI install / usage only.
+- `CHANGELOG.md` older entries (v0.3.0 / v0.2.0) preserved below for
+  history; they describe the removed Python pipeline.
+
+## [0.3.0] — Scaling Week (REMOVED)
+
+A full data + training + eval pipeline that scaled `rem-coder` from a
+1.5B baseline to a v0.3.0 candidate. This release has been removed
+from the repo; kept here for historical reference only.
 
 ### Added
 
@@ -81,6 +108,6 @@ itself needs a GPU to fully validate.
   the existing model returns the whole function. Full eval on a 164-task
   pass is the next-step measurement.
 
-## [0.2.0] — Earlier releases
+## [0.2.0] — Earlier releases (REMOVED)
 
 See git history for the pre-pipeline state.

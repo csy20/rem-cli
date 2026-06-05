@@ -6,42 +6,7 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  PYTHON_VERSION: "3.11"
-
 jobs:
-  python:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: install deps
-        run: |
-          pip install -e ".[dev]"
-          pip install ruff pyright
-
-      - name: lint (ruff)
-        run: ruff check src/ tests/ scripts/
-
-      - name: type check (pyright)
-        run: pyright src/ || true
-
-      - name: test with coverage
-        run: pytest tests/ -v --tb=short --cov=src/remllm --cov-report=term --cov-report=xml
-
-      - name: upload coverage
-        uses: codecov/codecov-action@v5
-        if: github.event_name == 'push'
-        with:
-          files: coverage.xml
-          flags: python
-          fail_ci_if_error: false
-
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -67,28 +32,3 @@ jobs:
       - name: build
         working-directory: rem-cli
         run: cargo build --release
-
-  integration:
-    needs: [python]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: install deps
-        run: pip install -e ".[dev]"
-
-      - name: integration test (data pipeline)
-        run: |
-          python3 -m remllm.cli data generate --domain beginner --output /tmp/test_data.jsonl
-          python3 -m remllm.cli data prepare \
-            --config config/domains/beginner_web_cli.yaml \
-            --raw-file /tmp/test_data.jsonl \
-            --output-dir /tmp/test_prep/ \
-            --force 2>&1 || true
-          echo "Integration smoke test passed"

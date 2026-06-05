@@ -1,1 +1,0 @@
-{"instruction": "Write CSS for a centered container with max width and readable typography", "input": "Container max width 900px and centered horizontally.", "output": "body {\n  margin: 0;\n  font-family: sans-serif;\n  line-height: 1.6;\n}\n\n.container {\n  max-width: 900px;\n  margin: 0 auto;\n  padding: 16px;\n}"}

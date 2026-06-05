@@ -1,3 +1,0 @@
-{"instruction": "Write a Python function to check if a string is a palindrome", "input": "", "output": "def is_palindrome(s):\n    return s == s[::-1]"}
-{"instruction": "Create a React component for a button", "input": "", "output": "function Button({ onClick, children }) {\n  return <button onClick={onClick}>{children}</button>;\n}"}
-{"instruction": "Write a SQL query to find duplicate emails", "input": "table: users", "output": "SELECT email, COUNT(*) as count FROM users GROUP BY email HAVING count > 1"}
