@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added
+
+- `/find <query>` — in-project text search. Walks the project (skipping
+  `node_modules`, `target`, `.git`, `dist`, `build`, `.rem`, lock files,
+  and common binary suffixes), returns matching lines with one-based
+  `path:line:column`. Caps at 500 matches / 8 KiB per file. Pure local,
+  no LLM, no network. New module `rem-cli/src/find.rs` + integration
+  test `rem-cli/tests/find.rs`.
+
 ### Removed
 
 - **Python training pipeline** — the entire QLoRA fine-tuning, data

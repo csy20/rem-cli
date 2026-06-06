@@ -55,6 +55,12 @@ pub const REGISTRY: &[Command] = &[
         handler: cmd_clear,
     },
     Command {
+        name: "/find",
+        description: "search text inside the project",
+        shortcut: "f",
+        handler: cmd_find_usage,
+    },
+    Command {
         name: "/save",
         description: "save session to file",
         shortcut: "s",
@@ -224,6 +230,15 @@ fn cmd_clear() {
     theme::println(&format!(
         "  {}",
         theme::paint(&t.accent, "History cleared.", true)
+    ));
+}
+
+fn cmd_find_usage() {
+    let t = theme::active();
+    theme::println(&format!(
+        "  {} {}",
+        theme::paint(&t.accent, "▌ usage:", true),
+        theme::paint(&t.text_muted, "/find <query>", false)
     ));
 }
 

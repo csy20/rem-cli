@@ -85,6 +85,7 @@ rem chat
 | `/dir <path>` | Set project workspace |
 | `/files` | List project file tree |
 | `/search <query>` | Search the web (DuckDuckGo) |
+| `/find <query>` | Search text inside the project (skips node_modules, target, .git) |
 | `/diff` | Compare generated vs existing files |
 | `/review` | AI code review of generated code |
 | `/lint [file]` | Run linter on generated files |

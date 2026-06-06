@@ -1,0 +1,415 @@
+// ── find.rs ──
+//
+// Pure in-project text search used by the `/find <query>` slash command.
+// No LLM, no network, no async — walks the project tree with `walkdir`,
+// reads each file with a size cap, and returns every line that contains
+// the query as a substring. Hidden / build / lock directories are skipped
+// to keep results useful for a beginner audience.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use walkdir::WalkDir;
+
+const DEFAULT_MAX_FILE_BYTES: u64 = 8 * 1024;
+const DEFAULT_MAX_RESULTS: usize = 500;
+const DEFAULT_MAX_DEPTH: usize = 8;
+
+/// A single hit in a single file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Match {
+    pub path: PathBuf,
+    pub line_no: usize,
+    pub column: usize,
+    pub line: String,
+}
+
+/// Knobs for `find_matches`. All fields have sensible defaults; pass
+/// `FindOptions::default()` to use them.
+#[derive(Debug, Clone)]
+pub struct FindOptions {
+    pub max_results: usize,
+    pub max_file_bytes: u64,
+    pub max_depth: usize,
+    pub case_sensitive: bool,
+}
+
+impl Default for FindOptions {
+    fn default() -> Self {
+        Self {
+            max_results: DEFAULT_MAX_RESULTS,
+            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+            max_depth: DEFAULT_MAX_DEPTH,
+            case_sensitive: true,
+        }
+    }
+}
+
+/// Result of a `/find` call — matches plus simple summary fields the
+/// REPL can render (`handle_find` in `main.rs`).
+#[derive(Debug, Clone)]
+pub struct FindReport {
+    pub matches: Vec<Match>,
+    pub files_scanned: usize,
+    pub files_skipped: usize,
+    pub elapsed_ms: u128,
+    pub truncated: bool,
+}
+
+/// Directory or file names that should never be descended into. These
+/// are excluded at the `walkdir` iterator level so the search stays
+/// fast and the output stays focused on source.
+const SKIP_NAMES: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".cache",
+    ".rem",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+
+/// File suffixes that are always skipped even outside the above dirs.
+const SKIP_SUFFIXES: &[&str] = &[
+    ".min.js", ".min.css", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".mp3", ".mp4", ".mov", ".woff", ".woff2", ".ttf",
+    ".otf", ".eot",
+];
+
+fn should_skip_dir(name: &str) -> bool {
+    SKIP_NAMES.iter().any(|n| *n == name)
+}
+
+fn should_skip_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".min.js") || lower.ends_with(".min.css") {
+        return true;
+    }
+    if SKIP_SUFFIXES.iter().any(|suf| lower.ends_with(suf)) {
+        return true;
+    }
+    false
+}
+
+/// Walk `root` and return every line whose contents contain `query`.
+///
+/// `query` is matched as a plain substring — no regex metacharacters
+/// are interpreted. An empty `query` is treated as "no matches" rather
+/// than matching every line, which would be useless.
+pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport {
+    let start = Instant::now();
+    let mut report = FindReport {
+        matches: Vec::new(),
+        files_scanned: 0,
+        files_skipped: 0,
+        elapsed_ms: 0,
+        truncated: false,
+    };
+
+    if query.is_empty() {
+        report.elapsed_ms = start.elapsed().as_millis();
+        return report;
+    }
+
+    let needle: Vec<u8> = if opts.case_sensitive {
+        query.as_bytes().to_vec()
+    } else {
+        query.to_lowercase().into_bytes()
+    };
+
+    let walker = WalkDir::new(root)
+        .max_depth(opts.max_depth)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            if let Some(name) = e.file_name().to_str() {
+                if e.file_type().is_dir() && should_skip_dir(name) {
+                    return false;
+                }
+                if e.file_type().is_file() && should_skip_file(name) {
+                    return false;
+                }
+            }
+            true
+        });
+
+    for entry in walker.filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => {
+                report.files_skipped += 1;
+                continue;
+            }
+        };
+        if should_skip_file(name) {
+            report.files_skipped += 1;
+            continue;
+        }
+
+        let size = match fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(_) => {
+                report.files_skipped += 1;
+                continue;
+            }
+        };
+        if size == 0 || size > opts.max_file_bytes {
+            report.files_skipped += 1;
+            continue;
+        }
+
+        let contents = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => {
+                report.files_skipped += 1;
+                continue;
+            }
+        };
+        report.files_scanned += 1;
+
+        for (idx, raw_line) in contents.lines().enumerate() {
+            let line = raw_line.to_string();
+            let haystack: Vec<u8> = if opts.case_sensitive {
+                raw_line.as_bytes().to_vec()
+            } else {
+                raw_line.to_lowercase().into_bytes()
+            };
+
+            let mut search_from = 0usize;
+            while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
+                let column = byte_to_column(&haystack[..search_from + pos]);
+                report.matches.push(Match {
+                    path: path.to_path_buf(),
+                    line_no: idx + 1,
+                    column: column + 1,
+                    line: line.clone(),
+                });
+                if report.matches.len() >= opts.max_results {
+                    report.truncated = true;
+                    report.elapsed_ms = start.elapsed().as_millis();
+                    return report;
+                }
+                search_from += pos + needle.len();
+                if search_from > haystack.len() {
+                    break;
+                }
+            }
+        }
+    }
+
+    report.elapsed_ms = start.elapsed().as_millis();
+    report
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn byte_to_column(prefix: &[u8]) -> usize {
+    prefix.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn make_tree() -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "rem-find-test-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        fs::write(
+            base.join("index.html"),
+            "<!doctype html>\n<html>\n  <body>handle_lint target</body>\n</html>\n",
+        )
+        .unwrap();
+        fs::write(
+            base.join("style.css"),
+            "body { color: red; }\n/* handle_lint in css */\n",
+        )
+        .unwrap();
+        fs::write(
+            base.join("script.js"),
+            "function handle_lint() { return 1; }\nconst color = 'red';\n",
+        )
+        .unwrap();
+        fs::write(
+            base.join("main.rs"),
+            "fn handle_lint() {}\nfn other() { println!(\"hi\"); }\n",
+        )
+        .unwrap();
+        fs::write(base.join("empty.txt"), "").unwrap();
+        fs::write(base.join("binary.bin"), [0u8, 1, 2, 3, 0, 0]).unwrap();
+
+        fs::create_dir_all(base.join("node_modules/lib")).unwrap();
+        fs::write(base.join("node_modules/lib/x.js"), "handle_lint here too\n").unwrap();
+        fs::create_dir_all(base.join("target")).unwrap();
+        fs::write(base.join("target/ignore.rs"), "handle_lint in target\n").unwrap();
+        fs::create_dir_all(base.join(".git")).unwrap();
+        fs::write(base.join(".git/HEAD"), "handle_lint in git\n").unwrap();
+
+        base
+    }
+
+    fn chrono_like_nanos() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn finds_substring_across_files() {
+        let root = make_tree();
+        let opts = FindOptions::default();
+        let report = find_matches(&root, "handle_lint", &opts);
+        let rels: Vec<String> = report
+            .matches
+            .iter()
+            .map(|m| {
+                m.path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert!(rels.iter().any(|p| p == "index.html"));
+        assert!(rels.iter().any(|p| p == "style.css"));
+        assert!(rels.iter().any(|p| p == "script.js"));
+        assert!(rels.iter().any(|p| p == "main.rs"));
+        assert!(!rels.iter().any(|p| p.starts_with("node_modules/")));
+        assert!(!rels.iter().any(|p| p.starts_with("target/")));
+        assert!(!rels.iter().any(|p| p.starts_with(".git/")));
+    }
+
+    #[test]
+    fn line_and_column_are_one_indexed() {
+        let root = make_tree();
+        let opts = FindOptions::default();
+        let report = find_matches(&root, "color: red", &opts);
+        assert!(!report.matches.is_empty());
+        let m = &report.matches[0];
+        assert!(m.line_no >= 1);
+        assert!(m.column >= 1);
+        assert!(m.line.contains("color: red"));
+    }
+
+    #[test]
+    fn empty_query_returns_no_matches() {
+        let root = make_tree();
+        let report = find_matches(&root, "", &FindOptions::default());
+        assert!(report.matches.is_empty());
+        assert!(!report.truncated);
+    }
+
+    #[test]
+    fn max_results_caps_and_marks_truncated() {
+        let root = make_tree();
+        let mut opts = FindOptions::default();
+        opts.max_results = 2;
+        let report = find_matches(&root, "handle_lint", &opts);
+        assert_eq!(report.matches.len(), 2);
+        assert!(report.truncated);
+    }
+
+    #[test]
+    fn case_insensitive_matches_variants() {
+        let root = make_tree();
+        let mut opts = FindOptions::default();
+        opts.case_sensitive = false;
+        let report = find_matches(&root, "HANDLE_LINT", &opts);
+        assert!(report.matches.iter().any(|m| m.path.ends_with("script.js")));
+    }
+
+    #[test]
+    fn skips_empty_and_oversize_files() {
+        let root = make_tree();
+        let mut opts = FindOptions::default();
+        opts.max_file_bytes = 4;
+        let report = find_matches(&root, "handle_lint", &opts);
+        for m in &report.matches {
+            let rel = m
+                .path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            assert_ne!(rel, "empty.txt");
+        }
+    }
+
+    #[test]
+    fn no_match_yields_empty_report() {
+        let root = make_tree();
+        let report = find_matches(&root, "__definitely_not_present__", &FindOptions::default());
+        assert!(report.matches.is_empty());
+        assert!(!report.truncated);
+    }
+
+    #[test]
+    fn max_depth_limits_recursion() {
+        let deep_root = std::env::temp_dir().join(format!(
+            "rem-find-deep-{}-{}",
+            std::process::id(),
+            chrono_like_nanos()
+        ));
+        let _ = fs::remove_dir_all(&deep_root);
+        let deep = deep_root.join("a/b/c/d/e/f");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("leaf.txt"), "needle_in_deep_leaf\n").unwrap();
+
+        let mut shallow = FindOptions::default();
+        shallow.max_depth = 3;
+        let report = find_matches(&deep_root, "needle_in_deep_leaf", &shallow);
+        assert!(
+            report.matches.is_empty(),
+            "shallow depth should not reach deeply nested leaf"
+        );
+
+        let mut deep_opt = FindOptions::default();
+        deep_opt.max_depth = 12;
+        let report = find_matches(&deep_root, "needle_in_deep_leaf", &deep_opt);
+        assert_eq!(report.matches.len(), 1);
+
+        let _ = fs::remove_dir_all(&deep_root);
+    }
+
+    #[test]
+    fn find_subslice_basics() {
+        assert_eq!(find_subslice(b"hello world", b"world"), Some(6));
+        assert_eq!(find_subslice(b"hello world", b"planet"), None);
+        assert_eq!(find_subslice(b"abc", b""), None);
+        assert_eq!(find_subslice(b"", b"x"), None);
+    }
+
+    #[test]
+    fn byte_to_column_counts_chars_not_bytes() {
+        let prefix = "héllo ";
+        assert_eq!(byte_to_column(prefix.as_bytes()), 6);
+    }
+}

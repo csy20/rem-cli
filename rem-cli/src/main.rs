@@ -20,12 +20,14 @@ mod memory;
 mod provider;
 mod agentic;
 mod parsing;
+mod find;
 use feedback::FeedbackTracker;
 use intent::{classify_intent, has_creation_intent, has_file_path, intent_instruction, TaskIntent};
 use memory::ProjectMemory;
 use parsing::{current_name_from_bold, extract_code_block, guess_filename, strip_code_blocks};
 use provider::{Provider, api_url, OllamaJsonResponse};
 use agentic::{build_agentic_prompt, build_tool_context, extract_goal_signal, run_lint, run_test};
+use find::{find_matches, FindOptions};
 
 static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
 
@@ -1563,6 +1565,20 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             continue;
         }
 
+        if trimmed.eq_ignore_ascii_case("/find") {
+            println!("{}", style!(C_DIM, "\u{2502}"));
+            println!("{} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "usage: /find <query>"));
+            println!("{} {}  search text inside the project (skips node_modules, target, .git, ...)",
+                style!(C_CYAN, "\u{2502}"), style!(C_DIM, "\u{2022}"));
+            println!("{}", style!(C_DIM, "\u{2502}"));
+            continue;
+        }
+
+        if let Some(tail) = trimmed.strip_prefix("/find ") {
+            handle_find(&session, tail.trim());
+            continue;
+        }
+
         if trimmed.eq_ignore_ascii_case("/save") && !trimmed.starts_with("/save ") {
             handle_save_session(&session);
             continue;
@@ -2943,6 +2959,115 @@ async fn handle_review(client: &Provider, session: &mut ChatSession) {
     }
 }
 
+fn handle_find(session: &ChatSession, query: &str) {
+    if query.is_empty() {
+        println!("{}", style!(C_DIM, "\u{2502}"));
+        println!("{} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "usage: /find <query>"));
+        println!("{}", style!(C_DIM, "\u{2502}"));
+        return;
+    }
+
+    let root = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let report = find_matches(&root, query, &FindOptions::default());
+
+    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{} {} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "\u{203a} FIND  {}", query),
+        style!(C_DIM, ""));
+    println!("{} {} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_DIM, "in"),
+        style!(C_WHITE_B, "{}", root.display()));
+    println!("{}", style!(C_DIM, "\u{2502}"));
+
+    if report.matches.is_empty() {
+        println!("{} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_YELLOW, "(no matches)"));
+        println!("{}", style!(C_DIM, "\u{2502}"));
+        return;
+    }
+
+    let show_limit = 50usize;
+    let shown = report.matches.len().min(show_limit);
+    let mut last_path: Option<String> = None;
+    for m in report.matches.iter().take(show_limit) {
+        let rel = m
+            .path
+            .strip_prefix(&root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| m.path.display().to_string());
+        if last_path.as_deref() != Some(rel.as_str()) {
+            if last_path.is_some() {
+                println!("{}", style!(C_DIM, "\u{2502}"));
+            }
+            println!("{} {} {}",
+                style!(C_CYAN, "\u{2502}"),
+                style!(C_BLUE, "\u{2500}\u{2500} {} \u{2500}\u{2500}", rel),
+                style!(C_DIM, ""));
+            last_path = Some(rel);
+        }
+        let line_no_w = 4usize;
+        let col_w = 3usize;
+        println!("{} {}   {:>lw$}:{:<cw$}  {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_DIM, "\u{251c}\u{2500}\u{2500}"),
+            m.line_no,
+            m.column,
+            style!(C_WHITE_B, "{}", trim_for_display(&m.line, 120)),
+            lw = line_no_w,
+            cw = col_w);
+    }
+    println!("{}", style!(C_DIM, "\u{2502}"));
+
+    let unique_files: std::collections::BTreeSet<String> = report
+        .matches
+        .iter()
+        .map(|m| {
+            m.path
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| m.path.display().to_string())
+        })
+        .collect();
+
+    let mut summary = format!(
+        "  {} match{} in {} file{} \u{00b7} scanned {} \u{00b7} skipped {} \u{00b7} {}ms",
+        report.matches.len(),
+        if report.matches.len() == 1 { "" } else { "es" },
+        unique_files.len(),
+        if unique_files.len() == 1 { "" } else { "s" },
+        report.files_scanned,
+        report.files_skipped,
+        report.elapsed_ms,
+    );
+    if report.truncated {
+        summary.push_str("  (truncated)");
+    }
+    if shown < report.matches.len() {
+        summary.push_str(&format!("  (showing first {})", shown));
+    }
+    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}",
+        style!(C_GREEN, "{}", summary));
+    println!("{}", style!(C_DIM, "\u{2502}"));
+}
+
+fn trim_for_display(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('\u{2026}');
+        out
+    }
+}
+
 fn handle_save_session(session: &ChatSession) {
     let dir = session.project_dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let rem_dir = dir.join(".rem");
@@ -3062,6 +3187,7 @@ fn print_chat_help() {
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/copy [N]"),      style!(d, "copy last response to clipboard"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/lint [file]"),   style!(d, "run linter on generated files"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/review"),        style!(d, "AI code review of generated code"));
+    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/find <q>"),      style!(d, "search text inside the project"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/reset"),         style!(d, "full reset — clear history & code cache"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/save"),          style!(d, "save current session to .rem/session.json"));
     println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/resume"),        style!(d, "restore saved session history"));
