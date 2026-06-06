@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Versions follow
 
 ## [Unreleased]
 
+### Changed
+
+- Removed `rem-cli/target/` (~5,942 files, ~2.4 GB of build artifacts)
+  from the git index. The directory is already listed in `.gitignore`
+  but had been committed before the ignore rule landed. The on-disk
+  `target/` is preserved; subsequent `cargo build` is incremental. Repo
+  size on `origin/main` shrinks accordingly. `.gitignore` additionally
+  ignores `**/*.rs.bk` and `Cargo.lock.bak`.
+
 ### Added
 
 - `/find <query>` — in-project text search. Walks the project (skipping

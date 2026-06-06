@@ -4,6 +4,8 @@ __pycache__/
 
 # Rust
 rem-cli/target/
+**/*.rs.bk
+Cargo.lock.bak
 
 # Editor
 .vscode/
