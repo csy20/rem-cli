@@ -139,8 +139,11 @@ The memory file is loaded automatically at the start of every session. Cross-com
 ## Requirements
 
 - Rust 1.78+
-- Ollama running locally
-- A local model such as `rem-coder:latest`
+- Ollama running locally (or OpenAI-compatible provider)
+- A local model such as `rem-coder:latest` or `qwen2.5-coder:1.5b`
+
+`rem index` is self-contained (no Python). It produces `.rem/codebase_index.json`
+so that relevant code chunks are injected instead of full directory listings.
 
 ## Build
 

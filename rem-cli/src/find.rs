@@ -60,7 +60,7 @@ pub struct FindReport {
 /// Directory or file names that should never be descended into. These
 /// are excluded at the `walkdir` iterator level so the search stays
 /// fast and the output stays focused on source.
-const SKIP_NAMES: &[&str] = &[
+pub(crate) const SKIP_NAMES: &[&str] = &[
     ".git",
     "node_modules",
     "target",
@@ -75,17 +75,17 @@ const SKIP_NAMES: &[&str] = &[
 ];
 
 /// File suffixes that are always skipped even outside the above dirs.
-const SKIP_SUFFIXES: &[&str] = &[
+pub(crate) const SKIP_SUFFIXES: &[&str] = &[
     ".min.js", ".min.css", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
     ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".mp3", ".mp4", ".mov", ".woff", ".woff2", ".ttf",
     ".otf", ".eot",
 ];
 
-fn should_skip_dir(name: &str) -> bool {
+pub(crate) fn should_skip_dir(name: &str) -> bool {
     SKIP_NAMES.iter().any(|n| *n == name)
 }
 
-fn should_skip_file(name: &str) -> bool {
+pub(crate) fn should_skip_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".min.js") || lower.ends_with(".min.css") {
         return true;

@@ -1,5 +1,14 @@
-model = "rem-coder-trained"
+# Local override for rem CLI (copy to .remcli.toml in a project or use
+# ~/.config/rem-cli/config.toml for global defaults).
+# Keys here merge with (and override) the global config.
+
+model = "rem-coder:latest"     # or qwen2.5-coder:1.5b, etc.
 ollama_url = "http://localhost:11434"
 timeout_s = 120
-max_context_bytes = 16000
+max_context_bytes = 16000      # cap for injected context (@files + memory + retrieval)
+model_ctx = 4096               # num_ctx passed to the model; raise (e.g. 8192+) when using retrieval/index for larger codebases
 prompts_dir = "prompts"
+# workspace_dir = "/path/to/default/projects"   # set by first-run or /dir
+# provider = "ollama"                           # ollama | openai | vllm
+# api_url = "..."                               # for OpenAI-compatible
+# api_key = "..."                               # or use OPENAI_API_KEY env

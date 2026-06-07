@@ -5,6 +5,16 @@ All notable changes to this project are documented here. Versions follow
 
 ## [Unreleased]
 
+### Added / Fixed
+
+- **Pure-Rust `rem index`** — revived the codebase retrieval index (writes
+  `.rem/codebase_index.json`). No Python/`remllm` package required anymore.
+  Keyword-based relevant-chunk injection in chat, ask, and `/goal` now works
+  out of the box for larger projects. `IndexChunk` lines are used in context
+  headers. Added roundtrip test. (Addresses the post-Python-pipeline regression.)
+- Expanded `.remcli.toml.example` with comments for all keys (including the
+  important `model_ctx` knob for scaling retrieval).
+
 ### Changed
 
 - Removed `rem-cli/target/` (~5,942 files, ~2.4 GB of build artifacts)
@@ -13,6 +23,9 @@ All notable changes to this project are documented here. Versions follow
   `target/` is preserved; subsequent `cargo build` is incremental. Repo
   size on `origin/main` shrinks accordingly. `.gitignore` additionally
   ignores `**/*.rs.bk` and `Cargo.lock.bak`.
+- Updated clap help, code comments, and docs to remove stale "requires
+  Python remllm" references for the index subcommand. The CLI is now
+  fully self-contained for indexing + retrieval.
 
 ### Added
 

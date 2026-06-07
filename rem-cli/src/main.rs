@@ -21,6 +21,8 @@ mod provider;
 mod agentic;
 mod parsing;
 mod find;
+mod indexer;
+
 use feedback::FeedbackTracker;
 use intent::{classify_intent, has_creation_intent, has_file_path, intent_instruction, TaskIntent};
 use memory::ProjectMemory;
@@ -28,6 +30,10 @@ use parsing::{current_name_from_bold, extract_code_block, guess_filename, strip_
 use provider::{Provider, api_url, OllamaJsonResponse};
 use agentic::{build_agentic_prompt, build_tool_context, extract_goal_signal, run_lint, run_test};
 use find::{find_matches, FindOptions};
+use indexer::{
+    build_retrieved_context, generate_codebase_index, load_codebase_index, retrieve_relevant_chunks,
+    write_codebase_index,
+};
 
 static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
 
@@ -177,7 +183,7 @@ enum Commands {
     Patch(PatchArgs),
     #[command(about = "Scaffold a new project with templates")]
     New(NewArgs),
-    #[command(about = "Generate or refresh the codebase index (for retrieval in large projects). Requires the Python remllm package (pip install -e . from the rem-llm repo) or run `remllm index <dir>` manually.")]
+    #[command(about = "Generate or refresh the codebase index (for retrieval in large projects). Pure Rust; writes .rem/codebase_index.json so chat/goal can inject only relevant chunks instead of full file listings.")]
     Index(IndexArgs),
 }
 
@@ -1145,148 +1151,6 @@ fn language_specific_guidance(project_type: &str) -> &'static str {
         "cpp" => "\nLanguage context: C/C++ project. Use make/gcc. Show compilation commands.",
         _ => "",
     }
-}
-
-// ── Retrieval from codebase_index.json (Phase 1 scaling: relevant chunks over exhaustive file list) ──
-
-/// Chunk as produced by Python's CodebaseIndexer (src/remllm/context/indexer.py).
-/// JSON shape: { "chunks": [ { "path": "...", "name": "...", "chunk_type": "...",
-///   "content": "...", "start_line": N, "end_line": N, "embedding": [...] or null }, ... ] }
-#[derive(Debug, Clone, Deserialize)]
-struct IndexChunk {
-    path: String,
-    name: String,
-    #[serde(default, rename = "chunk_type")]
-    chunk_type: String,
-    content: String,
-    #[serde(default)]
-    start_line: usize,
-    #[serde(default)]
-    end_line: usize,
-    #[serde(default)]
-    embedding: Option<Vec<f32>>,
-}
-
-/// Try to load an index for the given project dir.
-/// Conventional locations (in order):
-///   <project>/.rem/codebase_index.json
-///   <project>/models/codebase_index.json   (legacy)
-/// Returns None if not present or unreadable.
-fn load_codebase_index(project_dir: &Path) -> Option<Vec<IndexChunk>> {
-    let candidates = [
-        project_dir.join(".rem/codebase_index.json"),
-        project_dir.join("models/codebase_index.json"),
-    ];
-    for p in &candidates {
-        if let Ok(text) = fs::read_to_string(p) {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(arr) = data.get("chunks").and_then(|v| v.as_array()) {
-                    let mut out = Vec::new();
-                    for item in arr {
-                        if let Ok(chunk) = serde_json::from_value::<IndexChunk>(item.clone()) {
-                            out.push(chunk);
-                        }
-                    }
-                    if !out.is_empty() {
-                        return Some(out);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Keyword-based retrieval (with light name/path bonus). Fast, no extra deps, works even
-/// if embeddings are absent or we don't want to call an embedder for the query yet.
-/// This is a huge scaling win vs. dumping every filename + size: we inject *actual code*
-/// for chunks whose content matches the user query / task.
-fn retrieve_relevant_chunks<'a>(
-    index: &'a [IndexChunk],
-    query: &str,
-    top_k: usize,
-    max_chars: usize,
-) -> Vec<&'a IndexChunk> {
-    if index.is_empty() || query.trim().is_empty() {
-        return vec![];
-    }
-    let q = query.to_lowercase();
-    let q_words: Vec<&str> = q
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() > 2)
-        .collect();
-
-    let mut scored: Vec<(i32, &IndexChunk)> = index
-        .iter()
-        .map(|c| {
-            let content_l = c.content.to_lowercase();
-            let name_l = c.name.to_lowercase();
-            let path_l = c.path.to_lowercase();
-
-            let mut score = 0i32;
-
-            // Strong signal: words appear in the actual code content
-            for w in &q_words {
-                if content_l.contains(w) {
-                    score += 10;
-                }
-            }
-            // Bonus for name / path match (e.g. "auth" in auth.rs or user auth handler)
-            for w in &q_words {
-                if name_l.contains(w) || path_l.contains(w) {
-                    score += 4;
-                }
-            }
-            // Light recency / size bias not needed; prefer matches.
-
-            // Extra if the chunk type is useful (function/class > generic file)
-            if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
-                score += 1;
-            }
-
-            (score, c)
-        })
-        .filter(|(s, _)| *s > 0)
-        .collect();
-
-    scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
-
-    let mut chosen = Vec::new();
-    let mut used = 0usize;
-    for (_, c) in scored.into_iter().take(top_k.max(1)) {
-        let block_len = c.content.len() + c.path.len() + 64; // rough header
-        if used + block_len > max_chars {
-            break;
-        }
-        used += block_len;
-        chosen.push(c);
-    }
-    chosen
-}
-
-/// Build a compact "Relevant code from project (via index):" section for injection.
-/// Called from the main prompt assembly when an index is present for the project.
-fn build_retrieved_context(chunks: &[&IndexChunk], max_chars: usize) -> String {
-    if chunks.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("[Relevant code chunks from project index]:\n");
-    let mut used = out.len();
-    for c in chunks {
-        let header = format!("### {} ({})\n", c.path, c.chunk_type);
-        let body = format!("{}\n\n", c.content);
-        let add = header.len() + body.len();
-        if used + add > max_chars {
-            break;
-        }
-        out.push_str(&header);
-        out.push_str(&body);
-        used += add;
-    }
-    if out.len() > 30 {
-        out.push_str("[End of retrieved context — use @path for more specific files if needed]\n\n");
-    }
-    out
 }
 
 fn build_prompt(session: &ChatSession, client: &Provider) -> String {
@@ -4468,7 +4332,9 @@ fn sanitize_commands(cmds: &[String]) -> Vec<&str> {
     out
 }
 
-// ── Index command (thin wrapper for Python indexer — Phase 1 scaling) ─────
+// run_index delegates to the indexer module (see src/indexer.rs).
+// The thin wrapper keeps the CLI printing / arg handling in main while the
+// pure logic (chunking, writing, loading, retrieval) lives in its own module.
 
 fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     let dir = args.dir.clone().unwrap_or_else(|| {
@@ -4480,55 +4346,26 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     let dir = if dir.exists() { dir } else { PathBuf::from(".") };
 
     println!("{}", style!(C_CYAN, "│"));
-    println!("{} {} {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "rem index"), style!(C_DIM, "— codebase retrieval index"));
+    println!("{} {} {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "rem index"), style!(C_DIM, "— codebase retrieval index (pure Rust)"));
     println!("{} target: {}", style!(C_CYAN, "│"), style!(C_DIM, "{}", dir.display()));
 
-    // Try to delegate to the Python tool (the one with the good chunkers + embed support).
-    // This keeps the Rust binary small while giving users the full power of the Python indexer.
-    let remllm = which_remllm_or_python_m();
-    if let Some(cmd) = remllm {
-        let status = std::process::Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .arg("index")
-            .arg(&dir)
-            .status();
-        match status {
-            Ok(s) if s.success() => {
-                println!("{} {} index complete (index should now be at .rem/codebase_index.json)", style!(C_CYAN, "│"), style!(C_GREEN, "✓"));
-                println!("{} `rem` will automatically use relevant chunks from it for context in chat and /goal.", style!(C_CYAN, "│"));
-                return Ok(());
-            }
-            _ => {
-                println!("{} delegation to `{}` failed — falling back to instructions", style!(C_CYAN, "│"), cmd.join(" "));
-            }
-        }
+    let refreshing = load_codebase_index(&dir).is_some();
+    let chunks = generate_codebase_index(&dir)?;
+    if chunks.is_empty() {
+        println!("{} {} no indexable files found (after skips)", style!(C_CYAN, "│"), style!(C_YELLOW, "⚠"));
+        return Ok(());
     }
 
-    println!("{}", style!(C_DIM, "│"));
-    println!("{} To generate the index that enables smart retrieval in large projects:", style!(C_CYAN, "│"));
-    println!("{}   1. pip install -e .[dev]   (from the rem-llm repo root)", style!(C_CYAN, "│"));
-    println!("{}   2. remllm index {}   (or python -m remllm.cli index {})", style!(C_CYAN, "│"), dir.display(), dir.display());
-    println!("{}   3. (optional) remllm index {} --query \"your task\" to test", style!(C_CYAN, "│"), dir.display());
-    println!("{}", style!(C_DIM, "│"));
-    println!("{} Once the index exists at {}/.rem/codebase_index.json (or models/),", style!(C_CYAN, "│"), dir.display());
-    println!("{} `rem chat` / `rem ask` will inject only the *relevant* code chunks instead of a giant file list.", style!(C_CYAN, "│"));
-    println!("{} This is the main mechanism for scaling rem beyond tiny beginner projects.", style!(C_CYAN, "│"));
+    write_codebase_index(&dir, &chunks)?;
+
+    let out_path = dir.join(".rem/codebase_index.json");
+    let unique_files = chunks.iter().map(|c| &c.path).collect::<std::collections::HashSet<_>>().len();
+    let action = if refreshing { "refreshed" } else { "created" };
+    println!("{} {} {} {} chunks from {} files", style!(C_CYAN, "│"), style!(C_GREEN, "✓"), action, chunks.len(), unique_files);
+    println!("{} index: {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "{}", out_path.display()));
+    println!("{} `rem chat` / `rem ask` / `/goal` will now pull relevant chunks instead of full listings.", style!(C_CYAN, "│"));
+    println!("{} (keyword retrieval; raise model_ctx in ~/.config/rem-cli/config.toml for large projects)", style!(C_CYAN, "│"));
     Ok(())
-}
-
-fn which_remllm_or_python_m() -> Option<Vec<String>> {
-    // Prefer a `remllm` entry point if installed in PATH.
-    if std::process::Command::new("remllm").arg("--help").output().is_ok() {
-        return Some(vec!["remllm".to_string()]);
-    }
-    // Fallback: python -m remllm.cli
-    if std::process::Command::new("python3").arg("-c").arg("import remllm").output().is_ok() {
-        return Some(vec!["python3".to_string(), "-m".to_string(), "remllm.cli".to_string()]);
-    }
-    if std::process::Command::new("python").arg("-c").arg("import remllm").output().is_ok() {
-        return Some(vec!["python".to_string(), "-m".to_string(), "remllm.cli".to_string()]);
-    }
-    None
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -4785,7 +4622,7 @@ h1 { color: red; }
     #[test]
     fn retrieval_keyword_finds_relevant_chunk() {
         let fake = vec![
-            IndexChunk {
+            indexer::IndexChunk {
                 path: "src/auth.rs".into(),
                 name: "login".into(),
                 chunk_type: "function".into(),
@@ -4794,7 +4631,7 @@ h1 { color: red; }
                 end_line: 20,
                 embedding: None,
             },
-            IndexChunk {
+            indexer::IndexChunk {
                 path: "src/utils.rs".into(),
                 name: "hash".into(),
                 chunk_type: "function".into(),
@@ -4820,13 +4657,12 @@ h1 { color: red; }
 
     #[test]
     fn relevant_context_uses_real_index_when_present() {
-        // Use the fixture created by Python `remllm index` in this session (or recreate minimal)
+        // The pure-Rust indexer (generate_codebase_index + write) or a pre-existing index can be used.
+        // This test gracefully handles missing index (falls back) and exercises the path when present.
         let fixture = std::env::temp_dir().join("rem-fixture");
-        // If the previous python index run in the conversation created it, great; otherwise the test is still useful
-        // because load will just return None and we fall back (no panic).
         if let Some(_idx) = load_codebase_index(&fixture) {
             // Session with project dir pointing at indexed tree
-            let mut session = ChatSession::new("test-model", Some(fixture.clone())).expect("session");
+            let session = ChatSession::new("test-model", Some(fixture.clone())).expect("session");
             let ctx = session.build_relevant_project_context("hello function");
             // When index present and keyword matches, we should see the content or header
             if !ctx.is_empty() {
@@ -4837,5 +4673,45 @@ h1 { color: red; }
             let mut session = ChatSession::new("test-model", Some(fixture.clone())).expect("session");
             let _ = session.build_relevant_project_context("anything");
         }
+    }
+
+    #[test]
+    fn pure_rust_indexer_roundtrips_and_retrieves() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let tmp = std::env::temp_dir().join(format!("rem-index-test-{}", stamp));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("src")).expect("temp tree");
+
+        // Small file (whole chunk)
+        fs::write(tmp.join("README.md"), "# Demo\n\nThis is a test project for indexing.\nUse it to verify retrieval.\n").unwrap();
+
+        // Larger-ish file that should split
+        let big = (0..60).map(|i| format!("fn example_{}() {{ /* chunk candidate {} */ }}\n\n", i, i)).collect::<String>();
+        fs::write(tmp.join("src/lib.rs"), format!("//! Example lib\n\n{}", big)).unwrap();
+
+        // Run the generator + writer (the real thing `rem index` calls)
+        let chunks = generate_codebase_index(&tmp).expect("generate should succeed");
+        assert!(!chunks.is_empty(), "should have produced at least one chunk");
+
+        write_codebase_index(&tmp, &chunks).expect("write should succeed");
+
+        // Round-trip via the normal loader
+        let loaded = load_codebase_index(&tmp).expect("load after write should succeed");
+        assert!(!loaded.is_empty());
+
+        // Retrieval should find the lib.rs content for a query mentioning "example"
+        let hits = retrieve_relevant_chunks(&loaded, "example function in lib", 5, 8000);
+        assert!(!hits.is_empty(), "keyword retrieval should surface relevant chunks");
+        let hit_paths: Vec<_> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert!(hit_paths.iter().any(|p| p.contains("lib.rs") || p.contains("README")), "expected project files in hits");
+
+        // Lines should be populated for at least some chunks (we use them in build_retrieved_context now)
+        assert!(loaded.iter().any(|c| c.start_line > 0 && c.end_line >= c.start_line));
+
+        // Cleanup
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

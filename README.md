@@ -6,9 +6,9 @@ small project scaffolding, with a structured contract so the model output is
 predictable and safe to preview.
 
 The CLI is written in Rust (`rem-cli/`). The previous Python training
-pipeline that lived at the repo root (data curation, QLoRA fine-tuning,
-Unsloth / LlamaFactory training, GGUF export, eval harness) has been
-removed — this repo is now exclusively the CLI.
+pipeline (data curation, QLoRA fine-tuning, etc.) has been removed — this
+repo is now exclusively the `rem` CLI. `rem index` is pure Rust and
+generates the retrieval index used by chat/goal for larger projects.
 
 ## Install
 
