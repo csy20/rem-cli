@@ -112,34 +112,36 @@ fn render_palette(filtered: &[Command], selected: usize, query: &str) {
     let mut out = stdout.lock();
     let _ = write!(out, "\x1b[2J\x1b[H");
 
-    let _ = writeln!(out, "{}", theme::paint(&t.accent, "  COMMANDS", true));
+    let _ = writeln!(out, "{}", theme::paint(&t, "accent", "  COMMANDS", true));
     let _ = writeln!(
         out,
         "{}",
-        theme::paint(&t.border, "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", false)
+        theme::paint(&t, "border", "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", false)
     );
 
     for (i, cmd) in filtered.iter().enumerate() {
         let is_sel = i == selected;
         let marker = if is_sel {
-            theme::paint(&t.sel_left, "▸", true)
+            theme::paint(&t, "sel_left", "▸", true)
         } else {
             " ".to_string()
         };
-        let row_bg = if is_sel { &t.sel_bg } else { &t.surface };
-        let name = theme::paint_on(&t.accent, row_bg, &format!(" {}", cmd.name), true);
+        let row_bg = if is_sel { "sel_bg" } else { "surface" };
+        let name = theme::paint_on(&t, "accent", row_bg, &format!(" {}", cmd.name), true);
         let desc = theme::paint_on(
-            &t.text_muted,
+            &t,
+            "text_muted",
             row_bg,
-            &format!(" {}", cmd.description),
+            &format!(" {} ", cmd.description),
             false,
         );
         let sc = if cmd.shortcut.is_empty() {
             "".to_string()
         } else {
             theme::paint_on(
-                &t.kbd_text,
-                &t.kbd_bg,
+                &t,
+                "kbd_text",
+                "kbd_bg",
                 &format!(" {} ", cmd.shortcut),
                 false,
             )
@@ -151,15 +153,15 @@ fn render_palette(filtered: &[Command], selected: usize, query: &str) {
         let _ = writeln!(
             out,
             "  {}",
-            theme::paint(&t.text_muted, "(no commands match)", false)
+            theme::paint(&t, "text_muted", "(no commands match)", false)
         );
     }
 
     let sub_prompt = format!(
         "  {} {}{}",
-        theme::paint(&t.text_muted, "/", false),
-        theme::paint(&t.accent, query, true),
-        theme::paint(&t.cursor, "_", false)
+        theme::paint(&t, "text_muted", "/", false),
+        theme::paint(&t, "accent", query, true),
+        theme::paint(&t, "cursor", "_", false)
     );
     let _ = writeln!(out);
     let _ = write!(out, "{sub_prompt}");

@@ -32,7 +32,7 @@ pub enum LintTarget {
     Go,
     JavaScript,
     TypeScript,
-    CSS,
+    Css,
     Unknown,
 }
 
@@ -49,7 +49,7 @@ impl LintTarget {
         } else if path.ends_with(".ts") || path.ends_with(".tsx") {
             LintTarget::TypeScript
         } else if path.ends_with(".css") {
-            LintTarget::CSS
+            LintTarget::Css
         } else {
             LintTarget::Unknown
         }
@@ -67,7 +67,7 @@ pub fn run_lint(path: &str) -> ToolResult {
         LintTarget::JavaScript | LintTarget::TypeScript => {
             ("eslint", "npx", vec!["eslint", path, "--format", "compact"])
         }
-        LintTarget::CSS => ("stylelint", "npx", vec!["stylelint", path]),
+        LintTarget::Css => ("stylelint", "npx", vec!["stylelint", path]),
         LintTarget::Unknown => {
             return ToolResult {
                 tool_name: "unknown".into(),
@@ -117,7 +117,7 @@ pub fn run_test(path: &str) -> ToolResult {
         LintTarget::JavaScript | LintTarget::TypeScript => Command::new("npx")
             .args(["jest", path, "--no-coverage"])
             .output(),
-        LintTarget::CSS | LintTarget::Unknown => {
+        LintTarget::Css | LintTarget::Unknown => {
             return ToolResult {
                 tool_name: "test".into(),
                 success: false,

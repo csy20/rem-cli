@@ -28,7 +28,7 @@ use crate::ui::theme;
 pub fn prefix(mode: &str) -> String {
     let t = theme::active();
     let chip = theme::paint_chip(&t, mode);
-    let arrow = theme::paint(&t.text_faint, "\u{203A}", false);
+    let arrow = theme::paint(&t, "text_faint", "\u{203A}", false);
     format!("  {chip}  {arrow} ")
 }
 

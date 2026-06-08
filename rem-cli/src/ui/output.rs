@@ -7,8 +7,8 @@
 #![allow(dead_code)]
 
 use std::io::{self, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
@@ -81,15 +81,18 @@ impl SpinnerGuard {
                     2 => "\u{00B7}",
                     _ => "\u{2022}",
                 };
-                let glyph = theme::paint(&t.accent_dim, frame, true);
-                let label = theme::paint(&t.text_muted, msg, false);
+                let glyph = theme::paint(&t, "accent_dim", frame, true);
+                let label = theme::paint(&t, "text_muted", msg, false);
                 eprint!("\r  {glyph}  {label}   ");
                 let _ = io::stderr().flush();
                 tokio::time::sleep(Duration::from_millis(120)).await;
                 i += 1;
             }
         });
-        Self { running, handle: Some(handle) }
+        Self {
+            running,
+            handle: Some(handle),
+        }
     }
 
     pub fn stop(&mut self) {
@@ -112,7 +115,7 @@ fn render_live(buffer: &[String], _model: &str) {
     let t = theme::active();
     let mut out = io::stdout().lock();
     let _ = write!(out, "\r\x1b[2K");
-    let rail = theme::paint_rail(&t.accent_dim, &t.text_muted, &flatten_chunks(buffer));
+    let rail = theme::paint_rail(&t, "accent_dim", "text_muted", &flatten_chunks(buffer));
     let _ = writeln!(out, "{rail}");
     let _ = out.flush();
 }
@@ -128,7 +131,7 @@ fn flatten_chunks(buffer: &[String]) -> String {
 fn print_final(text: &str, model: &str, elapsed: Duration) {
     let t = theme::active();
     let mode = crate::config::load_config().mode;
-    let accent = theme::accent_for_mode(&t, &mode);
+    let accent_field = theme::accent_for_mode(&mode);
 
     let mut in_fence = false;
     let mut first = true;
@@ -143,39 +146,42 @@ fn print_final(text: &str, model: &str, elapsed: Duration) {
                 } else {
                     lang.to_ascii_lowercase()
                 };
-                let tag = theme::paint(&t.text_faint, &format!("{CODE_FENCE} {header}"), false);
+                let tag = theme::paint(&t, "text_faint", &format!("{CODE_FENCE} {header}"), false);
                 theme::println(&format!("  {tag}"));
             }
             continue;
         }
         if in_fence {
-            let body = theme::paint(&t.accent_dim, line, false);
+            let body = theme::paint(&t, "accent_dim", line, false);
             theme::println(&format!("  {CODE_FENCE}   {body}"));
         } else if first {
-            let rail = theme::paint_rail(accent, &t.text_muted, line);
+            let rail = theme::paint_rail(&t, accent_field, "text_muted", line);
             theme::println(&format!("  {rail}"));
             first = false;
         } else {
             // continuation line, indented under the rail
-            let body = theme::paint(&t.text_muted, line, false);
+            let body = theme::paint(&t, "text_muted", line, false);
             theme::println(&format!("    {body}"));
         }
     }
     if first {
         // model returned an empty response — still print an empty rail so
         // the footer doesn't float unattached.
-        let rail = theme::paint(accent, "\u{258C}", true);
+        let rail = theme::paint(&t, accent_field, "\u{258C}", true);
         theme::println(&format!("  {rail}"));
     }
 
     // One-line status footer.
-    let dot = theme::paint(&t.text_faint, "\u{00B7}", false);
-    let model_lbl = theme::paint(&t.text_faint, "model", false);
-    let model_val = theme::paint(&t.text_muted, model, false);
-    let dur = theme::paint(&t.text_muted, &format!("{:.1}s", elapsed.as_secs_f64()), false);
-    theme::println(&format!(
-        "  {dot}  {model_lbl} {model_val}  {dot}  {dur}"
-    ));
+    let dot = theme::paint(&t, "text_faint", "\u{00B7}", false);
+    let model_lbl = theme::paint(&t, "text_faint", "model", false);
+    let model_val = theme::paint(&t, "text_muted", model, false);
+    let dur = theme::paint(
+        &t,
+        "text_muted",
+        &format!("{:.1}s", elapsed.as_secs_f64()),
+        false,
+    );
+    theme::println(&format!("  {dot}  {model_lbl} {model_val}  {dot}  {dur}"));
 }
 
 /// Render a single completed response as a themed reply block. Used by
@@ -184,14 +190,12 @@ fn print_final(text: &str, model: &str, elapsed: Duration) {
 pub fn print_reply_panel(text: &str, model: &str) {
     let t = theme::active();
     let mode = crate::config::load_config().mode;
-    let accent = theme::accent_for_mode(&t, &mode);
+    let accent_field = theme::accent_for_mode(&mode);
 
-    let dot = theme::paint(&t.text_faint, "\u{00B7}", false);
-    let model_lbl = theme::paint(&t.text_faint, "model", false);
-    let model_val = theme::paint(&t.text_muted, model, false);
-    theme::println(&format!(
-        "  {dot}  {model_lbl} {model_val}"
-    ));
+    let dot = theme::paint(&t, "text_faint", "\u{00B7}", false);
+    let model_lbl = theme::paint(&t, "text_faint", "model", false);
+    let model_val = theme::paint(&t, "text_muted", model, false);
+    theme::println(&format!("  {dot}  {model_lbl} {model_val}"));
 
     let mut in_fence = false;
     let mut first = true;
@@ -206,25 +210,25 @@ pub fn print_reply_panel(text: &str, model: &str) {
                 } else {
                     lang.to_ascii_lowercase()
                 };
-                let tag = theme::paint(&t.text_faint, &format!("{CODE_FENCE} {header}"), false);
+                let tag = theme::paint(&t, "text_faint", &format!("{CODE_FENCE} {header}"), false);
                 theme::println(&format!("  {tag}"));
             }
             continue;
         }
         if in_fence {
-            let body = theme::paint(&t.accent_dim, line, false);
+            let body = theme::paint(&t, "accent_dim", line, false);
             theme::println(&format!("  {CODE_FENCE}   {body}"));
         } else if first {
-            let rail = theme::paint_rail(accent, &t.text_muted, line);
+            let rail = theme::paint_rail(&t, accent_field, "text_muted", line);
             theme::println(&format!("  {rail}"));
             first = false;
         } else {
-            let body = theme::paint(&t.text_muted, line, false);
+            let body = theme::paint(&t, "text_muted", line, false);
             theme::println(&format!("    {body}"));
         }
     }
     if first {
-        let rail = theme::paint(accent, "\u{258C}", true);
+        let rail = theme::paint(&t, accent_field, "\u{258C}", true);
         theme::println(&format!("  {rail}"));
     }
 }

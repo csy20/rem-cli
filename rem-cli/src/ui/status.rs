@@ -47,12 +47,12 @@ impl Status {
 /// the most recent token / context numbers.
 pub fn build(model: &str, mode: &str, status: &Status) -> String {
     let t = theme::active();
-    let arrow = theme::paint(&t.accent, ">", true);
-    let word = theme::paint(&t.accent, "rem", true);
-    let dot = theme::paint(&t.text_faint, "\u{00B7}", false);
+    let arrow = theme::paint(&t, "accent", ">", true);
+    let word = theme::paint(&t, "accent", "rem", true);
+    let dot = theme::paint(&t, "text_faint", "\u{00B7}", false);
 
-    let model_lbl = theme::paint(&t.text_faint, "model", false);
-    let model_val = theme::paint(&t.text_muted, model, false);
+    let model_lbl = theme::paint(&t, "text_faint", "model", false);
+    let model_val = theme::paint(&t, "text_muted", model, false);
 
     let mode_chip = theme::paint_chip(&t, &mode.to_ascii_lowercase());
 
@@ -64,18 +64,18 @@ pub fn build(model: &str, mode: &str, status: &Status) -> String {
         format!("{:.1}K", status.tokens as f64 / 1000.0)
     };
     let ctx_str = format!("{}/8K ctx ({}%)", tokens, status.context_pct);
-    let ctx_lbl = theme::paint(&t.text_faint, "ctx", false);
-    let ctx_val = theme::paint(&t.text_muted, &ctx_str, false);
+    let ctx_lbl = theme::paint(&t, "text_faint", "ctx", false);
+    let ctx_val = theme::paint(&t, "text_muted", &ctx_str, false);
 
     let msgs = format!(
         "{} msg{}",
         status.messages,
         if status.messages == 1 { "" } else { "s" }
     );
-    let msgs = theme::paint(&t.text_muted, &msgs, false);
+    let msgs = theme::paint(&t, "text_muted", &msgs, false);
 
-    let slash = theme::paint(&t.text_faint, "/", false);
-    let help = theme::paint(&t.text_faint, "commands", false);
+    let slash = theme::paint(&t, "text_faint", "/", false);
+    let help = theme::paint(&t, "text_faint", "commands", false);
 
     format!(
         "  {arrow} {word}  {dot}  {model_lbl} {model_val}  {dot}  {mode_chip}  {dot}  {msgs}  {dot}  {ctx_lbl} {ctx_val}  {dot}  {slash}  {help}"

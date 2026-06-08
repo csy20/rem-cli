@@ -14,7 +14,7 @@ const CONFIG_DIR_NAME: &str = "rem-cli";
 const CONFIG_FILE_NAME: &str = "config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppConfig {
+pub struct UiConfig {
     #[serde(default = "default_theme")]
     pub theme: String,
     #[serde(default = "default_mode")]
@@ -33,7 +33,7 @@ fn default_model() -> String {
     "rem-coder".to_string()
 }
 
-impl Default for AppConfig {
+impl Default for UiConfig {
     fn default() -> Self {
         Self {
             theme: default_theme(),
@@ -52,29 +52,29 @@ pub fn config_path() -> Option<PathBuf> {
     Some(base.join(CONFIG_DIR_NAME).join(CONFIG_FILE_NAME))
 }
 
-pub fn load_config() -> AppConfig {
+pub fn load_config() -> UiConfig {
     let Some(path) = config_path() else {
-        return AppConfig::default();
+        return UiConfig::default();
     };
     if !path.exists() {
-        let cfg = AppConfig::default();
+        let cfg = UiConfig::default();
         let _ = save_config(&cfg);
         return cfg;
     }
     match fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<AppConfig>(&text) {
+        Ok(text) => match serde_json::from_str::<UiConfig>(&text) {
             Ok(cfg) => cfg,
             Err(_) => {
-                let cfg = AppConfig::default();
+                let cfg = UiConfig::default();
                 let _ = save_config(&cfg);
                 cfg
             }
         },
-        Err(_) => AppConfig::default(),
+        Err(_) => UiConfig::default(),
     }
 }
 
-pub fn save_config(cfg: &AppConfig) -> io::Result<()> {
+pub fn save_config(cfg: &UiConfig) -> io::Result<()> {
     let Some(path) = config_path() else {
         return Ok(());
     };

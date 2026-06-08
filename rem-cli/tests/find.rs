@@ -92,8 +92,10 @@ fn integration_line_and_column_are_correct() {
 #[test]
 fn integration_max_results_truncates() {
     let root = temp_tree("cap");
-    let mut opts = FindOptions::default();
-    opts.max_results = 1;
+    let opts = FindOptions {
+        max_results: 1,
+        ..Default::default()
+    };
     let report = find_matches(&root, "handleneedle", &opts);
     assert_eq!(report.matches.len(), 1);
     assert!(report.truncated);

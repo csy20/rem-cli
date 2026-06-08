@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::Arc;
+use std::sync::LazyLock;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -14,36 +15,39 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use walkdir::WalkDir;
 
-mod feedback;
-mod intent;
-mod memory;
-mod provider;
 mod agentic;
-mod parsing;
+mod commands;
+mod config;
+mod feedback;
 mod find;
 mod indexer;
+mod intent;
+mod memory;
+mod parsing;
+mod provider;
+mod ui;
 
+use agentic::{build_agentic_prompt, build_tool_context, extract_goal_signal, run_lint, run_test};
 use feedback::FeedbackTracker;
+use find::{find_matches, FindOptions};
+use indexer::{
+    build_retrieved_context, generate_codebase_index, load_codebase_index,
+    retrieve_relevant_chunks, write_codebase_index,
+};
 use intent::{classify_intent, has_creation_intent, has_file_path, intent_instruction, TaskIntent};
 use memory::ProjectMemory;
 use parsing::{current_name_from_bold, extract_code_block, guess_filename, strip_code_blocks};
-use provider::{Provider, api_url, OllamaJsonResponse};
-use agentic::{build_agentic_prompt, build_tool_context, extract_goal_signal, run_lint, run_test};
-use find::{find_matches, FindOptions};
-use indexer::{
-    build_retrieved_context, generate_codebase_index, load_codebase_index, retrieve_relevant_chunks,
-    write_codebase_index,
-};
+use provider::{api_url, OllamaJsonResponse, Provider};
 
 static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
 
 fn setup_global_ctrlc_handler() {
-    let _ = tokio::spawn(async {
+    let _handle = tokio::spawn(async {
         loop {
             let _ = tokio::signal::ctrl_c().await;
             let count = CTRL_C_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
             if count >= 2 {
-                eprintln!("\n  {} exiting (Ctrl+C pressed twice)", "\u{00d7}");
+                eprintln!("\n  \u{00d7} exiting (Ctrl+C pressed twice)");
                 std::process::exit(0);
             }
         }
@@ -73,6 +77,50 @@ macro_rules! style {
         format!("{}{}{}", $color, format!($($arg)*), $crate::C_RESET)
     };
 }
+
+// ── Lazy-compiled regexes ──────────────────────────────────────────────────
+
+static RE_AT_REF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@([^\s]+)").expect("invalid regex literal"));
+static RE_HTML_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^>]*>").expect("invalid regex literal"));
+static RE_AMP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"&amp;").expect("invalid regex literal"));
+static RE_LT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"&lt;").expect("invalid regex literal"));
+static RE_GT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"&gt;").expect("invalid regex literal"));
+static RE_QUOT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"&quot;").expect("invalid regex literal"));
+static RE_APOS: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"&#x27;").expect("invalid regex literal"));
+static RE_SEARCH_TITLE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#)
+        .expect("invalid regex literal")
+});
+static RE_SEARCH_SNIPPET: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"class="result__snippet"[^>]*>([^<]*(?:<[^/>][^>]*>[^<]*</[^>]+>)*[^<]*)</a>"#)
+        .expect("invalid regex literal")
+});
+static RE_HIGHLIGHT_HTML_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(</?\w+[^>]*>)").expect("invalid regex literal"));
+static RE_HIGHLIGHT_ATTR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"("[^"]*")"#).expect("invalid regex literal"));
+static RE_HIGHLIGHT_COMMENT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(<!--.*?-->)").expect("invalid regex literal"));
+static RE_CSS_PROP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?m)^(\s*)([a-zA-Z-]+)(\s*:)").expect("invalid regex literal"));
+static RE_CSS_VAL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(:\s*)([^;}{]+)").expect("invalid regex literal"));
+static RE_CSS_COMMENT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(/\*.*?\*/)").expect("invalid regex literal"));
+static RE_JS_KW: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(const|let|var|function|return|if|else|for|while|class|import|export|from|async|await|try|catch|new|this|document|console|window)\b").expect("invalid regex literal")
+});
+static RE_JS_STR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"('[^']*'|"[^"]*"|`[^`]*`)"#).expect("invalid regex literal"));
+static RE_JS_COMMENT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(//.*)").expect("invalid regex literal"));
 
 // ── Config & Prompts ───────────────────────────────────────────────────────
 
@@ -145,8 +193,16 @@ RULES — follow strictly:
 "##;
 
 const BLOCKED_COMMAND_PATTERNS: [&str; 10] = [
-    "rm -rf /", "rm -rf", "rm  -rf", "mkfs", "dd if=",
-    ":(){:|:&};:", "shutdown", "reboot", "curl ", "sudo ",
+    "rm -rf /",
+    "rm -rf",
+    "rm  -rf",
+    "mkfs",
+    "dd if=",
+    ":(){:|:&};:",
+    "shutdown",
+    "reboot",
+    "curl ",
+    "sudo ",
 ];
 
 // ── CLI definition ─────────────────────────────────────────────────────────
@@ -167,7 +223,12 @@ struct Cli {
     provider: Option<String>,
     #[arg(long, global = true, help = "API key for OpenAI-compatible providers")]
     api_key: Option<String>,
-    #[arg(long, short = 'v', global = true, help = "Verbose output (show raw model responses)")]
+    #[arg(
+        long,
+        short = 'v',
+        global = true,
+        help = "Verbose output (show raw model responses)"
+    )]
     verbose: bool,
     #[command(subcommand)]
     command: Option<Commands>,
@@ -183,7 +244,9 @@ enum Commands {
     Patch(PatchArgs),
     #[command(about = "Scaffold a new project with templates")]
     New(NewArgs),
-    #[command(about = "Generate or refresh the codebase index (for retrieval in large projects). Pure Rust; writes .rem/codebase_index.json so chat/goal can inject only relevant chunks instead of full file listings.")]
+    #[command(
+        about = "Generate or refresh the codebase index (for retrieval in large projects). Pure Rust; writes .rem/codebase_index.json so chat/goal can inject only relevant chunks instead of full file listings."
+    )]
     Index(IndexArgs),
 }
 
@@ -213,7 +276,11 @@ struct PatchArgs {
 struct NewArgs {
     #[arg(help = "Project name / directory path")]
     name: String,
-    #[arg(long, default_value = "bare", help = "Project type: bare, portfolio, landing, blog")]
+    #[arg(
+        long,
+        default_value = "bare",
+        help = "Project type: bare, portfolio, landing, blog"
+    )]
     project_type: String,
 }
 
@@ -244,7 +311,9 @@ struct AppConfig {
     api_key: Option<String>,
 }
 
-fn default_provider() -> String { "ollama".to_string() }
+fn default_provider() -> String {
+    "ollama".to_string()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -282,16 +351,36 @@ struct PartialConfig {
 
 impl AppConfig {
     fn apply_partial(&mut self, part: PartialConfig) {
-        if let Some(v) = part.model { self.model = v; }
-        if let Some(v) = part.ollama_url { self.ollama_url = v; }
-        if let Some(v) = part.timeout_s { self.timeout_s = v; }
-        if let Some(v) = part.max_context_bytes { self.max_context_bytes = v; }
-        if let Some(v) = part.model_ctx { self.model_ctx = v; }
-        if let Some(v) = part.prompts_dir { self.prompts_dir = Some(v); }
-        if let Some(v) = part.workspace_dir { self.workspace_dir = Some(v); }
-        if let Some(v) = part.provider { self.provider = v; }
-        if let Some(v) = part.api_url { self.api_url = Some(v); }
-        if let Some(v) = part.api_key { self.api_key = Some(v); }
+        if let Some(v) = part.model {
+            self.model = v;
+        }
+        if let Some(v) = part.ollama_url {
+            self.ollama_url = v;
+        }
+        if let Some(v) = part.timeout_s {
+            self.timeout_s = v;
+        }
+        if let Some(v) = part.max_context_bytes {
+            self.max_context_bytes = v;
+        }
+        if let Some(v) = part.model_ctx {
+            self.model_ctx = v;
+        }
+        if let Some(v) = part.prompts_dir {
+            self.prompts_dir = Some(v);
+        }
+        if let Some(v) = part.workspace_dir {
+            self.workspace_dir = Some(v);
+        }
+        if let Some(v) = part.provider {
+            self.provider = v;
+        }
+        if let Some(v) = part.api_url {
+            self.api_url = Some(v);
+        }
+        if let Some(v) = part.api_key {
+            self.api_key = Some(v);
+        }
     }
 }
 
@@ -308,15 +397,32 @@ fn save_config(cfg: &AppConfig) -> Result<()> {
 
 fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
     println!();
-    println!("{} {}", style!(C_BOLD, "Welcome to REM!"), style!(C_DIM, "first-time setup"));
+    println!(
+        "{} {}",
+        style!(C_BOLD, "Welcome to REM!"),
+        style!(C_DIM, "first-time setup")
+    );
     println!();
     println!("{}", style!(C_CYAN, "│"));
-    println!("{} {}{}",
-        style!(C_CYAN, "│"), style!(C_WHITE_B, "Where should REM create your projects?"), style!(C_DIM, ""));
-    println!("{} {} e.g. {} or {}",
-        style!(C_CYAN, "│"), style!(C_DIM, ""),
-        style!(C_WHITE_B, "~/projects"), style!(C_WHITE_B, "/home/you/code"));
-    println!("{} {} type {} for current dir, or a full path", style!(C_CYAN, "│"), style!(C_DIM, ""), style!(C_WHITE_B, "."));
+    println!(
+        "{} {}{}",
+        style!(C_CYAN, "│"),
+        style!(C_WHITE_B, "Where should REM create your projects?"),
+        style!(C_DIM, "")
+    );
+    println!(
+        "{} {} e.g. {} or {}",
+        style!(C_CYAN, "│"),
+        style!(C_DIM, ""),
+        style!(C_WHITE_B, "~/projects"),
+        style!(C_WHITE_B, "/home/you/code")
+    );
+    println!(
+        "{} {} type {} for current dir, or a full path",
+        style!(C_CYAN, "│"),
+        style!(C_DIM, ""),
+        style!(C_WHITE_B, ".")
+    );
     println!("{}", style!(C_CYAN, "│"));
     print!("{}", style!(C_CYAN, "│  rem> "));
     let _ = io::stdout().flush();
@@ -345,11 +451,18 @@ fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
     cfg.workspace_dir = Some(dir.to_string_lossy().to_string());
     save_config(cfg)?;
 
-    println!("{} {} workspace saved to {}",
-        style!(C_GREEN, "│  ✓"), style!(C_DIM, ""),
-        style!(C_WHITE_B, "{}", dir.display()));
-    println!("{} {} change it anytime with {}",
-        style!(C_CYAN, "│"), style!(C_DIM, ""), style!(C_WHITE_B, "/dir <path>"));
+    println!(
+        "{} {} workspace saved to {}",
+        style!(C_GREEN, "│  ✓"),
+        style!(C_DIM, ""),
+        style!(C_WHITE_B, "{}", dir.display())
+    );
+    println!(
+        "{} {} change it anytime with {}",
+        style!(C_CYAN, "│"),
+        style!(C_DIM, ""),
+        style!(C_WHITE_B, "/dir <path>")
+    );
     println!();
 
     Ok(Some(dir))
@@ -401,7 +514,6 @@ impl ModelReply {
             caution: "Model returned non-JSON output. Review everything carefully.".to_string(),
         }
     }
-
 }
 
 fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
@@ -438,7 +550,10 @@ fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
             continue;
         }
 
-        if let Some(name) = trimmed.strip_prefix("### ").or_else(|| trimmed.strip_prefix("## ")) {
+        if let Some(name) = trimmed
+            .strip_prefix("### ")
+            .or_else(|| trimmed.strip_prefix("## "))
+        {
             current_name = name.trim().to_string();
             continue;
         }
@@ -523,30 +638,44 @@ async fn perform_web_search(client: &Client, query: &str) -> Result<Vec<SearchRe
         .send()
         .await
         .context("web search request failed")?;
-    let html = resp.text().await.context("failed to read search response")?;
+    let html = resp
+        .text()
+        .await
+        .context("failed to read search response")?;
     Ok(parse_ddg_html(&html))
 }
 
 fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
     let mut results = Vec::new();
-    let title_re = Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#).expect("invalid regex literal");
-    let snippet_re = Regex::new(r#"class="result__snippet"[^>]*>([^<]*(?:<[^/>][^>]*>[^<]*</[^>]+>)*[^<]*)</a>"#).expect("invalid regex literal");
     let mut remaining = html;
     while results.len() < 8 {
-        if let Some(cap) = title_re.captures(remaining) {
-            let url = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-            let title = cap.get(2).map(|m| strip_html(m.as_str())).unwrap_or_default();
+        if let Some(cap) = RE_SEARCH_TITLE.captures(remaining) {
+            let url = cap
+                .get(1)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            let title = cap
+                .get(2)
+                .map(|m| strip_html(m.as_str()))
+                .unwrap_or_default();
             let snippet_pos = cap.get(0).map(|m| m.end()).unwrap_or(0);
             let after_title = &remaining[snippet_pos..];
-            let snippet = snippet_re.captures(after_title)
+            let snippet = RE_SEARCH_SNIPPET
+                .captures(after_title)
                 .and_then(|c| c.get(1))
                 .map(|m| strip_html(m.as_str()).trim().to_string())
                 .unwrap_or_default();
             if !title.is_empty() {
-                results.push(SearchResult { title, snippet, url });
+                results.push(SearchResult {
+                    title,
+                    snippet,
+                    url,
+                });
             }
             let advance = cap.get(0).map(|m| m.end()).unwrap_or(1);
-            if advance >= remaining.len() { break; }
+            if advance >= remaining.len() {
+                break;
+            }
             remaining = &remaining[advance..];
         } else {
             break;
@@ -556,18 +685,12 @@ fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
 }
 
 fn strip_html(input: &str) -> String {
-    let tag_re = Regex::new(r"<[^>]*>").expect("invalid regex literal");
-    let amp_re = Regex::new(r"&amp;").expect("invalid regex literal");
-    let lt_re = Regex::new(r"&lt;").expect("invalid regex literal");
-    let gt_re = Regex::new(r"&gt;").expect("invalid regex literal");
-    let quot_re = Regex::new(r"&quot;").expect("invalid regex literal");
-    let apos_re = Regex::new(r"&#x27;").expect("invalid regex literal");
-    let mut s = tag_re.replace_all(input, "").to_string();
-    s = amp_re.replace_all(&s, "&").to_string();
-    s = lt_re.replace_all(&s, "<").to_string();
-    s = gt_re.replace_all(&s, ">").to_string();
-    s = quot_re.replace_all(&s, "\"").to_string();
-    s = apos_re.replace_all(&s, "'").to_string();
+    let mut s = RE_HTML_TAG.replace_all(input, "").to_string();
+    s = RE_AMP.replace_all(&s, "&").to_string();
+    s = RE_LT.replace_all(&s, "<").to_string();
+    s = RE_GT.replace_all(&s, ">").to_string();
+    s = RE_QUOT.replace_all(&s, "\"").to_string();
+    s = RE_APOS.replace_all(&s, "'").to_string();
     s.trim().to_string()
 }
 
@@ -578,7 +701,11 @@ fn print_search_results(results: &[SearchResult]) {
     }
     println!("{}", style!(C_DIM, "│"));
     for (i, r) in results.iter().enumerate() {
-        println!("{} {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "{}. {}", i + 1, r.title));
+        println!(
+            "{} {}",
+            style!(C_CYAN, "│"),
+            style!(C_WHITE_B, "{}. {}", i + 1, r.title)
+        );
         println!("{}   {}", style!(C_CYAN, "│"), style!(C_DIM, "{}", r.url));
         if !r.snippet.is_empty() {
             println!("{}   {}", style!(C_CYAN, "│"), r.snippet);
@@ -611,7 +738,8 @@ impl ChatSession {
     fn new(model: &str, workspace: Option<PathBuf>) -> Result<Self> {
         let rl = DefaultEditor::new().context("failed to start line editor")?;
         let project_dir = workspace.clone();
-        let project_memory = ProjectMemory::load(project_dir.as_deref().unwrap_or_else(|| Path::new(".")));
+        let project_memory =
+            ProjectMemory::load(project_dir.as_deref().unwrap_or_else(|| Path::new(".")));
         Ok(Self {
             rl,
             last_code: String::new(),
@@ -632,7 +760,7 @@ impl ChatSession {
     }
 
     fn readline(&mut self, prompt: &str) -> io::Result<String> {
-        self.rl.readline(prompt).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        self.rl.readline(prompt).map_err(io::Error::other)
     }
 
     fn add_history(&mut self, line: &str) {
@@ -699,13 +827,14 @@ impl ChatSession {
     }
 
     fn resolve_at_references(&self, input: &str) -> (String, String) {
-        let re = Regex::new(r"@([^\s]+)").expect("invalid regex literal");
         let mut extra_context = String::new();
         let mut cleaned_input = input.to_string();
 
-        for cap in re.captures_iter(input) {
+        for cap in RE_AT_REF.captures_iter(input) {
             let ref_path = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-            if ref_path.starts_with("http") { continue; }
+            if ref_path.starts_with("http") {
+                continue;
+            }
             let path = if ref_path.starts_with('/') || ref_path.starts_with("~/") {
                 let resolved = if ref_path.starts_with("~/") {
                     if let Some(home) = dirs::home_dir() {
@@ -718,33 +847,56 @@ impl ChatSession {
                 };
                 resolved
             } else {
-                let base = self.project_dir.as_deref().unwrap_or_else(|| Path::new("."));
+                let base = self
+                    .project_dir
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new("."));
                 base.join(ref_path)
             };
 
             if path.is_file() {
                 if let Ok(content) = fs::read_to_string(&path) {
                     let truncated = truncate_bytes(&content, 8000);
-                    extra_context.push_str(&format!("\n[File: {}]\n{}\n[/File: {}]\n",
-                        path.display(), truncated, path.display()));
+                    extra_context.push_str(&format!(
+                        "\n[File: {}]\n{}\n[/File: {}]\n",
+                        path.display(),
+                        truncated,
+                        path.display()
+                    ));
                 }
             } else if path.is_dir() {
                 let mut listing = String::new();
-                for entry in WalkDir::new(&path).max_depth(2).sort_by_file_name() {
-                    if let Ok(e) = entry {
-                        if let Ok(rel) = e.path().strip_prefix(&path) {
-                            let rel_str = rel.display().to_string();
-                            if rel_str.is_empty() || rel_str.starts_with('.') { continue; }
-                            if rel_str.contains("node_modules") || rel_str.contains("target") || rel_str.contains("__pycache__") || rel_str.contains(".git") { continue; }
-                            let marker = if e.file_type().is_dir() { "/" } else { "" };
-                            listing.push_str(&format!("  {}{}\n", rel_str, marker));
+                for e in WalkDir::new(&path)
+                    .max_depth(2)
+                    .sort_by_file_name()
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Ok(rel) = e.path().strip_prefix(&path) {
+                        let rel_str = rel.display().to_string();
+                        if rel_str.is_empty() || rel_str.starts_with('.') {
+                            continue;
                         }
+                        if rel_str.contains("node_modules")
+                            || rel_str.contains("target")
+                            || rel_str.contains("__pycache__")
+                            || rel_str.contains(".git")
+                        {
+                            continue;
+                        }
+                        let marker = if e.file_type().is_dir() { "/" } else { "" };
+                        listing.push_str(&format!("  {}{}\n", rel_str, marker));
                     }
                 }
                 if !listing.is_empty() {
                     let total = listing.lines().count();
-                    extra_context.push_str(&format!("\n[Directory: {} ({} entries)]\n{}[/Directory: {}]\n",
-                        path.display(), total, listing, path.display()));
+                    extra_context.push_str(&format!(
+                        "\n[Directory: {} ({} entries)]\n{}[/Directory: {}]\n",
+                        path.display(),
+                        total,
+                        listing,
+                        path.display()
+                    ));
                 }
             }
 
@@ -779,13 +931,20 @@ impl SpinnerGuard {
             let chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let mut i = 0;
             while r.load(Ordering::Relaxed) {
-                eprint!("\r  {} {}", style!(C_CYAN, "{}", chars[i]), style!(C_DIM, "{}", msg));
+                eprint!(
+                    "\r  {} {}",
+                    style!(C_CYAN, "{}", chars[i]),
+                    style!(C_DIM, "{}", msg)
+                );
                 let _ = io::stderr().flush();
                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                 i = (i + 1) % chars.len();
             }
         });
-        Self { running, handle: Some(handle) }
+        Self {
+            running,
+            handle: Some(handle),
+        }
     }
 
     fn cancel(&mut self) {
@@ -807,10 +966,15 @@ impl Drop for SpinnerGuard {
 fn check_system_resources() {
     let mem_gb = detect_system_ram_gb();
     if mem_gb > 0 && mem_gb <= 16 {
-        eprintln!("{} {} GB RAM detected — Ollama may be slow on CPU.",
-            style!(C_YELLOW, "│ system:"), mem_gb);
-        eprintln!("{} Try:  OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 ollama serve",
-            style!(C_DIM, "│"));
+        eprintln!(
+            "{} {} GB RAM detected — Ollama may be slow on CPU.",
+            style!(C_YELLOW, "│ system:"),
+            mem_gb
+        );
+        eprintln!(
+            "{} Try:  OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 ollama serve",
+            style!(C_DIM, "│")
+        );
         eprintln!();
     }
 }
@@ -819,8 +983,11 @@ fn detect_system_ram_gb() -> u64 {
     if let Ok(content) = fs::read_to_string("/proc/meminfo") {
         for line in content.lines() {
             if line.starts_with("MemTotal:") {
-                let kb: u64 = line.split_whitespace()
-                    .nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                let kb: u64 = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
                 return kb / 1024 / 1024;
             }
         }
@@ -838,10 +1005,18 @@ async fn main() -> Result<()> {
     let verbose = cli.verbose;
 
     let mut cfg = load_config().unwrap_or_default();
-    if let Some(m) = cli.model { cfg.model = m; }
-    if let Some(url) = cli.ollama_url { cfg.ollama_url = url; }
-    if let Some(p) = cli.provider { cfg.provider = p; }
-    if let Some(k) = cli.api_key { cfg.api_key = Some(k); }
+    if let Some(m) = cli.model {
+        cfg.model = m;
+    }
+    if let Some(url) = cli.ollama_url {
+        cfg.ollama_url = url;
+    }
+    if let Some(p) = cli.provider {
+        cfg.provider = p;
+    }
+    if let Some(k) = cli.api_key {
+        cfg.api_key = Some(k);
+    }
 
     if let Some(Commands::New(args)) = cli.command {
         return run_new(args, &cfg);
@@ -851,43 +1026,67 @@ async fn main() -> Result<()> {
     }
 
     let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
-    let base_url = cfg.api_url.clone().unwrap_or_else(|| cfg.ollama_url.clone());
+    let base_url = cfg
+        .api_url
+        .clone()
+        .unwrap_or_else(|| cfg.ollama_url.clone());
     let mut client = match cfg.provider.as_str() {
         "openai" | "vllm" => {
-            let key = cfg.api_key.clone()
+            let key = cfg
+                .api_key
+                .clone()
                 .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
             if key.is_empty() {
-                eprintln!("{}: provider '{}' requires --api-key or OPENAI_API_KEY",
-                    style!(C_YELLOW, "warning"), cfg.provider);
+                eprintln!(
+                    "{}: provider '{}' requires --api-key or OPENAI_API_KEY",
+                    style!(C_YELLOW, "warning"),
+                    cfg.provider
+                );
             }
             Provider::new_openai(
-                base_url, cfg.model.clone(), cfg.timeout_s, system_prompt, key, cfg.model_ctx,
+                base_url,
+                cfg.model.clone(),
+                cfg.timeout_s,
+                system_prompt,
+                key,
+                cfg.model_ctx,
             )
         }
         _ => Provider::new_ollama(
-            base_url, cfg.model.clone(), cfg.timeout_s, system_prompt, cfg.model_ctx,
+            base_url,
+            cfg.model.clone(),
+            cfg.timeout_s,
+            system_prompt,
+            cfg.model_ctx,
         ),
     };
     client.healthcheck().await?;
     let models = client.list_models().await?;
     if !models.iter().any(|m| m == &cfg.model) {
         let fallback = models.first().cloned().unwrap_or_else(|| cfg.model.clone());
-        eprintln!("{}: model '{}' not found; using '{}'", style!(C_YELLOW, "warning"), cfg.model, fallback);
+        eprintln!(
+            "{}: model '{}' not found; using '{}'",
+            style!(C_YELLOW, "warning"),
+            cfg.model,
+            fallback
+        );
         client.set_model(fallback);
     }
 
     check_system_resources();
 
     match cli.command {
-        Some(Commands::Ask(args))    => run_ask(&client, &cfg, args, verbose).await,
+        Some(Commands::Ask(args)) => run_ask(&client, &cfg, args, verbose).await,
         Some(Commands::Explain(args)) => run_explain(&client, args).await,
-        Some(Commands::Patch(args))   => run_patch(&client, &cfg, args).await,
-        Some(Commands::New(_))        => unreachable!(),
+        Some(Commands::Patch(args)) => run_patch(&client, &cfg, args).await,
+        Some(Commands::New(_)) => unreachable!(),
         None => {
             let is_pipe = !atty::is(atty::Stream::Stdin);
             if is_pipe {
                 let mut stdin_data = String::new();
-                if io::stdin().read_to_string(&mut stdin_data).is_ok() && !stdin_data.trim().is_empty() {
+                if io::stdin().read_to_string(&mut stdin_data).is_ok()
+                    && !stdin_data.trim().is_empty()
+                {
                     return run_pipe(&client, &cfg, stdin_data.trim(), verbose).await;
                 }
             }
@@ -931,7 +1130,9 @@ fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
         if path.exists() {
             if let Ok(text) = fs::read_to_string(path) {
                 let trimmed = text.trim();
-                if !trimmed.is_empty() { return trimmed.to_string(); }
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
             }
         }
     }
@@ -940,9 +1141,15 @@ fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
 
 async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, verbose: bool) -> Result<()> {
     let prompt = if input.len() > 12000 {
-        format!("Analyze the following piped input. Be concise.\n\n{}...\n[truncated]", &input[..12000])
+        format!(
+            "Analyze the following piped input. Be concise.\n\n{}...\n[truncated]",
+            &input[..12000]
+        )
     } else {
-        format!("Analyze the following piped input. Be concise.\n\n{}", input)
+        format!(
+            "Analyze the following piped input. Be concise.\n\n{}",
+            input
+        )
     };
     let _spinner = SpinnerGuard::new("thinking...");
     let result = client.complete_chat_stream(
@@ -977,9 +1184,7 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
 
     let _spinner = SpinnerGuard::new("thinking...");
     let result = match intent {
-        TaskIntent::CodeAction => {
-            client.complete_json(&composed).await
-        }
+        TaskIntent::CodeAction => client.complete_json(&composed).await,
         _ => {
             let system_prompt = match intent {
                 TaskIntent::FastAnswer => CHAT_SYSTEM_PROMPT_CONVERSATIONAL,
@@ -987,17 +1192,19 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
                 TaskIntent::WebNeeded => CHAT_SYSTEM_PROMPT_CONVERSATIONAL,
                 TaskIntent::CodeAction => unreachable!(),
             };
-            let inline_prompt = format!(
-                "{}\n\nUser: {}\n\nREM:",
-                system_prompt, composed
-            );
+            let inline_prompt = format!("{}\n\nUser: {}\n\nREM:", system_prompt, composed);
             let url = api_url(&cfg.ollama_url, "generate");
             let payload = json!({
                 "model": &client.model,
                 "prompt": inline_prompt,
                 "stream": false
             });
-            let resp = client.client.post(&url).json(&payload).send().await
+            let resp = client
+                .client
+                .post(&url)
+                .json(&payload)
+                .send()
+                .await
                 .context("failed to call Ollama")?;
             if !resp.status().is_success() {
                 let body = resp.text().await.unwrap_or_default();
@@ -1017,7 +1224,11 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
 
     let reply = result?;
     if verbose {
-        eprintln!("{} raw explanation: {}", style!(C_DIM, "verbose:"), reply.explanation);
+        eprintln!(
+            "{} raw explanation: {}",
+            style!(C_DIM, "verbose:"),
+            reply.explanation
+        );
         eprintln!("{} raw files: {:?}", style!(C_DIM, "verbose:"), reply.files);
     }
     print_reply(&reply, true);
@@ -1026,7 +1237,10 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
 
 async fn run_explain(client: &Provider, args: ExplainArgs) -> Result<()> {
     print_banner(client);
-    let prompt = format!("Explain this terminal command for a beginner and suggest a safer variant if needed: {}", args.command);
+    let prompt = format!(
+        "Explain this terminal command for a beginner and suggest a safer variant if needed: {}",
+        args.command
+    );
 
     let _spinner = SpinnerGuard::new("thinking...");
     let reply = client.complete_json(&prompt).await?;
@@ -1046,7 +1260,10 @@ async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArgs) -> Resul
 
     let _spinner = SpinnerGuard::new("thinking...");
     let reply = client.complete_json(&prompt).await?;
-    println!("{}", style!(C_CYAN, "Patch preview for {}", args.file.display()));
+    println!(
+        "{}",
+        style!(C_CYAN, "Patch preview for {}", args.file.display())
+    );
     print_reply(&reply, true);
     Ok(())
 }
@@ -1058,21 +1275,25 @@ fn print_welcome(client: &Provider) {
     println!();
     println!("{}",
         style!(C_CYAN, "\u{2554}\u{2550}\u{2564}\u{2550}\u{2564}\u{2550}\u{2564}\u{2550}\u{2564}\u{2550}\u{2557}"));
-    println!("{} {} {} {} {} {} {}",
+    println!(
+        "{} {} {} {} {} {} {}",
         style!(C_CYAN, "\u{2551}"),
         style!(C_BOLD, "REM v{}", env!("CARGO_PKG_VERSION")),
         style!(C_CYAN, "\u{2502}"),
         style!(C_DIM, "model: {}", model_short),
         style!(C_CYAN, "\u{2502}"),
         style!(C_GREEN, "\u{26a1} /help for commands"),
-        style!(C_CYAN, "\u{2551}"));
+        style!(C_CYAN, "\u{2551}")
+    );
     println!("{}",
         style!(C_CYAN, "\u{255a}\u{2550}\u{2567}\u{2550}\u{2567}\u{2550}\u{2567}\u{2550}\u{2567}\u{2550}\u{255d}"));
-    println!("{} {} {} {}",
+    println!(
+        "{} {} {} {}",
         style!(C_CYAN, "\u{2502}"),
         style!(C_GREEN, "┃ mode: CHAT"),
         style!(C_CYAN, "│"),
-        style!(C_DIM, "/mode to switch → CODE → PLAN → CHAT"));
+        style!(C_DIM, "/mode to switch → CODE → PLAN → CHAT")
+    );
     println!();
 }
 
@@ -1088,25 +1309,40 @@ fn build_project_context(dir: &Path, max_bytes: usize) -> String {
     {
         let Ok(entry) = entry else { continue };
         let p = entry.path();
-        let Ok(rel) = p.strip_prefix(dir) else { continue };
+        let Ok(rel) = p.strip_prefix(dir) else {
+            continue;
+        };
         let rel_str = rel.display().to_string();
-        if rel_str.is_empty() { continue; }
-        if rel_str.starts_with('.') && rel_str != "." { continue; }
-        if rel_str.contains("node_modules") || rel_str.contains("target")
-            || rel_str.contains("__pycache__") || rel_str.contains(".git")
-            || rel_str.contains("venv") || rel_str.contains("dist")
+        if rel_str.is_empty() {
+            continue;
+        }
+        if rel_str.starts_with('.') && rel_str != "." {
+            continue;
+        }
+        if rel_str.contains("node_modules")
+            || rel_str.contains("target")
+            || rel_str.contains("__pycache__")
+            || rel_str.contains(".git")
+            || rel_str.contains("venv")
+            || rel_str.contains("dist")
             || rel_str.contains(".pytest_cache")
-        { continue; }
+        {
+            continue;
+        }
 
         if p.is_dir() {
-            if rel.components().count() >= 3 { continue; }
+            if rel.components().count() >= 3 {
+                continue;
+            }
             entries.push(format!("{}/", rel_str));
         } else {
             let size = p.metadata().map(|m| m.len()).unwrap_or(0);
             entries.push(format!("{}  ({} bytes)", rel_str, size));
         }
         count += 1;
-        if out.len() > max_bytes { break; }
+        if out.len() > max_bytes {
+            break;
+        }
     }
 
     if count > 0 {
@@ -1119,7 +1355,9 @@ fn build_project_context(dir: &Path, max_bytes: usize) -> String {
 }
 
 fn detect_project_type(dir: &Path) -> &'static str {
-    if !dir.exists() { return ""; }
+    if !dir.exists() {
+        return "";
+    }
     let entries: Vec<String> = WalkDir::new(dir)
         .max_depth(1)
         .into_iter()
@@ -1130,13 +1368,27 @@ fn detect_project_type(dir: &Path) -> &'static str {
 
     let has_file = |name: &str| entries.iter().any(|f| f == name);
 
-    if has_file("Cargo.toml") { return "rust"; }
-    if has_file("go.mod") { return "go"; }
-    if has_file("pyproject.toml") || has_file("setup.py") || has_file("requirements.txt") { return "python"; }
-    if has_file("package.json") { return "javascript"; }
-    if has_file("index.html") && has_file("style.css") { return "html_css"; }
-    if has_file("dart.yaml") || has_file("pubspec.yaml") { return "dart"; }
-    if has_file("Makefile") { return "cpp"; }
+    if has_file("Cargo.toml") {
+        return "rust";
+    }
+    if has_file("go.mod") {
+        return "go";
+    }
+    if has_file("pyproject.toml") || has_file("setup.py") || has_file("requirements.txt") {
+        return "python";
+    }
+    if has_file("package.json") {
+        return "javascript";
+    }
+    if has_file("index.html") && has_file("style.css") {
+        return "html_css";
+    }
+    if has_file("dart.yaml") || has_file("pubspec.yaml") {
+        return "dart";
+    }
+    if has_file("Makefile") {
+        return "cpp";
+    }
     ""
 }
 
@@ -1161,17 +1413,17 @@ fn build_prompt(session: &ChatSession, client: &Provider) -> String {
         RunMode::Plan => C_BLUE,
     };
     let mut p = String::new();
-    p.push_str("\x01");
+    p.push('\x01');
     p.push_str(mode_color);
-    p.push_str("\x02");
+    p.push('\x02');
     p.push('[');
     p.push_str(session.mode.label());
     p.push(']');
     p.push_str("\x01\x1b[0m\x02");
     p.push(' ');
-    p.push_str("\x01");
+    p.push('\x01');
     p.push_str(C_CYAN);
-    p.push_str("\x02");
+    p.push('\x02');
     p.push_str(model_short);
     p.push('>');
     p.push_str("\x01\x1b[0m\x02");
@@ -1195,10 +1447,12 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
     let mut session = ChatSession::new(&client.model, workspace.clone())?;
     print_welcome(client);
     if let Some(ref wd) = workspace {
-        println!("{} {} {}",
+        println!(
+            "{} {} {}",
             style!(C_CYAN, "│"),
             style!(C_DIM, "workspace →"),
-            style!(C_WHITE_B, "{}", wd.display()));
+            style!(C_WHITE_B, "{}", wd.display())
+        );
         println!("{}", style!(C_CYAN, "│"));
     }
 
@@ -1226,7 +1480,9 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             }
         };
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
 
         if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
             println!("  {}", style!(C_DIM, "bye!"));
@@ -1301,11 +1557,18 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                 RunMode::Plan => "explore & plan — analyze, propose approach, no code",
             };
             println!("{}", style!(C_DIM, "│"));
-            println!("{} {} {}",
+            println!(
+                "{} {} {}",
                 style!(C_CYAN, "│"),
                 style!(mode_color, "switched to {} mode", mode_label),
-                style!(C_DIM, ""));
-            println!("{} {} {}", style!(C_CYAN, "│"), style!(C_DIM, "\u{2502}"), style!(C_DIM, "{}", hint));
+                style!(C_DIM, "")
+            );
+            println!(
+                "{} {} {}",
+                style!(C_CYAN, "│"),
+                style!(C_DIM, "\u{2502}"),
+                style!(C_DIM, "{}", hint)
+            );
             println!("{}", style!(C_DIM, "│"));
             continue;
         }
@@ -1313,11 +1576,18 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
         if trimmed.eq_ignore_ascii_case("/plan") {
             session.mode = RunMode::Plan;
             println!("{}", style!(C_DIM, "│"));
-            println!("{} {} {}",
+            println!(
+                "{} {} {}",
                 style!(C_CYAN, "│"),
                 style!(C_BLUE, "switched to PLAN mode"),
-                style!(C_DIM, ""));
-            println!("{} {} {}", style!(C_CYAN, "│"), style!(C_DIM, "\u{2502}"), style!(C_DIM, "explore & plan — analyze, propose approach, no code"));
+                style!(C_DIM, "")
+            );
+            println!(
+                "{} {} {}",
+                style!(C_CYAN, "│"),
+                style!(C_DIM, "\u{2502}"),
+                style!(C_DIM, "explore & plan — analyze, propose approach, no code")
+            );
             println!("{}", style!(C_DIM, "│"));
             continue;
         }
@@ -1327,7 +1597,11 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             session.last_search.clear();
             session.last_tokens = 0;
             println!("{}", style!(C_DIM, "│"));
-            println!("{} {}", style!(C_CYAN, "│"), style!(C_GREEN, "conversation cleared"));
+            println!(
+                "{} {}",
+                style!(C_CYAN, "│"),
+                style!(C_GREEN, "conversation cleared")
+            );
             println!("{}", style!(C_DIM, "│"));
             continue;
         }
@@ -1378,9 +1652,23 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             session.last_files.clear();
             session.last_files_written.clear();
             println!("{}", style!(C_DIM, "│"));
-            println!("{} {}", style!(C_CYAN, "│"), style!(C_GREEN, "full reset — history, code cache, and results cleared"));
-            println!("{}   {} {}",
-                style!(C_CYAN, "│"), style!(C_DIM, "│"), style!(C_DIM, "(memory preserved — use /memory to clear project memory)"));
+            println!(
+                "{} {}",
+                style!(C_CYAN, "│"),
+                style!(
+                    C_GREEN,
+                    "full reset — history, code cache, and results cleared"
+                )
+            );
+            println!(
+                "{}   {} {}",
+                style!(C_CYAN, "│"),
+                style!(C_DIM, "│"),
+                style!(
+                    C_DIM,
+                    "(memory preserved — use /memory to clear project memory)"
+                )
+            );
             println!("{}", style!(C_DIM, "│"));
             continue;
         }
@@ -1410,12 +1698,24 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
 
         if trimmed.eq_ignore_ascii_case("/lint") {
             if session.last_files.is_empty() && session.last_files_written.is_empty() {
-                println!("{} no files to lint. Generate code first.", style!(C_YELLOW, "│"));
+                println!(
+                    "{} no files to lint. Generate code first.",
+                    style!(C_YELLOW, "│")
+                );
             } else {
                 let paths: Vec<String> = if !session.last_files_written.is_empty() {
-                    session.last_files_written.iter().map(|p| p.display().to_string()).collect()
+                    session
+                        .last_files_written
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect()
                 } else {
-                    session.last_files.iter().filter(|f| !f.path.is_empty()).map(|f| f.path.clone()).collect()
+                    session
+                        .last_files
+                        .iter()
+                        .filter(|f| !f.path.is_empty())
+                        .map(|f| f.path.clone())
+                        .collect()
                 };
                 for p in paths {
                     handle_lint(&mut session, &p);
@@ -1431,9 +1731,16 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
 
         if trimmed.eq_ignore_ascii_case("/find") {
             println!("{}", style!(C_DIM, "\u{2502}"));
-            println!("{} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "usage: /find <query>"));
-            println!("{} {}  search text inside the project (skips node_modules, target, .git, ...)",
-                style!(C_CYAN, "\u{2502}"), style!(C_DIM, "\u{2022}"));
+            println!(
+                "{} {}",
+                style!(C_CYAN, "\u{2502}"),
+                style!(C_WHITE_B, "usage: /find <query>")
+            );
+            println!(
+                "{} {}  search text inside the project (skips node_modules, target, .git, ...)",
+                style!(C_CYAN, "\u{2502}"),
+                style!(C_DIM, "\u{2022}")
+            );
             println!("{}", style!(C_DIM, "\u{2502}"));
             continue;
         }
@@ -1461,31 +1768,49 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                 TaskIntent::CodeAction => "code/file action",
             };
             println!("{}", style!(C_DIM, "│"));
-            println!("{} {} {} {}",
+            println!(
+                "{} {} {} {}",
                 style!(C_CYAN, "│"),
                 style!(C_WHITE_B, "last intent:"),
                 style!(C_GREEN, "{}", intent_name),
-                style!(C_DIM, ""));
-            println!("{} {} {} {}",
+                style!(C_DIM, "")
+            );
+            println!(
+                "{} {} {} {}",
                 style!(C_CYAN, "│"),
                 style!(C_WHITE_B, "last input:"),
                 style!(C_DIM, "\"{}\"", session.last_user_input),
-                style!(C_DIM, ""));
+                style!(C_DIM, "")
+            );
             let create_hit = has_creation_intent(&session.last_user_input);
             let lower_db = session.last_user_input.to_lowercase();
-            let fix_hit = lower_db.starts_with("fix ") || lower_db.starts_with("refactor ")
-                || lower_db.starts_with("rename ") || lower_db.starts_with("delete ")
-                || lower_db.starts_with("remove ") || lower_db.starts_with("optimize ")
+            let fix_hit = lower_db.starts_with("fix ")
+                || lower_db.starts_with("refactor ")
+                || lower_db.starts_with("rename ")
+                || lower_db.starts_with("delete ")
+                || lower_db.starts_with("remove ")
+                || lower_db.starts_with("optimize ")
                 || lower_db.starts_with("update ");
-            let is_q = lower_db.starts_with("what ") || lower_db.starts_with("how ")
-                || lower_db.starts_with("why ") || lower_db.starts_with("explain ");
-            println!("{} {}", style!(C_CYAN, "│"), style!(C_DIM, "  has_creation_intent={}", create_hit));
-            println!("{} {}", style!(C_CYAN, "│"), style!(C_DIM, "  fix_window={}  is_question={}", fix_hit, is_q));
+            let is_q = lower_db.starts_with("what ")
+                || lower_db.starts_with("how ")
+                || lower_db.starts_with("why ")
+                || lower_db.starts_with("explain ");
+            println!(
+                "{} {}",
+                style!(C_CYAN, "│"),
+                style!(C_DIM, "  has_creation_intent={}", create_hit)
+            );
+            println!(
+                "{} {}",
+                style!(C_CYAN, "│"),
+                style!(C_DIM, "  fix_window={}  is_question={}", fix_hit, is_q)
+            );
             println!("{}", style!(C_DIM, "│"));
             continue;
         }
 
-        let needs_path = (session.mode == RunMode::Code || has_creation_intent(trimmed)) && !has_file_path(trimmed);
+        let needs_path = (session.mode == RunMode::Code || has_creation_intent(trimmed))
+            && !has_file_path(trimmed);
         let final_prompt = if needs_path {
             session.add_history(trimmed);
             let path = prompt_for_path(&mut session)?;
@@ -1493,7 +1818,11 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
         } else {
             session.add_history(trimmed);
             if let Some(ref dir) = session.project_dir {
-                format!("User request: {}\n\nWorking directory: {}", trimmed, dir.display())
+                format!(
+                    "User request: {}\n\nWorking directory: {}",
+                    trimmed,
+                    dir.display()
+                )
             } else {
                 format!("User request: {}", trimmed)
             }
@@ -1559,8 +1888,12 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             let ptype = detect_project_type(dir);
             if !ptype.is_empty() {
                 language_specific_guidance(ptype)
-            } else { "" }
-        } else { "" };
+            } else {
+                ""
+            }
+        } else {
+            ""
+        };
 
         let system_prompt = if !lang_guidance.is_empty() {
             format!("{}{}", system_prompt, lang_guidance)
@@ -1570,31 +1903,55 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
 
         if session.mode == RunMode::Chat && intent == TaskIntent::CodeAction {
             println!("{}", style!(C_DIM, "\u{2502}"));
-            println!("{} {}",
+            println!(
+                "{} {}",
                 style!(C_YELLOW, "\u{2502}  hint:"),
-                style!(C_CYAN, "this looks like a code request — type /mode to switch to CODE"));
+                style!(
+                    C_CYAN,
+                    "this looks like a code request — type /mode to switch to CODE"
+                )
+            );
             println!("{}", style!(C_DIM, "\u{2502}"));
         }
         if session.mode == RunMode::Plan && intent == TaskIntent::CodeAction {
             println!("{}", style!(C_DIM, "\u{2502}"));
-            println!("{} {}",
+            println!(
+                "{} {}",
                 style!(C_YELLOW, "\u{2502}  hint:"),
-                style!(C_BLUE, "in PLAN mode — I'll analyze first, then you can switch to CODE"));
+                style!(
+                    C_BLUE,
+                    "in PLAN mode — I'll analyze first, then you can switch to CODE"
+                )
+            );
             println!("{}", style!(C_DIM, "\u{2502}"));
         }
-        let result = client.complete_chat_stream(&full_prompt, &system_prompt, &history_ctx).await;
+        let result = client
+            .complete_chat_stream(&full_prompt, &system_prompt, &history_ctx)
+            .await;
         let elapsed = start.elapsed();
         session.last_elapsed = elapsed;
 
         match result {
             Ok(text) => {
                 if verbose {
-                    eprintln!("\n  {} raw response:\n{}\n", style!(C_DIM, "verbose:"), text);
+                    eprintln!(
+                        "\n  {} raw response:\n{}\n",
+                        style!(C_DIM, "verbose:"),
+                        text
+                    );
                 }
 
-                let (was_validated, validated_text) = validate_chat_response(&text, &intent, &session.mode);
+                let (was_validated, validated_text) =
+                    validate_chat_response(&text, &intent, &session.mode);
                 let cleaned = if was_validated && session.mode != RunMode::Code {
-                    println!("{} {}", style!(C_YELLOW, "│"), style!(C_DIM, "(response contained unexpected code — showing text only)"));
+                    println!(
+                        "{} {}",
+                        style!(C_YELLOW, "│"),
+                        style!(
+                            C_DIM,
+                            "(response contained unexpected code — showing text only)"
+                        )
+                    );
                     println!("{}", style!(C_CYAN, "│"));
                     validated_text
                 } else {
@@ -1603,7 +1960,8 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
 
                 session.last_tokens = (cleaned.len() / 4) as u32;
 
-                let treat_as_code = intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
+                let treat_as_code =
+                    intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
 
                 if treat_as_code {
                     let code = extract_code_block(&cleaned);
@@ -1613,18 +1971,29 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                         session.last_files = files.clone();
                         session.last_code = if code.is_empty() { String::new() } else { code };
                         println!("{}", style!(C_CYAN, "│"));
-                        println!("{} {} {}",
+                        println!(
+                            "{} {} {}",
                             style!(C_CYAN, "│"),
                             style!(C_GREEN, "generated:"),
-                            style!(C_WHITE_B, "{} file(s)", files.len()));
+                            style!(C_WHITE_B, "{} file(s)", files.len())
+                        );
                         for f in &files {
                             let icon = file_icon(&f.path);
                             if f.path.is_empty() {
-                                println!("{}   {} unnamed ({} bytes)", style!(C_CYAN, "│"), icon, f.content.len());
+                                println!(
+                                    "{}   {} unnamed ({} bytes)",
+                                    style!(C_CYAN, "│"),
+                                    icon,
+                                    f.content.len()
+                                );
                             } else {
-                                println!("{}   {} {} ({} bytes)",
-                                    style!(C_CYAN, "│"), icon,
-                                    style!(C_WHITE_B, "{}", f.path), f.content.len());
+                                println!(
+                                    "{}   {} {} ({} bytes)",
+                                    style!(C_CYAN, "│"),
+                                    icon,
+                                    style!(C_WHITE_B, "{}", f.path),
+                                    f.content.len()
+                                );
                             }
                         }
                         println!("{}", style!(C_CYAN, "│"));
@@ -1634,33 +2003,39 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                         session.last_code = code;
                         session.last_files.clear();
                         println!("{}", style!(C_CYAN, "│"));
-                        println!("{} {}",
+                        println!(
+                            "{} {}",
                             style!(C_CYAN, "│"),
-                            style!(C_GREEN, "detected code block — use /write <path> to save"));
+                            style!(C_GREEN, "detected code block — use /write <path> to save")
+                        );
                         println!("{}", style!(C_CYAN, "│"));
                     } else {
                         for line in cleaned.lines() {
                             println!("{} {}", style!(C_CYAN, "│"), line);
                         }
                         println!("{}", style!(C_CYAN, "│"));
-                        println!("{} {}",
+                        println!(
+                            "{} {}",
                             style!(C_CYAN, "│"),
-                            style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                            style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64())
+                        );
                     }
+                } else if cleaned.is_empty() {
+                    println!(
+                        "{} {}",
+                        style!(C_YELLOW, "│"),
+                        style!(C_DIM, "(empty response)")
+                    );
                 } else {
-                    if cleaned.is_empty() {
-                        println!("{} {}",
-                            style!(C_YELLOW, "│"),
-                            style!(C_DIM, "(empty response)"));
-                    } else {
-                        for line in cleaned.lines() {
-                            println!("{} {}", style!(C_CYAN, "│"), line);
-                        }
-                        println!("{}", style!(C_CYAN, "│"));
-                        println!("{} {}",
-                            style!(C_CYAN, "│"),
-                            style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                    for line in cleaned.lines() {
+                        println!("{} {}", style!(C_CYAN, "│"), line);
                     }
+                    println!("{}", style!(C_CYAN, "│"));
+                    println!(
+                        "{} {}",
+                        style!(C_CYAN, "│"),
+                        style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64())
+                    );
                 }
 
                 if !cleaned.is_empty() {
@@ -1673,7 +2048,10 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                 println!("{}", style!(C_DIM, "│"));
             }
             Err(e) => {
-                println!("{}", style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                println!(
+                    "{}",
+                    style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64())
+                );
                 eprintln!("  {} {}", style!(C_RED, "err:"), e);
                 println!("{}", style!(C_DIM, "│"));
             }
@@ -1712,41 +2090,69 @@ fn validate_chat_response(response: &str, intent: &TaskIntent, mode: &RunMode) -
     if *intent != TaskIntent::CodeAction && *mode != RunMode::Code {
         let has_code_fences = response.contains("```");
         let has_multi_file = response.contains("### ") && has_code_fences;
-        let has_json = response.trim().starts_with('{') && (response.contains("\"code\"") || response.contains("\"files\""));
+        let has_json = response.trim().starts_with('{')
+            && (response.contains("\"code\"") || response.contains("\"files\""));
 
         if has_multi_file || has_json {
             let code_stripped = strip_code_blocks(response);
             if !code_stripped.trim().is_empty() {
                 return (true, code_stripped);
             }
-            return (true, "I understood your question. Let me answer directly: ".to_string());
+            return (
+                true,
+                "I understood your question. Let me answer directly: ".to_string(),
+            );
         }
     }
 
     if response.trim().is_empty() {
-        return (true, "(No response generated — please try again or rephrase)".to_string());
+        return (
+            true,
+            "(No response generated — please try again or rephrase)".to_string(),
+        );
     }
 
     (false, String::new())
 }
 
 fn prompt_for_path(session: &mut ChatSession) -> io::Result<String> {
-    let workspace_display = session.project_dir.as_ref()
+    let workspace_display = session
+        .project_dir
+        .as_ref()
         .map(|d| d.display().to_string())
         .unwrap_or_else(|| "current dir".to_string());
     println!("{}", style!(C_CYAN, "│"));
-    println!("{} {}",
+    println!(
+        "{} {}",
         style!(C_MAGENTA, "│  ?"),
-        style!(C_WHITE_B, "Where should I create this? (e.g. ./my-site/index.html or ./project/)"));
-    println!("{} {} workspace: {}", style!(C_MAGENTA, "│"), style!(C_DIM, ""), style!(C_WHITE_B, "{}", workspace_display));
-    println!("{} {} type '.' for workspace root, or /dir <path> to change", style!(C_MAGENTA, "│"), style!(C_DIM, ""));
+        style!(
+            C_WHITE_B,
+            "Where should I create this? (e.g. ./my-site/index.html or ./project/)"
+        )
+    );
+    println!(
+        "{} {} workspace: {}",
+        style!(C_MAGENTA, "│"),
+        style!(C_DIM, ""),
+        style!(C_WHITE_B, "{}", workspace_display)
+    );
+    println!(
+        "{} {} type '.' for workspace root, or /dir <path> to change",
+        style!(C_MAGENTA, "│"),
+        style!(C_DIM, "")
+    );
     println!("{}", style!(C_CYAN, "│"));
 
     loop {
         let line = session.readline("rem> path: ");
-        let line = match line { Ok(s) => s, Err(_) => return Ok(".".to_string()) };
+        let line = match line {
+            Ok(s) => s,
+            Err(_) => return Ok(".".to_string()),
+        };
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
         session.add_history(trimmed);
 
         if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
@@ -1764,9 +2170,10 @@ fn prompt_for_path(session: &mut ChatSession) -> io::Result<String> {
 
 fn handle_write(session: &mut ChatSession, path: &str) {
     let trimmed = path.trim();
-    let base_dir = session.project_dir.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_default()
-    });
+    let base_dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let abs_path = match resolve_safe_path(&base_dir, trimmed) {
         Some(p) => p,
@@ -1774,7 +2181,10 @@ fn handle_write(session: &mut ChatSession, path: &str) {
     };
 
     if session.last_code.is_empty() {
-        println!("  {} No code from last response. Use `/code` to view it.", style!(C_YELLOW, "!"));
+        println!(
+            "  {} No code from last response. Use `/code` to view it.",
+            style!(C_YELLOW, "!")
+        );
         return;
     }
 
@@ -1797,7 +2207,12 @@ fn handle_write(session: &mut ChatSession, path: &str) {
     if let Some(parent) = abs_path.parent() {
         if !parent.as_os_str().is_empty() {
             if let Err(e) = fs::create_dir_all(parent) {
-                eprintln!("  {} cannot create directory {}: {}", style!(C_RED, "\u{2717}"), parent.display(), e);
+                eprintln!(
+                    "  {} cannot create directory {}: {}",
+                    style!(C_RED, "\u{2717}"),
+                    parent.display(),
+                    e
+                );
                 return;
             }
         }
@@ -1811,8 +2226,12 @@ fn handle_write(session: &mut ChatSession, path: &str) {
                 let _ = fs::remove_file(&tmp);
                 return;
             }
-            println!("  {} wrote {} ({} bytes)",
-                style!(C_GREEN, "\u{2713}"), style!(C_WHITE_B, "{}", abs_path.display()), session.last_code.len());
+            println!(
+                "  {} wrote {} ({} bytes)",
+                style!(C_GREEN, "\u{2713}"),
+                style!(C_WHITE_B, "{}", abs_path.display()),
+                session.last_code.len()
+            );
             session.last_files_written.push(abs_path);
         }
         Err(e) => {
@@ -1824,25 +2243,34 @@ fn handle_write(session: &mut ChatSession, path: &str) {
 
 fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     if files.is_empty() || files.iter().all(|f| f.path.is_empty()) {
-        println!("{} {} Type /write <path> to save.", style!(C_YELLOW, "\u{2502}  !"), style!(C_DIM, ""));
+        println!(
+            "{} {} Type /write <path> to save.",
+            style!(C_YELLOW, "\u{2502}  !"),
+            style!(C_DIM, "")
+        );
         return;
     }
 
-    let base_dir = session.project_dir.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_default()
-    });
+    let base_dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let mut safe_entries: Vec<(&FileEntry, PathBuf)> = Vec::new();
     for f in files {
-        if f.path.is_empty() { continue; }
+        if f.path.is_empty() {
+            continue;
+        }
         match resolve_safe_path(&base_dir, &f.path) {
             Some(abs) => safe_entries.push((f, abs)),
             None => {
-                eprintln!("{}   {} {} {}",
+                eprintln!(
+                    "{}   {} {} {}",
                     style!(C_RED, "\u{2502} \u{2717}"),
                     style!(C_WHITE_B, "{}", f.path),
                     style!(C_DIM, "—"),
-                    style!(C_RED, "path traversal blocked"));
+                    style!(C_RED, "path traversal blocked")
+                );
             }
         }
     }
@@ -1852,10 +2280,12 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     }
 
     println!("{}", style!(C_CYAN, "\u{2502}"));
-    println!("{} {} {}",
+    println!(
+        "{} {} {}",
         style!(C_CYAN, "\u{2502}"),
         style!(C_WHITE_B, "Plan: creating {} file(s)", safe_entries.len()),
-        style!(C_DIM, ""));
+        style!(C_DIM, "")
+    );
     for (f, abs_path) in &safe_entries {
         let icon = file_icon(&f.path);
         let lines = f.content.lines().count();
@@ -1864,25 +2294,39 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
         } else {
             String::new()
         };
-        println!("{}   {} {} ({}, {} lines){}",
-            style!(C_CYAN, "\u{2502}"), icon,
+        println!(
+            "{}   {} {} ({}, {} lines){}",
+            style!(C_CYAN, "\u{2502}"),
+            icon,
             style!(C_WHITE_B, "{}", f.path),
             style!(C_DIM, "{} bytes", f.content.len()),
             style!(C_DIM, "{}", lines),
-            marker);
+            marker
+        );
     }
     println!("{}", style!(C_CYAN, "\u{2502}"));
-    println!("{} {} {}",
+    println!(
+        "{} {} {}",
         style!(C_MAGENTA, "\u{2502}  ?"),
         style!(C_WHITE_B, "Write all {} files? [Y/n]", safe_entries.len()),
-        style!(C_DIM, "(press Enter to confirm)"));
-    println!("{} {}", style!(C_MAGENTA, "\u{2502}"), style!(C_DIM, "  Type /code to preview, 'n' to cancel"));
+        style!(C_DIM, "(press Enter to confirm)")
+    );
+    println!(
+        "{} {}",
+        style!(C_MAGENTA, "\u{2502}"),
+        style!(C_DIM, "  Type /code to preview, 'n' to cancel")
+    );
     println!("{}", style!(C_CYAN, "\u{2502}"));
 
-    let input = session.readline("rem> ").unwrap_or_else(|_| String::from("y"));
+    let input = session
+        .readline("rem> ")
+        .unwrap_or_else(|_| String::from("y"));
     let input = input.trim();
     if !input.is_empty() && !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
-        println!("{} {}", style!(C_YELLOW, "\u{2502}  !"), "skipped. Use /write <path> to save individually.");
+        println!(
+            "{} skipped. Use /write <path> to save individually.",
+            style!(C_YELLOW, "\u{2502}  !")
+        );
         println!("{}", style!(C_CYAN, "\u{2502}"));
         return;
     }
@@ -1896,14 +2340,20 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
                 style!(C_YELLOW, "\u{2502} \u{26a0}"),
                 style!(C_WHITE_B, "{}", f.path),
                 style!(C_DIM, "exists — overwriting"),
-                style!(C_DIM, ""));
+                style!(C_DIM, "")
+            );
         }
 
         if let Some(parent) = abs_path.parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = fs::create_dir_all(parent) {
-                    eprintln!("{}   {} cannot create dir {}: {}",
-                        style!(C_RED, "\u{2502} \u{2717}"), style!(C_WHITE_B, "{}", f.path), parent.display(), e);
+                    eprintln!(
+                        "{}   {} cannot create dir {}: {}",
+                        style!(C_RED, "\u{2502} \u{2717}"),
+                        style!(C_WHITE_B, "{}", f.path),
+                        parent.display(),
+                        e
+                    );
                     continue;
                 }
             }
@@ -1912,23 +2362,35 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
         let tmp = abs_path.with_extension("tmp");
         match fs::write(&tmp, &f.content) {
             Ok(()) => {
-                if let Err(e) = fs::rename(&tmp, &abs_path) {
-                    eprintln!("{}   {} atomic write failed: {}",
-                        style!(C_RED, "\u{2502} \u{2717}"), style!(C_WHITE_B, "{}", f.path), e);
+                if let Err(e) = fs::rename(&tmp, abs_path) {
+                    eprintln!(
+                        "{}   {} atomic write failed: {}",
+                        style!(C_RED, "\u{2502} \u{2717}"),
+                        style!(C_WHITE_B, "{}", f.path),
+                        e
+                    );
                     let _ = fs::remove_file(&tmp);
                     continue;
                 }
                 let overwrite_note = if will_overwrite { " (overwritten)" } else { "" };
-                println!("{}   {} {} ({}{})",
+                println!(
+                    "{}   {} {} ({}{})",
                     style!(C_GREEN, "\u{2502} \u{2713}"),
                     style!(C_WHITE_B, "{}", f.path),
                     style!(C_DIM, "{} bytes", f.content.len()),
                     style!(C_DIM, "{}", overwrite_note),
-                    String::new());
+                    String::new()
+                );
                 written.push(abs_path.clone());
             }
             Err(e) => {
-                println!("{}   {} {}: {}", style!(C_RED, "\u{2502} \u{2717}"), style!(C_WHITE_B, "{}", f.path), style!(C_DIM, ""), e);
+                println!(
+                    "{}   {} {}: {}",
+                    style!(C_RED, "\u{2502} \u{2717}"),
+                    style!(C_WHITE_B, "{}", f.path),
+                    style!(C_DIM, ""),
+                    e
+                );
                 let _ = fs::remove_file(&tmp);
             }
         }
@@ -1936,8 +2398,12 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
 
     if !written.is_empty() {
         session.last_files_written = written;
-        println!("{} {} {} files written.",
-            style!(C_GREEN, "\u{2502} \u{2713}"), style!(C_WHITE_B, "{}", session.last_files_written.len()), style!(C_DIM, ""));
+        println!(
+            "{} {} {} files written.",
+            style!(C_GREEN, "\u{2502} \u{2713}"),
+            style!(C_WHITE_B, "{}", session.last_files_written.len()),
+            style!(C_DIM, "")
+        );
     }
 }
 
@@ -1946,9 +2412,15 @@ fn handle_undo(session: &mut ChatSession) {
         println!("  {} Nothing to undo.", style!(C_YELLOW, "!"));
         return;
     }
-    println!("{} {}",
+    println!(
+        "{} {}",
         style!(C_MAGENTA, "\u{2502}  ?"),
-        style!(C_WHITE_B, "Delete the last {} written file(s)? [y/N]", session.last_files_written.len()));
+        style!(
+            C_WHITE_B,
+            "Delete the last {} written file(s)? [y/N]",
+            session.last_files_written.len()
+        )
+    );
 
     let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
     let input = input.trim();
@@ -1966,17 +2438,26 @@ fn handle_undo(session: &mut ChatSession) {
             }
             match fs::remove_file(&path) {
                 Ok(()) => {
-                    println!("  {} removed {}", style!(C_YELLOW, "\u{2502}"), style!(C_DIM, "{}", path.display()));
+                    println!(
+                        "  {} removed {}",
+                        style!(C_YELLOW, "\u{2502}"),
+                        style!(C_DIM, "{}", path.display())
+                    );
                     removed += 1;
                 }
                 Err(e) => {
-                    println!("  {} failed to remove {}: {}", style!(C_RED, "\u{2502}"), path.display(), e);
+                    println!(
+                        "  {} failed to remove {}: {}",
+                        style!(C_RED, "\u{2502}"),
+                        path.display(),
+                        e
+                    );
                 }
             }
         }
     }
 
-    dirs_to_clean.sort_by(|a, b| b.as_os_str().len().cmp(&a.as_os_str().len()));
+    dirs_to_clean.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
     for dir in &dirs_to_clean {
         if dir.exists() {
             let _ = fs::remove_dir(dir);
@@ -1987,36 +2468,61 @@ fn handle_undo(session: &mut ChatSession) {
         let input = session.last_user_input.clone();
         let intent = session.last_intent.clone();
         if intent == TaskIntent::CodeAction {
-            session.feedback.record_correction(&input, &intent, &TaskIntent::FastAnswer);
+            session
+                .feedback
+                .record_correction(&input, &intent, &TaskIntent::FastAnswer);
         }
-        println!("  {} {} {} file(s) removed.", style!(C_GREEN, "\u{2502} \u{2713}"), removed, style!(C_DIM, ""));
+        println!(
+            "  {} {} {} file(s) removed.",
+            style!(C_GREEN, "\u{2502} \u{2713}"),
+            removed,
+            style!(C_DIM, "")
+        );
     }
 }
 
 fn handle_list_files(session: &ChatSession) {
-    let dir = session.project_dir.as_ref().cloned().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_default()
-    });
+    let dir = session
+        .project_dir
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{} {}", style!(C_DIM, "\u{2502}"), style!(C_WHITE_B, "\u{1f4c2} project ({})", dir.display()));
+    println!(
+        "{} {}",
+        style!(C_DIM, "\u{2502}"),
+        style!(C_WHITE_B, "\u{1f4c2} project ({})", dir.display())
+    );
     println!("{}", style!(C_DIM, "\u{2502}"));
 
     let mut entries: Vec<(String, bool, u64)> = Vec::new();
-    for entry in WalkDir::new(&dir).max_depth(4).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&dir)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let p = entry.path();
-        if p == dir { continue; }
+        if p == dir {
+            continue;
+        }
         if let Ok(rel) = p.strip_prefix(&dir) {
             let size = if p.is_file() {
                 fs::metadata(p).map(|m| m.len()).unwrap_or(0)
-            } else { 0 };
+            } else {
+                0
+            };
             entries.push((rel.display().to_string(), p.is_dir(), size));
         }
     }
     entries.sort();
 
     if entries.is_empty() {
-        println!("{}   {}", style!(C_DIM, "\u{2502}"), style!(C_YELLOW, "(empty)"));
+        println!(
+            "{}   {}",
+            style!(C_DIM, "\u{2502}"),
+            style!(C_YELLOW, "(empty)")
+        );
     } else {
         for (path, is_dir, size) in &entries {
             let depth = path.chars().filter(|&c| c == '/').count();
@@ -2027,20 +2533,26 @@ fn handle_list_files(session: &ChatSession) {
                 path
             };
             if *is_dir {
-                println!("{} {} {} {} {}",
-                    style!(C_DIM, "\u{2502}"), indent,
+                println!(
+                    "{} {} {} {} {}",
+                    style!(C_DIM, "\u{2502}"),
+                    indent,
                     style!(C_DIM, "\u{251c}\u{2500}\u{2500}"),
                     style!(C_BLUE, "\u{1f4c1} {}/", name),
-                    style!(C_RESET, ""));
+                    style!(C_RESET, "")
+                );
             } else {
                 let icon = file_icon(name);
                 let hs = human_size(*size);
-                println!("{} {} {} {} {} {}",
-                    style!(C_DIM, "\u{2502}"), indent,
+                println!(
+                    "{} {} {} {} {} {}",
+                    style!(C_DIM, "\u{2502}"),
+                    indent,
                     style!(C_DIM, "\u{251c}\u{2500}\u{2500}"),
                     icon,
                     style!(C_WHITE_B, "{}", name),
-                    style!(C_DIM, "({})", hs));
+                    style!(C_DIM, "({})", hs)
+                );
             }
         }
     }
@@ -2053,7 +2565,11 @@ fn highlight_code(content: &str, lang_hint: &str) -> String {
         highlight_html(content)
     } else if lang.contains("css") {
         highlight_css(content)
-    } else if lang.contains("js") || lang.contains("javascript") || lang.contains("ts") || lang.contains("typescript") {
+    } else if lang.contains("js")
+        || lang.contains("javascript")
+        || lang.contains("ts")
+        || lang.contains("typescript")
+    {
         highlight_js(content)
     } else {
         highlight_generic(content)
@@ -2061,62 +2577,67 @@ fn highlight_code(content: &str, lang_hint: &str) -> String {
 }
 
 fn highlight_html(code: &str) -> String {
-    let tag_re = Regex::new(r"(</?\w+[^>]*>)").expect("invalid regex literal");
-    let attr_re = Regex::new(r#"("[^"]*")"#).expect("invalid regex literal");
-    let comment_re = Regex::new(r"(<!--.*?-->)").expect("invalid regex literal");
     let mut out = code.to_string();
-    out = comment_re.replace_all(&out, |caps: &regex::Captures| {
-        style!(C_DIM, "{}", &caps[1])
-    }).to_string();
-    out = tag_re.replace_all(&out, |caps: &regex::Captures| {
-        let tag = &caps[1];
-        let inner = attr_re.replace_all(tag, |ac: &regex::Captures| {
-            style!(C_GREEN, "{}", &ac[1])
-        }).to_string();
-        style!(C_CYAN, "{}", inner)
-    }).to_string();
+    out = RE_HIGHLIGHT_COMMENT
+        .replace_all(&out, |caps: &regex::Captures| style!(C_DIM, "{}", &caps[1]))
+        .to_string();
+    out = RE_HIGHLIGHT_HTML_TAG
+        .replace_all(&out, |caps: &regex::Captures| {
+            let tag = &caps[1];
+            let inner = RE_HIGHLIGHT_ATTR
+                .replace_all(tag, |ac: &regex::Captures| style!(C_GREEN, "{}", &ac[1]))
+                .to_string();
+            style!(C_CYAN, "{}", inner)
+        })
+        .to_string();
     out
 }
 
 fn highlight_css(code: &str) -> String {
-    let prop_re = Regex::new(r"(?m)^(\s*)([a-zA-Z-]+)(\s*:)").expect("invalid regex literal");
-    let val_re = Regex::new(r"(:\s*)([^;}{]+)").expect("invalid regex literal");
-    let comment_re = Regex::new(r"(/\*.*?\*/)").expect("invalid regex literal");
     let mut out = code.to_string();
-    out = comment_re.replace_all(&out, |caps: &regex::Captures| {
-        style!(C_DIM, "{}", &caps[1])
-    }).to_string();
-    out = prop_re.replace_all(&out, |caps: &regex::Captures| {
-        format!("{}{}{}{}",
-            &caps[1],
-            style!(C_YELLOW, "{}", &caps[2]),
-            &caps[3],
-            style!(C_RESET, "{}", ""))
-    }).to_string();
-    out = val_re.replace_all(&out, |caps: &regex::Captures| {
-        format!("{}{}{}{}",
-            &caps[1],
-            style!(C_GREEN, "{}", &caps[2].trim()),
-            style!(C_RESET, "{}", ""),
-            "")
-    }).to_string();
+    out = RE_CSS_COMMENT
+        .replace_all(&out, |caps: &regex::Captures| style!(C_DIM, "{}", &caps[1]))
+        .to_string();
+    out = RE_CSS_PROP
+        .replace_all(&out, |caps: &regex::Captures| {
+            format!(
+                "{}{}{}{}",
+                &caps[1],
+                style!(C_YELLOW, "{}", &caps[2]),
+                &caps[3],
+                style!(C_RESET, "{}", "")
+            )
+        })
+        .to_string();
+    out = RE_CSS_VAL
+        .replace_all(&out, |caps: &regex::Captures| {
+            format!(
+                "{}{}{}{}",
+                &caps[1],
+                style!(C_GREEN, "{}", &caps[2].trim()),
+                style!(C_RESET, "{}", ""),
+                ""
+            )
+        })
+        .to_string();
     out
 }
 
 fn highlight_js(code: &str) -> String {
-    let kw_re = Regex::new(r"\b(const|let|var|function|return|if|else|for|while|class|import|export|from|async|await|try|catch|new|this|document|console|window)\b").expect("invalid regex literal");
-    let str_re = Regex::new(r#"('[^']*'|"[^"]*"|`[^`]*`)"#).expect("invalid regex literal");
-    let comment_re = Regex::new(r"(//.*)").expect("invalid regex literal");
     let mut out = code.to_string();
-    out = comment_re.replace_all(&out, |caps: &regex::Captures| {
-        style!(C_DIM, "{}", &caps[1])
-    }).to_string();
-    out = str_re.replace_all(&out, |caps: &regex::Captures| {
-        style!(C_GREEN, "{}", &caps[1])
-    }).to_string();
-    out = kw_re.replace_all(&out, |caps: &regex::Captures| {
-        style!(C_MAGENTA, "{}", &caps[1])
-    }).to_string();
+    out = RE_JS_COMMENT
+        .replace_all(&out, |caps: &regex::Captures| style!(C_DIM, "{}", &caps[1]))
+        .to_string();
+    out = RE_JS_STR
+        .replace_all(&out, |caps: &regex::Captures| {
+            style!(C_GREEN, "{}", &caps[1])
+        })
+        .to_string();
+    out = RE_JS_KW
+        .replace_all(&out, |caps: &regex::Captures| {
+            style!(C_MAGENTA, "{}", &caps[1])
+        })
+        .to_string();
     out
 }
 
@@ -2128,9 +2649,17 @@ fn detect_language_from_content(code: &str) -> &str {
     let first_line = code.trim().lines().next().unwrap_or("");
     if first_line.starts_with("<!") || first_line.starts_with("<") {
         "html"
-    } else if first_line.contains("{") && first_line.contains("}") && !first_line.contains("function") && !first_line.contains("=>") {
+    } else if first_line.contains("{")
+        && first_line.contains("}")
+        && !first_line.contains("function")
+        && !first_line.contains("=>")
+    {
         "css"
-    } else if first_line.starts_with("const ") || first_line.starts_with("let ") || first_line.starts_with("function ") || first_line.starts_with("import ") {
+    } else if first_line.starts_with("const ")
+        || first_line.starts_with("let ")
+        || first_line.starts_with("function ")
+        || first_line.starts_with("import ")
+    {
         "js"
     } else {
         ""
@@ -2140,10 +2669,26 @@ fn detect_language_from_content(code: &str) -> &str {
 fn print_last_files(session: &ChatSession) {
     if !session.last_files.is_empty() {
         for f in &session.last_files {
-            let label = if f.path.is_empty() { "(unnamed)".to_string() } else { f.path.clone() };
+            let label = if f.path.is_empty() {
+                "(unnamed)".to_string()
+            } else {
+                f.path.clone()
+            };
             let lang = detect_language_from_content(&f.content);
-            let lang_display = if lang.is_empty() { String::new() } else { format!(" [{}]", lang) };
-            println!("{}", style!(C_WHITE_B, "\u{2500}\u{2500} {}{} \u{2500}\u{2500}", label, style!(C_DIM, "{}", lang_display)));
+            let lang_display = if lang.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", lang)
+            };
+            println!(
+                "{}",
+                style!(
+                    C_WHITE_B,
+                    "\u{2500}\u{2500} {}{} \u{2500}\u{2500}",
+                    label,
+                    style!(C_DIM, "{}", lang_display)
+                )
+            );
             let highlighted = highlight_code(&f.content, lang);
             for code_line in highlighted.lines() {
                 println!("{}", code_line);
@@ -2152,8 +2697,19 @@ fn print_last_files(session: &ChatSession) {
         }
     } else if !session.last_code.is_empty() {
         let lang = detect_language_from_content(&session.last_code);
-        let lang_display = if lang.is_empty() { String::new() } else { format!(" [{}]", lang) };
-        println!("{}", style!(C_WHITE_B, "\u{2500}\u{2500} last code{} \u{2500}\u{2500}", style!(C_DIM, "{}", lang_display)));
+        let lang_display = if lang.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", lang)
+        };
+        println!(
+            "{}",
+            style!(
+                C_WHITE_B,
+                "\u{2500}\u{2500} last code{} \u{2500}\u{2500}",
+                style!(C_DIM, "{}", lang_display)
+            )
+        );
         let highlighted = highlight_code(&session.last_code, lang);
         println!("{}", highlighted);
         println!("{}", style!(C_DIM, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
@@ -2164,15 +2720,29 @@ fn print_last_files(session: &ChatSession) {
 
 fn handle_dir(session: &mut ChatSession, path: &str) {
     let dir = PathBuf::from(path.trim());
-    let resolved = if path.trim() == "." { std::env::current_dir().unwrap_or_default() } else { dir };
+    let resolved = if path.trim() == "." {
+        std::env::current_dir().unwrap_or_default()
+    } else {
+        dir
+    };
     if resolved.exists() || path.trim() == "." {
         session.project_dir = Some(resolved.clone());
         session.workspace_dir = Some(resolved.clone());
         persist_workspace(&resolved);
-        println!("  {} workspace set to {}",
-            style!(C_GREEN, "✓"), style!(C_WHITE_B, "{}", session.project_dir.as_ref().unwrap().display()));
+        println!(
+            "  {} workspace set to {}",
+            style!(C_GREEN, "✓"),
+            style!(
+                C_WHITE_B,
+                "{}",
+                session.project_dir.as_ref().unwrap().display()
+            )
+        );
     } else {
-        println!("  {} directory does not exist — creating it", style!(C_YELLOW, "!"));
+        println!(
+            "  {} directory does not exist — creating it",
+            style!(C_YELLOW, "!")
+        );
         if let Err(e) = fs::create_dir_all(&resolved) {
             println!("  {} failed: {}", style!(C_RED, "✗"), e);
             return;
@@ -2180,8 +2750,15 @@ fn handle_dir(session: &mut ChatSession, path: &str) {
         session.project_dir = Some(resolved.clone());
         session.workspace_dir = Some(resolved.clone());
         persist_workspace(&resolved);
-        println!("  {} workspace set to {}",
-            style!(C_GREEN, "✓"), style!(C_WHITE_B, "{}", session.project_dir.as_ref().unwrap().display()));
+        println!(
+            "  {} workspace set to {}",
+            style!(C_GREEN, "✓"),
+            style!(
+                C_WHITE_B,
+                "{}",
+                session.project_dir.as_ref().unwrap().display()
+            )
+        );
     }
 }
 
@@ -2189,18 +2766,31 @@ fn persist_workspace(dir: &Path) {
     let mut cfg = load_config().unwrap_or_default();
     cfg.workspace_dir = Some(dir.to_string_lossy().to_string());
     if let Err(e) = save_config(&cfg) {
-        eprintln!("  {} failed to save workspace config: {}", style!(C_RED, "✗"), e);
+        eprintln!(
+            "  {} failed to save workspace config: {}",
+            style!(C_RED, "✗"),
+            e
+        );
     }
 }
 
 async fn handle_search(client: &Provider, session: &mut ChatSession, query: &str) {
-    println!("{} {} searching the web...", style!(C_DIM, "│"), style!(C_CYAN, "🔍"));
+    println!(
+        "{} {} searching the web...",
+        style!(C_DIM, "│"),
+        style!(C_CYAN, "🔍")
+    );
     match perform_web_search(&client.client, query).await {
         Ok(results) => {
             if results.is_empty() {
                 println!("{} no results found for: {}", style!(C_YELLOW, "│"), query);
             } else {
-                println!("{} {} results for: {}", style!(C_DIM, "│"), results.len(), style!(C_WHITE_B, "{}", query));
+                println!(
+                    "{} {} results for: {}",
+                    style!(C_DIM, "│"),
+                    results.len(),
+                    style!(C_WHITE_B, "{}", query)
+                );
                 print_search_results(&results);
                 session.last_search = results;
             }
@@ -2252,7 +2842,11 @@ async fn handle_test(client: &Provider, session: &mut ChatSession, path: &str) {
             return;
         }
     };
-    println!("{} generating tests for {}...", style!(C_CYAN, "\u{2502}"), path);
+    println!(
+        "{} generating tests for {}...",
+        style!(C_CYAN, "\u{2502}"),
+        path
+    );
     let prompt = format!(
         "Generate comprehensive tests for the following code. \
          Include unit tests for all public functions/methods, edge cases, \
@@ -2296,7 +2890,11 @@ async fn handle_refactor(client: &Provider, session: &mut ChatSession, path: &st
             return;
         }
     };
-    println!("{} analyzing {} for refactoring...", style!(C_CYAN, "\u{2502}"), path);
+    println!(
+        "{} analyzing {} for refactoring...",
+        style!(C_CYAN, "\u{2502}"),
+        path
+    );
     let prompt = format!(
         "Review the following code and suggest refactoring improvements. \
          Consider: code clarity, DRY principle, performance, error handling, \
@@ -2323,14 +2921,51 @@ async fn handle_refactor(client: &Provider, session: &mut ChatSession, path: &st
 
 fn handle_config(session: &ChatSession, client: &Provider) {
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{}  {}{}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "\u{2500}\u{2500} CONFIG \u{2500}\u{2500}"), style!(C_DIM, ""));
-    println!("{}   {:<18} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "model:"), style!(C_DIM, "{}", client.model));
-    println!("{}   {:<18} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "ollama url:"), style!(C_DIM, "{}", client.base_url));
-    println!("{}   {:<18} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "mode:"), style!(C_DIM, "{}", session.mode.label()));
-    println!("{}   {:<18} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "workspace:"), style!(C_DIM, "{}", session.project_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_else(|| "none".to_string())));
+    println!(
+        "{}  {}{}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "\u{2500}\u{2500} CONFIG \u{2500}\u{2500}"),
+        style!(C_DIM, "")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "model:"),
+        style!(C_DIM, "{}", client.model)
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "ollama url:"),
+        style!(C_DIM, "{}", client.base_url)
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "mode:"),
+        style!(C_DIM, "{}", session.mode.label())
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "workspace:"),
+        style!(
+            C_DIM,
+            "{}",
+            session
+                .project_dir
+                .as_ref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "none".to_string())
+        )
+    );
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{} {} {}",
-        style!(C_CYAN, "\u{2502}"), style!(C_DIM, ""), style!(C_DIM, "use /config model <name> to switch models"));
+    println!(
+        "{} {} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_DIM, ""),
+        style!(C_DIM, "use /config model <name> to switch models")
+    );
     println!("{}", style!(C_CYAN, "\u{2502}"));
 }
 
@@ -2357,20 +2992,31 @@ fn handle_config_set(session: &mut ChatSession, client: &Provider, args: &str) {
 
 fn handle_diff(session: &ChatSession) {
     if session.last_files.is_empty() {
-        println!("{} No generated files to compare.", style!(C_YELLOW, "\u{2502}"));
+        println!(
+            "{} No generated files to compare.",
+            style!(C_YELLOW, "\u{2502}")
+        );
         return;
     }
 
-    let base_dir = session.project_dir.clone().unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_default()
-    });
+    let base_dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{} {}{}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "--- DIFF ---"), style!(C_DIM, ""));
+    println!(
+        "{} {}{}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "--- DIFF ---"),
+        style!(C_DIM, "")
+    );
     println!("{}", style!(C_DIM, "\u{2502}"));
 
     for f in &session.last_files {
-        if f.path.is_empty() { continue; }
+        if f.path.is_empty() {
+            continue;
+        }
         let rel_path = PathBuf::from(&f.path);
         let abs_path = if rel_path.is_relative() {
             base_dir.join(&rel_path)
@@ -2382,22 +3028,45 @@ fn handle_diff(session: &ChatSession) {
         if abs_path.exists() {
             let existing = fs::read_to_string(&abs_path).unwrap_or_default();
             if existing == f.content {
-                println!("{} {} {} {}",
-                    style!(C_CYAN, "\u{2502}"), icon,
+                println!(
+                    "{} {} {} {}",
+                    style!(C_CYAN, "\u{2502}"),
+                    icon,
                     style!(C_WHITE_B, "{}", f.path),
-                    style!(C_DIM, "(unchanged)"));
+                    style!(C_DIM, "(unchanged)")
+                );
             } else {
-                let added = f.content.lines().count().saturating_sub(existing.lines().count());
-                let removed = existing.lines().count().saturating_sub(f.content.lines().count());
-                println!("{} {} {} {}",
-                    style!(C_CYAN, "\u{2502}"), icon,
+                let added = f
+                    .content
+                    .lines()
+                    .count()
+                    .saturating_sub(existing.lines().count());
+                let removed = existing
+                    .lines()
+                    .count()
+                    .saturating_sub(f.content.lines().count());
+                println!(
+                    "{} {} {} {}",
+                    style!(C_CYAN, "\u{2502}"),
+                    icon,
                     style!(C_WHITE_B, "{}", f.path),
-                    style!(C_DIM, ""));
+                    style!(C_DIM, "")
+                );
                 if added > 0 {
-                    println!("{}   {} {}", style!(C_CYAN, "\u{2502}"), style!(C_GREEN, "+{} lines", added), style!(C_DIM, ""));
+                    println!(
+                        "{}   {} {}",
+                        style!(C_CYAN, "\u{2502}"),
+                        style!(C_GREEN, "+{} lines", added),
+                        style!(C_DIM, "")
+                    );
                 }
                 if removed > 0 {
-                    println!("{}   {} {}", style!(C_CYAN, "\u{2502}"), style!(C_RED, "-{} lines", removed), style!(C_DIM, ""));
+                    println!(
+                        "{}   {} {}",
+                        style!(C_CYAN, "\u{2502}"),
+                        style!(C_RED, "-{} lines", removed),
+                        style!(C_DIM, "")
+                    );
                 }
                 let old_lines: Vec<&str> = existing.lines().collect();
                 let new_lines: Vec<&str> = f.content.lines().collect();
@@ -2408,12 +3077,20 @@ fn handle_diff(session: &ChatSession) {
                     let new = new_lines.get(i).copied().unwrap_or("");
                     if old != new && diff_printed < 8 {
                         if i < old_lines.len() && !old.is_empty() {
-                            println!("{}     {} {}",
-                                style!(C_DIM, "\u{2502}"), style!(C_RED, "-"), style!(C_RED, "{}", old));
+                            println!(
+                                "{}     {} {}",
+                                style!(C_DIM, "\u{2502}"),
+                                style!(C_RED, "-"),
+                                style!(C_RED, "{}", old)
+                            );
                         }
                         if i < new_lines.len() && !new.is_empty() {
-                            println!("{}     {} {}",
-                                style!(C_DIM, "\u{2502}"), style!(C_GREEN, "+"), style!(C_GREEN, "{}", new));
+                            println!(
+                                "{}     {} {}",
+                                style!(C_DIM, "\u{2502}"),
+                                style!(C_GREEN, "+"),
+                                style!(C_GREEN, "{}", new)
+                            );
                         }
                         diff_printed += 1;
                     }
@@ -2423,10 +3100,13 @@ fn handle_diff(session: &ChatSession) {
                 }
             }
         } else {
-            println!("{} {} {} {}",
-                style!(C_CYAN, "\u{2502}"), icon,
+            println!(
+                "{} {} {} {}",
+                style!(C_CYAN, "\u{2502}"),
+                icon,
                 style!(C_WHITE_B, "{}", f.path),
-                style!(C_GREEN, "(new file) {} bytes", f.content.len()));
+                style!(C_GREEN, "(new file) {} bytes", f.content.len())
+            );
         }
     }
 
@@ -2438,9 +3118,17 @@ fn handle_diff(session: &ChatSession) {
     if let Ok(output) = cmd {
         if !output.stdout.is_empty() {
             println!("{}", style!(C_CYAN, "\u{2502}"));
-            println!("{} {}", style!(C_CYAN, "\u{2502}"), style!(C_DIM, "git diff --stat:"));
+            println!(
+                "{} {}",
+                style!(C_CYAN, "\u{2502}"),
+                style!(C_DIM, "git diff --stat:")
+            );
             for line in String::from_utf8_lossy(&output.stdout).lines() {
-                println!("{}   {}", style!(C_CYAN, "\u{2502}"), style!(C_DIM, "{}", line));
+                println!(
+                    "{}   {}",
+                    style!(C_CYAN, "\u{2502}"),
+                    style!(C_DIM, "{}", line)
+                );
             }
         }
     }
@@ -2451,68 +3139,115 @@ fn handle_diff(session: &ChatSession) {
 fn handle_tokens(session: &ChatSession) {
     let tokens = session.last_tokens;
     let elapsed = session.last_elapsed.as_secs_f64();
-    let history_tokens: usize = session.history.iter()
+    let history_tokens: usize = session
+        .history
+        .iter()
         .map(|(u, a)| (u.len() + a.len()) / 4)
         .sum();
 
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{}  {}{}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "\u{2500}\u{2500} TOKENS \u{2500}\u{2500}"), style!(C_DIM, ""));
-    println!("{}   {:<18} {}",
+    println!(
+        "{}  {}{}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "\u{2500}\u{2500} TOKENS \u{2500}\u{2500}"),
+        style!(C_DIM, "")
+    );
+    println!(
+        "{}   {:<18} {}",
         style!(C_CYAN, "\u{2502}"),
         style!(C_WHITE_B, "last response:"),
-        style!(C_DIM, "~{} tokens", tokens));
+        style!(C_DIM, "~{} tokens", tokens)
+    );
 
     if elapsed > 0.0 && tokens > 0 {
         let tps = tokens as f64 / elapsed;
-        println!("{}   {:<18} {}",
+        println!(
+            "{}   {:<18} {}",
             style!(C_CYAN, "\u{2502}"),
             style!(C_WHITE_B, "speed:"),
-            style!(C_DIM, "~{:.0} tok/s", tps));
+            style!(C_DIM, "~{:.0} tok/s", tps)
+        );
     }
 
     if session.last_elapsed.as_secs() > 0 {
-        println!("{}   {:<18} {}",
+        println!(
+            "{}   {:<18} {}",
             style!(C_CYAN, "\u{2502}"),
             style!(C_WHITE_B, "elapsed:"),
-            style!(C_DIM, "{:.1}s", elapsed));
+            style!(C_DIM, "{:.1}s", elapsed)
+        );
     }
 
     if history_tokens > 0 {
-        println!("{}   {:<18} {}",
+        println!(
+            "{}   {:<18} {}",
             style!(C_CYAN, "\u{2502}"),
             style!(C_WHITE_B, "context history:"),
-            style!(C_DIM, "~{} tokens ({} turns)", history_tokens, session.history.len()));
+            style!(
+                C_DIM,
+                "~{} tokens ({} turns)",
+                history_tokens,
+                session.history.len()
+            )
+        );
 
         // Display uses the new scaled default (was hardcoded 2048). In future this should come from
         // the active Provider or ChatSession (after we store model_ctx + actual prompt budget).
         let pct = (history_tokens as f64 / 4096.0 * 100.0).min(100.0);
-        println!("{}   {:<18} {}",
+        println!(
+            "{}   {:<18} {}",
             style!(C_CYAN, "\u{2502}"),
             style!(C_WHITE_B, "context window:"),
-            style!(C_DIM, "{:.0}% used (4096 limit)", pct));
+            style!(C_DIM, "{:.0}% used (4096 limit)", pct)
+        );
     } else {
-        println!("{}   {:<18} {}",
+        println!(
+            "{}   {:<18} {}",
             style!(C_CYAN, "\u{2502}"),
             style!(C_WHITE_B, "context:"),
-            style!(C_DIM, "empty (no history)"));
+            style!(C_DIM, "empty (no history)")
+        );
     }
     println!("{}", style!(C_DIM, "\u{2502}"));
 }
 
 fn handle_memory(session: &ChatSession) {
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{}  {}{}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "\u{2500}\u{2500} MEMORY \u{2500}\u{2500}"), style!(C_DIM, ""));
+    println!(
+        "{}  {}{}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "\u{2500}\u{2500} MEMORY \u{2500}\u{2500}"),
+        style!(C_DIM, "")
+    );
     if session.project_memory.loaded && !session.project_memory.content.is_empty() {
         for line in session.project_memory.content.lines() {
-            println!("{} {}", style!(C_CYAN, "\u{2502}"), style!(C_DIM, "{}", line));
+            println!(
+                "{} {}",
+                style!(C_CYAN, "\u{2502}"),
+                style!(C_DIM, "{}", line)
+            );
         }
     } else {
-        println!("{} {} {}", style!(C_CYAN, "\u{2502}"), style!(C_DIM, "no project memory yet."), style!(C_DIM, ""));
-        println!("{} {} {}", style!(C_CYAN, "\u{2502}"), style!(C_DIM, ""), style!(C_DIM, "use /init to generate, or /memory add <text>"));
+        println!(
+            "{} {} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_DIM, "no project memory yet."),
+            style!(C_DIM, "")
+        );
+        println!(
+            "{} {} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_DIM, ""),
+            style!(C_DIM, "use /init to generate, or /memory add <text>")
+        );
     }
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{} {} {}",
-        style!(C_CYAN, "\u{2502}"), style!(C_DIM, ""), style!(C_DIM, "/memory add <text>  /init  /memory clear"));
+    println!(
+        "{} {} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_DIM, ""),
+        style!(C_DIM, "/memory add <text>  /init  /memory clear")
+    );
     println!("{}", style!(C_CYAN, "\u{2502}"));
 }
 
@@ -2528,37 +3263,75 @@ fn handle_memory_set(session: &mut ChatSession, args: &str) {
         if let Err(e) = session.project_memory.append(text) {
             println!("{} failed: {}", style!(C_RED, "✗"), e);
         } else {
-            println!("{} appended to memory ({} bytes)", style!(C_GREEN, "✓"), text.len());
+            println!(
+                "{} appended to memory ({} bytes)",
+                style!(C_GREEN, "✓"),
+                text.len()
+            );
         }
         return;
     }
     if let Err(e) = session.project_memory.set(args) {
         println!("{} failed: {}", style!(C_RED, "✗"), e);
     } else {
-        println!("{} memory saved ({} bytes)", style!(C_GREEN, "✓"), args.len());
+        println!(
+            "{} memory saved ({} bytes)",
+            style!(C_GREEN, "✓"),
+            args.len()
+        );
     }
 }
 
 fn handle_init(session: &mut ChatSession) {
-    let dir = session.project_dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let ptype = detect_project_type(&dir);
     let ptype_label = if ptype.is_empty() { "unknown" } else { ptype };
     println!("{}", style!(C_DIM, "│"));
-    println!("{} {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "detected project type: {}", ptype_label));
-    println!("{} {}", style!(C_CYAN, "│"), style!(C_DIM, "generating .rem/memory.md..."));
+    println!(
+        "{} {}",
+        style!(C_CYAN, "│"),
+        style!(C_WHITE_B, "detected project type: {}", ptype_label)
+    );
+    println!(
+        "{} {}",
+        style!(C_CYAN, "│"),
+        style!(C_DIM, "generating .rem/memory.md...")
+    );
     let starter = ProjectMemory::generate_starter(&dir, ptype);
     if let Err(e) = session.project_memory.set(&starter) {
-        println!("{} {} failed: {}", style!(C_RED, "│"), style!(C_RED, "✗"), e);
+        println!(
+            "{} {} failed: {}",
+            style!(C_RED, "│"),
+            style!(C_RED, "✗"),
+            e
+        );
     } else {
-        println!("{} {} {} ({} bytes)", style!(C_GREEN, "│"), style!(C_GREEN, "✓"), style!(C_WHITE_B, ".rem/memory.md created"), starter.len());
-        println!("{} {} use {} to view", style!(C_CYAN, "│"), style!(C_DIM, ""), style!(C_WHITE_B, "/memory"));
+        println!(
+            "{} {} {} ({} bytes)",
+            style!(C_GREEN, "│"),
+            style!(C_GREEN, "✓"),
+            style!(C_WHITE_B, ".rem/memory.md created"),
+            starter.len()
+        );
+        println!(
+            "{} {} use {} to view",
+            style!(C_CYAN, "│"),
+            style!(C_DIM, ""),
+            style!(C_WHITE_B, "/memory")
+        );
     }
     println!("{}", style!(C_DIM, "│"));
 }
 
 async fn handle_compact(client: &Provider, session: &mut ChatSession) {
     if session.history.is_empty() {
-        println!("{} nothing to compact — history is empty", style!(C_YELLOW, "│"));
+        println!(
+            "{} nothing to compact — history is empty",
+            style!(C_YELLOW, "│")
+        );
         return;
     }
     let history_text = session.build_chat_history();
@@ -2566,24 +3339,59 @@ async fn handle_compact(client: &Provider, session: &mut ChatSession) {
         "[SYSTEM] Summarize this conversation in 3-5 bullet points covering key decisions, code generated, and next actions. Be concise.\n\n{}",
         history_text
     );
-    println!("{} compacting {} turns...", style!(C_CYAN, "│"), session.history.len());
-    match client.complete_chat_stream(&compact_prompt, "You are a summarizer. Output only bullet-point summary. No preamble, no code.", "").await {
+    println!(
+        "{} compacting {} turns...",
+        style!(C_CYAN, "│"),
+        session.history.len()
+    );
+    match client
+        .complete_chat_stream(
+            &compact_prompt,
+            "You are a summarizer. Output only bullet-point summary. No preamble, no code.",
+            "",
+        )
+        .await
+    {
         Ok(summary) => {
             let old_count = session.history.len();
             session.history.clear();
-            session.history.push(("[compacted summary]".to_string(), summary.trim().to_string()));
-            println!("{} {} {} → {} turns", style!(C_GREEN, "│"), style!(C_GREEN, "✓ compacted:"), old_count, session.history.len());
+            session.history.push((
+                "[compacted summary]".to_string(),
+                summary.trim().to_string(),
+            ));
+            println!(
+                "{} {} {} → {} turns",
+                style!(C_GREEN, "│"),
+                style!(C_GREEN, "✓ compacted:"),
+                old_count,
+                session.history.len()
+            );
         }
         Err(e) => {
-            println!("{} {} compact failed: {}", style!(C_RED, "│"), style!(C_RED, "✗"), e);
+            println!(
+                "{} {} compact failed: {}",
+                style!(C_RED, "│"),
+                style!(C_RED, "✗"),
+                e
+            );
         }
     }
 }
 
 async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &str) {
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{} {} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "GOAL: {}", condition), style!(C_DIM, ""));
-    println!("{} {} {}", style!(C_CYAN, "\u{2502}"), style!(C_DIM, ""), style!(C_DIM, "REM will work until goal is met. Ctrl+C to stop."));
+    println!(
+        "{} {} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_WHITE_B, "GOAL: {}", condition),
+        style!(C_DIM, "")
+    );
+    println!(
+        "{} {} {}",
+        style!(C_CYAN, "\u{2502}"),
+        style!(C_DIM, ""),
+        style!(C_DIM, "REM will work until goal is met. Ctrl+C to stop.")
+    );
     println!("{}", style!(C_DIM, "\u{2502}"));
 
     let goal_prompt_text = format!(
@@ -2605,8 +3413,13 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
         if i > 0 {
             println!("{}", style!(C_DIM, "\u{2502}"));
         }
-        println!("{} {} {}/{}",
-            style!(C_CYAN, "\u{2502}"), style!(C_BOLD, "iteration"), i + 1, max_iter);
+        println!(
+            "{} {} {}/{}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_BOLD, "iteration"),
+            i + 1,
+            max_iter
+        );
 
         let prompt = if last_tool_output.is_empty() {
             goal_prompt_text.clone()
@@ -2614,10 +3427,15 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
             build_agentic_prompt(&goal_prompt_text, &last_tool_output, i, max_iter)
         };
 
-        match client.complete_chat_stream(&prompt, &CHAT_SYSTEM_PROMPT_CODE, "").await {
+        match client
+            .complete_chat_stream(&prompt, CHAT_SYSTEM_PROMPT_CODE, "")
+            .await
+        {
             Ok(text) => {
                 let cleaned = text.trim().to_string();
-                session.history.push((format!("/goal {}", condition), cleaned.clone()));
+                session
+                    .history
+                    .push((format!("/goal {}", condition), cleaned.clone()));
 
                 let files = extract_code_blocks_with_names(&cleaned);
                 let code = extract_code_block(&cleaned);
@@ -2629,25 +3447,46 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
                 } else if !code.is_empty() {
                     session.last_code = code;
                     session.last_files.clear();
-                    println!("{} {} use /write <path> to save",
-                        style!(C_CYAN, "\u{2502}"), style!(C_DIM, "code detected \u{2014}"));
+                    println!(
+                        "{} {} use /write <path> to save",
+                        style!(C_CYAN, "\u{2502}"),
+                        style!(C_DIM, "code detected \u{2014}")
+                    );
                 }
 
                 if let Some((achieved, msg)) = extract_goal_signal(&cleaned) {
                     if achieved {
-                        println!("{} {} goal achieved! {}", style!(C_GREEN, "\u{2502}"), style!(C_GREEN, "\u{2713}"), msg);
+                        println!(
+                            "{} {} goal achieved! {}",
+                            style!(C_GREEN, "\u{2502}"),
+                            style!(C_GREEN, "\u{2713}"),
+                            msg
+                        );
                     } else {
-                        println!("{} {} {}", style!(C_YELLOW, "\u{2502}"), style!(C_YELLOW, "!"), msg);
+                        println!(
+                            "{} {} {}",
+                            style!(C_YELLOW, "\u{2502}"),
+                            style!(C_YELLOW, "!"),
+                            msg
+                        );
                     }
                     break;
                 }
 
                 if cleaned.contains("GOAL_ACHIEVED") {
-                    println!("{} {} goal achieved!", style!(C_GREEN, "\u{2502}"), style!(C_GREEN, "\u{2713}"));
+                    println!(
+                        "{} {} goal achieved!",
+                        style!(C_GREEN, "\u{2502}"),
+                        style!(C_GREEN, "\u{2713}")
+                    );
                     break;
                 }
                 if cleaned.contains("GOAL_FAILED") {
-                    println!("{} {} goal could not be achieved.", style!(C_YELLOW, "\u{2502}"), style!(C_YELLOW, "!"));
+                    println!(
+                        "{} {} goal could not be achieved.",
+                        style!(C_YELLOW, "\u{2502}"),
+                        style!(C_YELLOW, "!")
+                    );
                     break;
                 }
 
@@ -2672,7 +3511,12 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
                 }
             }
             Err(e) => {
-                println!("{} {} error: {}", style!(C_RED, "\u{2502}"), style!(C_RED, "\u{2717}"), e);
+                println!(
+                    "{} {} error: {}",
+                    style!(C_RED, "\u{2502}"),
+                    style!(C_RED, "\u{2717}"),
+                    e
+                );
                 break;
             }
         }
@@ -2682,14 +3526,26 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
 
 fn handle_copy(session: &ChatSession, n: usize) {
     let response = if n == 1 || session.history.is_empty() {
-        session.history.last().map(|(_, a)| a.as_str()).unwrap_or("")
+        session
+            .history
+            .last()
+            .map(|(_, a)| a.as_str())
+            .unwrap_or("")
     } else {
         let total = session.history.len();
         if n > total {
-            println!("{} only {} responses in history", style!(C_YELLOW, "│"), total);
+            println!(
+                "{} only {} responses in history",
+                style!(C_YELLOW, "│"),
+                total
+            );
             return;
         }
-        session.history.get(total - n).map(|(_, a)| a.as_str()).unwrap_or("")
+        session
+            .history
+            .get(total - n)
+            .map(|(_, a)| a.as_str())
+            .unwrap_or("")
     };
 
     if response.is_empty() {
@@ -2710,14 +3566,26 @@ fn handle_copy(session: &ChatSession, n: usize) {
                 println!("{} {}", style!(C_DIM, "│"), line);
             }
             if response.lines().count() > 20 {
-                println!("{} ... ({} lines total)", style!(C_DIM, "│"), response.lines().count());
+                println!(
+                    "{} ... ({} lines total)",
+                    style!(C_DIM, "│"),
+                    response.lines().count()
+                );
             }
         }
         Ok(_) => {
-            println!("{} copied to clipboard ({} chars)", style!(C_GREEN, "│ ✓"), response.len());
+            println!(
+                "{} copied to clipboard ({} chars)",
+                style!(C_GREEN, "│ ✓"),
+                response.len()
+            );
         }
         Err(_) => {
-            println!("{} copied to console ({}) — install xclip/xsel for clipboard", style!(C_GREEN, "│ ✓"), response.chars().count());
+            println!(
+                "{} copied to console ({}) — install xclip/xsel for clipboard",
+                style!(C_GREEN, "│ ✓"),
+                response.chars().count()
+            );
             for line in response.lines().take(20) {
                 println!("{} {}", style!(C_DIM, "│"), line);
             }
@@ -2735,22 +3603,36 @@ fn handle_lint(_session: &mut ChatSession, path: &str) {
     let path_str = file_path.display().to_string();
     let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let cmd: (&str, Vec<String>) = match ext {
-        "py" => ("python3", vec!["-m".into(), "py_compile".into(), path_str.clone()]),
+        "py" => (
+            "python3",
+            vec!["-m".into(), "py_compile".into(), path_str.clone()],
+        ),
         "rs" => ("cargo", vec!["fmt".into(), "--check".into(), "--".into()]),
         "go" => ("go", vec!["fmt".into()]),
-        "js" | "ts" => ("npx", vec!["--no-install".into(), "eslint".into(), path_str.clone()]),
-        "html" => ("npx", vec!["--no-install".into(), "htmlhint".into(), path_str.clone()]),
-        "css" => ("npx", vec!["--no-install".into(), "stylelint".into(), path_str.clone()]),
+        "js" | "ts" => (
+            "npx",
+            vec!["--no-install".into(), "eslint".into(), path_str.clone()],
+        ),
+        "html" => (
+            "npx",
+            vec!["--no-install".into(), "htmlhint".into(), path_str.clone()],
+        ),
+        "css" => (
+            "npx",
+            vec!["--no-install".into(), "stylelint".into(), path_str.clone()],
+        ),
         _ => {
-            println!("{} no linter configured for .{} files", style!(C_YELLOW, "│"), ext);
+            println!(
+                "{} no linter configured for .{} files",
+                style!(C_YELLOW, "│"),
+                ext
+            );
             return;
         }
     };
 
     println!("{} linting {}...", style!(C_CYAN, "│"), path);
-    let output = std::process::Command::new(cmd.0)
-        .args(&cmd.1)
-        .output();
+    let output = std::process::Command::new(cmd.0).args(&cmd.1).output();
 
     match output {
         Ok(out) => {
@@ -2759,9 +3641,17 @@ fn handle_lint(_session: &mut ChatSession, path: &str) {
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                let msg = if stderr.trim().is_empty() { stdout.trim().to_string() } else { stderr.trim().to_string() };
+                let msg = if stderr.trim().is_empty() {
+                    stdout.trim().to_string()
+                } else {
+                    stderr.trim().to_string()
+                };
                 if msg.is_empty() {
-                    println!("{} {} lint completed with warnings", style!(C_YELLOW, "│ !"), path);
+                    println!(
+                        "{} {} lint completed with warnings",
+                        style!(C_YELLOW, "│ !"),
+                        path
+                    );
                 } else {
                     println!("{} {} lint issues:", style!(C_YELLOW, "│ !"), path);
                     for line in msg.lines().take(10) {
@@ -2771,7 +3661,11 @@ fn handle_lint(_session: &mut ChatSession, path: &str) {
             }
         }
         Err(e) => {
-            println!("{} lint failed: {} (is the tool installed?)", style!(C_YELLOW, "│"), e);
+            println!(
+                "{} lint failed: {} (is the tool installed?)",
+                style!(C_YELLOW, "│"),
+                e
+            );
         }
     }
 }
@@ -2784,8 +3678,14 @@ async fn handle_review(client: &Provider, session: &mut ChatSession) {
 
     let mut code_for_review = String::new();
     for f in &session.last_files {
-        if f.path.is_empty() { continue; }
-        code_for_review.push_str(&format!("\n### {}\n```\n{}\n```\n", f.path, truncate_bytes(&f.content, 3000)));
+        if f.path.is_empty() {
+            continue;
+        }
+        code_for_review.push_str(&format!(
+            "\n### {}\n```\n{}\n```\n",
+            f.path,
+            truncate_bytes(&f.content, 3000)
+        ));
     }
     if code_for_review.is_empty() && !session.last_code.is_empty() {
         code_for_review = format!("```\n{}\n```", truncate_bytes(&session.last_code, 3000));
@@ -2806,7 +3706,11 @@ async fn handle_review(client: &Provider, session: &mut ChatSession) {
         code_for_review
     );
 
-    println!("{} reviewing {} file(s)...", style!(C_CYAN, "│"), session.last_files.len());
+    println!(
+        "{} reviewing {} file(s)...",
+        style!(C_CYAN, "│"),
+        session.last_files.len()
+    );
     match client.complete_chat_stream(
         &review_prompt,
         "[MODE: CHAT] You are a senior code reviewer. Review the code critically. Use clear markdown. Be specific.",
@@ -2826,7 +3730,11 @@ async fn handle_review(client: &Provider, session: &mut ChatSession) {
 fn handle_find(session: &ChatSession, query: &str) {
     if query.is_empty() {
         println!("{}", style!(C_DIM, "\u{2502}"));
-        println!("{} {}", style!(C_CYAN, "\u{2502}"), style!(C_WHITE_B, "usage: /find <query>"));
+        println!(
+            "{} {}",
+            style!(C_CYAN, "\u{2502}"),
+            style!(C_WHITE_B, "usage: /find <query>")
+        );
         println!("{}", style!(C_DIM, "\u{2502}"));
         return;
     }
@@ -2839,20 +3747,26 @@ fn handle_find(session: &ChatSession, query: &str) {
     let report = find_matches(&root, query, &FindOptions::default());
 
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{} {} {}",
+    println!(
+        "{} {} {}",
         style!(C_CYAN, "\u{2502}"),
         style!(C_WHITE_B, "\u{203a} FIND  {}", query),
-        style!(C_DIM, ""));
-    println!("{} {} {}",
+        style!(C_DIM, "")
+    );
+    println!(
+        "{} {} {}",
         style!(C_CYAN, "\u{2502}"),
         style!(C_DIM, "in"),
-        style!(C_WHITE_B, "{}", root.display()));
+        style!(C_WHITE_B, "{}", root.display())
+    );
     println!("{}", style!(C_DIM, "\u{2502}"));
 
     if report.matches.is_empty() {
-        println!("{} {}",
+        println!(
+            "{} {}",
             style!(C_CYAN, "\u{2502}"),
-            style!(C_YELLOW, "(no matches)"));
+            style!(C_YELLOW, "(no matches)")
+        );
         println!("{}", style!(C_DIM, "\u{2502}"));
         return;
     }
@@ -2870,22 +3784,26 @@ fn handle_find(session: &ChatSession, query: &str) {
             if last_path.is_some() {
                 println!("{}", style!(C_DIM, "\u{2502}"));
             }
-            println!("{} {} {}",
+            println!(
+                "{} {} {}",
                 style!(C_CYAN, "\u{2502}"),
                 style!(C_BLUE, "\u{2500}\u{2500} {} \u{2500}\u{2500}", rel),
-                style!(C_DIM, ""));
+                style!(C_DIM, "")
+            );
             last_path = Some(rel);
         }
         let line_no_w = 4usize;
         let col_w = 3usize;
-        println!("{} {}   {:>lw$}:{:<cw$}  {}",
+        println!(
+            "{} {}   {:>lw$}:{:<cw$}  {}",
             style!(C_CYAN, "\u{2502}"),
             style!(C_DIM, "\u{251c}\u{2500}\u{2500}"),
             m.line_no,
             m.column,
             style!(C_WHITE_B, "{}", trim_for_display(&m.line, 120)),
             lw = line_no_w,
-            cw = col_w);
+            cw = col_w
+        );
     }
     println!("{}", style!(C_DIM, "\u{2502}"));
 
@@ -2917,8 +3835,7 @@ fn handle_find(session: &ChatSession, query: &str) {
         summary.push_str(&format!("  (showing first {})", shown));
     }
     println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{}",
-        style!(C_GREEN, "{}", summary));
+    println!("{}", style!(C_GREEN, "{}", summary));
     println!("{}", style!(C_DIM, "\u{2502}"));
 }
 
@@ -2933,13 +3850,18 @@ fn trim_for_display(s: &str, max: usize) -> String {
 }
 
 fn handle_save_session(session: &ChatSession) {
-    let dir = session.project_dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let rem_dir = dir.join(".rem");
     let _ = fs::create_dir_all(&rem_dir);
     let session_file = rem_dir.join("session.json");
-    let last_files_json: Vec<serde_json::Value> = session.last_files.iter().map(|f| {
-        serde_json::json!({"path": f.path, "content": f.content})
-    }).collect();
+    let last_files_json: Vec<serde_json::Value> = session
+        .last_files
+        .iter()
+        .map(|f| serde_json::json!({"path": f.path, "content": f.content}))
+        .collect();
     let data = serde_json::json!({
         "history": session.history.iter().map(|(u, a)| serde_json::json!({"user": u, "assistant": a})).collect::<Vec<_>>(),
         "mode": session.mode.label(),
@@ -2949,9 +3871,20 @@ fn handle_save_session(session: &ChatSession) {
         "last_files": last_files_json,
         "last_files_written": session.last_files_written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
     });
-    match fs::write(&session_file, serde_json::to_string_pretty(&data).unwrap_or_default()) {
-        Ok(()) => println!("{} session saved to {}", style!(C_GREEN, "\u{2713}"), session_file.display()),
-        Err(e) => println!("{} failed to save session: {}", style!(C_RED, "\u{2717}"), e),
+    match fs::write(
+        &session_file,
+        serde_json::to_string_pretty(&data).unwrap_or_default(),
+    ) {
+        Ok(()) => println!(
+            "{} session saved to {}",
+            style!(C_GREEN, "\u{2713}"),
+            session_file.display()
+        ),
+        Err(e) => println!(
+            "{} failed to save session: {}",
+            style!(C_RED, "\u{2717}"),
+            e
+        ),
     }
 }
 
@@ -2964,10 +3897,17 @@ fn chrono_now() -> String {
 }
 
 fn handle_resume_session(session: &mut ChatSession) {
-    let dir = session.project_dir.clone().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let session_file = dir.join(".rem/session.json");
     if !session_file.exists() {
-        println!("{} no saved session found at {}", style!(C_YELLOW, "\u{2502}"), session_file.display());
+        println!(
+            "{} no saved session found at {}",
+            style!(C_YELLOW, "\u{2502}"),
+            session_file.display()
+        );
         return;
     }
     match fs::read_to_string(&session_file) {
@@ -2976,39 +3916,68 @@ fn handle_resume_session(session: &mut ChatSession) {
                 if let Some(history) = data["history"].as_array() {
                     let mut restored = 0;
                     for entry in history {
-                        if let (Some(u), Some(a)) = (entry["user"].as_str(), entry["assistant"].as_str()) {
+                        if let (Some(u), Some(a)) =
+                            (entry["user"].as_str(), entry["assistant"].as_str())
+                        {
                             session.history.push((u.to_string(), a.to_string()));
                             restored += 1;
                         }
                     }
-                    println!("{} restored {} turns from {}", style!(C_GREEN, "\u{2713}"), restored, session_file.display());
-                    println!("{} current conversation is now merged with saved session", style!(C_DIM, "\u{2502}"));
+                    println!(
+                        "{} restored {} turns from {}",
+                        style!(C_GREEN, "\u{2713}"),
+                        restored,
+                        session_file.display()
+                    );
+                    println!(
+                        "{} current conversation is now merged with saved session",
+                        style!(C_DIM, "\u{2502}")
+                    );
                 }
                 if let Some(m) = data["mode"].as_str() {
-                    println!("{} {} {}", style!(C_DIM, "\u{2502}"), style!(C_DIM, "saved mode:"), style!(C_WHITE_B, "{}", m));
+                    println!(
+                        "{} {} {}",
+                        style!(C_DIM, "\u{2502}"),
+                        style!(C_DIM, "saved mode:"),
+                        style!(C_WHITE_B, "{}", m)
+                    );
                 }
                 if let Some(code) = data["last_code"].as_str() {
                     if !code.is_empty() {
                         session.last_code = code.to_string();
-                        println!("{} {} {}", style!(C_DIM, "\u{2502}"), style!(C_DIM, "last code:"), style!(C_GREEN, "restored"));
+                        println!(
+                            "{} {} {}",
+                            style!(C_DIM, "\u{2502}"),
+                            style!(C_DIM, "last code:"),
+                            style!(C_GREEN, "restored")
+                        );
                     }
                 }
                 if let Some(files) = data["last_files"].as_array() {
-                    let restored_files: Vec<FileEntry> = files.iter().filter_map(|f| {
-                        Some(FileEntry {
-                            path: f["path"].as_str()?.to_string(),
-                            content: f["content"].as_str()?.to_string(),
+                    let restored_files: Vec<FileEntry> = files
+                        .iter()
+                        .filter_map(|f| {
+                            Some(FileEntry {
+                                path: f["path"].as_str()?.to_string(),
+                                content: f["content"].as_str()?.to_string(),
+                            })
                         })
-                    }).collect();
+                        .collect();
                     if !restored_files.is_empty() {
-                        println!("{} {} {} file(s) restored", style!(C_DIM, "\u{2502}"), style!(C_DIM, "last files:"), restored_files.len());
+                        println!(
+                            "{} {} {} file(s) restored",
+                            style!(C_DIM, "\u{2502}"),
+                            style!(C_DIM, "last files:"),
+                            restored_files.len()
+                        );
                         session.last_files = restored_files;
                     }
                 }
                 if let Some(paths) = data["last_files_written"].as_array() {
-                    let written: Vec<PathBuf> = paths.iter().filter_map(|p| {
-                        p.as_str().map(PathBuf::from)
-                    }).collect();
+                    let written: Vec<PathBuf> = paths
+                        .iter()
+                        .filter_map(|p| p.as_str().map(PathBuf::from))
+                        .collect();
                     if !written.is_empty() {
                         session.last_files_written = written;
                     }
@@ -3017,7 +3986,11 @@ fn handle_resume_session(session: &mut ChatSession) {
                 println!("{} invalid session file", style!(C_RED, "\u{2502}"));
             }
         }
-        Err(e) => println!("{} failed to read session: {}", style!(C_RED, "\u{2502}"), e),
+        Err(e) => println!(
+            "{} failed to read session: {}",
+            style!(C_RED, "\u{2502}"),
+            e
+        ),
     }
 }
 
@@ -3026,49 +3999,247 @@ fn print_chat_help() {
     let d = C_DIM;
     let h = C_WHITE_B;
     println!("{}", style!(d, "\u{2502}"));
-    println!("{}  {}{}", style!(v, "\u{2502}"), style!(h, "\u{2500}\u{2500} COMMANDS \u{2500}\u{2500}"), style!(d, ""));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/help"),          style!(d, "show this help"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/mode"),          style!(d, "toggle CHAT → CODE → PLAN"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/plan"),          style!(d, "switch to PLAN mode (explore & analyze)"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/clear"),         style!(d, "reset conversation history"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/explain <code>"),style!(d, "explain what code does"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/test <file>"),   style!(d, "generate tests for a file"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/refactor <file>"),style!(d, "suggest refactoring for a file"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/write <path>"),  style!(d, "save last code to file"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/save <path>"),   style!(d, "same as /write"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/dir <path>"),    style!(d, "set project root"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/search <q>"),    style!(d, "search the web (DuckDuckGo)"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/code"),          style!(d, "show last generated code"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/files"),         style!(d, "list project files tree"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/undo"),          style!(d, "delete last written files"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/diff"),          style!(d, "compare generated vs existing files"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/tokens"),        style!(d, "show token usage & context stats"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/config"),        style!(d, "view current configuration"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/memory"),        style!(d, "view/set project memory (.rem/memory.md)"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/init"),          style!(d, "auto-generate project memory file"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/compact"),       style!(d, "summarize & free context window"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/goal <cond>"),   style!(d, "autonomous loop until goal is met"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/copy [N]"),      style!(d, "copy last response to clipboard"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/lint [file]"),   style!(d, "run linter on generated files"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/review"),        style!(d, "AI code review of generated code"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/find <q>"),      style!(d, "search text inside the project"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/reset"),         style!(d, "full reset — clear history & code cache"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/save"),          style!(d, "save current session to .rem/session.json"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/resume"),        style!(d, "restore saved session history"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "/why"),           style!(d, "show why last intent was chosen"));
-    println!("{}   {:<18} {}", style!(v, "\u{2502}"), style!(h, "exit / quit"),    style!(d, "exit REM"));
+    println!(
+        "{}  {}{}",
+        style!(v, "\u{2502}"),
+        style!(h, "\u{2500}\u{2500} COMMANDS \u{2500}\u{2500}"),
+        style!(d, "")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/help"),
+        style!(d, "show this help")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/mode"),
+        style!(d, "toggle CHAT → CODE → PLAN")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/plan"),
+        style!(d, "switch to PLAN mode (explore & analyze)")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/clear"),
+        style!(d, "reset conversation history")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/explain <code>"),
+        style!(d, "explain what code does")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/test <file>"),
+        style!(d, "generate tests for a file")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/refactor <file>"),
+        style!(d, "suggest refactoring for a file")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/write <path>"),
+        style!(d, "save last code to file")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/save <path>"),
+        style!(d, "same as /write")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/dir <path>"),
+        style!(d, "set project root")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/search <q>"),
+        style!(d, "search the web (DuckDuckGo)")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/code"),
+        style!(d, "show last generated code")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/files"),
+        style!(d, "list project files tree")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/undo"),
+        style!(d, "delete last written files")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/diff"),
+        style!(d, "compare generated vs existing files")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/tokens"),
+        style!(d, "show token usage & context stats")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/config"),
+        style!(d, "view current configuration")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/memory"),
+        style!(d, "view/set project memory (.rem/memory.md)")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/init"),
+        style!(d, "auto-generate project memory file")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/compact"),
+        style!(d, "summarize & free context window")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/goal <cond>"),
+        style!(d, "autonomous loop until goal is met")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/copy [N]"),
+        style!(d, "copy last response to clipboard")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/lint [file]"),
+        style!(d, "run linter on generated files")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/review"),
+        style!(d, "AI code review of generated code")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/find <q>"),
+        style!(d, "search text inside the project")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/reset"),
+        style!(d, "full reset — clear history & code cache")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/save"),
+        style!(d, "save current session to .rem/session.json")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/resume"),
+        style!(d, "restore saved session history")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "/why"),
+        style!(d, "show why last intent was chosen")
+    );
+    println!(
+        "{}   {:<18} {}",
+        style!(v, "\u{2502}"),
+        style!(h, "exit / quit"),
+        style!(d, "exit REM")
+    );
     println!("{}", style!(v, "\u{2502}"));
-    println!("{}  {}", style!(v, "\u{2502}"), style!(h, "\u{2500}\u{2500} TIPS \u{2500}\u{2500}"));
-    println!("{}   {} use {} to include file context: {}",
-        style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "@<path>"), style!(d, "@src/main.rs"));
-    println!("{}   {} use {} to toggle between chat, code, and plan modes", style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "/mode"));
-    println!("{}   {} {} for analysis first — REM explores codebase before coding", style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "/plan"));
-    println!("{}   {} describe what you want \u{2014} REM detects intent", style!(v, "\u{2502}"), style!(d, "\u{2022}"));
-    println!("{}   {} multi-file intent and auto-writes after confirmation", style!(v, "\u{2502}"), style!(d, "\u{2022}"));
-    println!("{}   {} use {} {} {} for analysis, tests, and refactoring",
-        style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "/explain"), style!(h, "/test"), style!(h, "/refactor"));
-    println!("{}   {} run {} for persistent project memory across sessions", style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "/init"));
-    println!("{}   {} run {} to scaffold a new project instantly", style!(v, "\u{2502}"), style!(d, "\u{2022}"), style!(h, "rem new <name>"));
+    println!(
+        "{}  {}",
+        style!(v, "\u{2502}"),
+        style!(h, "\u{2500}\u{2500} TIPS \u{2500}\u{2500}")
+    );
+    println!(
+        "{}   {} use {} to include file context: {}",
+        style!(v, "\u{2502}"),
+        style!(d, "\u{2022}"),
+        style!(h, "@<path>"),
+        style!(d, "@src/main.rs")
+    );
+    println!(
+        "{}   {} use {} to toggle between chat, code, and plan modes",
+        style!(v, "\u{2502}"),
+        style!(d, "\u{2022}"),
+        style!(h, "/mode")
+    );
+    println!(
+        "{}   {} {} for analysis first — REM explores codebase before coding",
+        style!(v, "\u{2502}"),
+        style!(d, "\u{2022}"),
+        style!(h, "/plan")
+    );
+    println!(
+        "{}   {} describe what you want \u{2014} REM detects intent",
+        style!(v, "\u{2502}"),
+        style!(d, "\u{2022}")
+    );
+    println!(
+        "{}   {} multi-file intent and auto-writes after confirmation",
+        style!(v, "\u{2502}"),
+        style!(d, "\u{2022}")
+    );
+    println!(
+        "{}   {} use {} {} {} for analysis, tests, and refactoring",
+        style!(v, "\u{2502}"),
+        style!(d, "\u{2022}"),
+        style!(h, "/explain"),
+        style!(h, "/test"),
+        style!(h, "/refactor")
+    );
+    println!(
+        "{}   {} run {} for persistent project memory across sessions",
+        style!(v, "\u{2502}"),
+        style!(d, "\u{2022}"),
+        style!(h, "/init")
+    );
+    println!(
+        "{}   {} run {} to scaffold a new project instantly",
+        style!(v, "\u{2502}"),
+        style!(d, "\u{2022}"),
+        style!(h, "rem new <name>")
+    );
     println!("{}", style!(v, "\u{2502}"));
 }
 
@@ -3076,15 +4247,19 @@ fn print_chat_help() {
 
 fn print_banner(client: &Provider) {
     println!();
-    println!("{} {} {}",
+    println!(
+        "{} {} {}",
         style!(C_CYAN, "╭─"),
         style!(C_BOLD, "REM"),
-        style!(C_DIM, "─────────────────────────────"));
-    println!("{} model {}{} {}",
+        style!(C_DIM, "─────────────────────────────")
+    );
+    println!(
+        "{} model {}{} {}",
         style!(C_CYAN, "│"),
         style!(C_GREEN, "{}", client.model),
         style!(C_DIM, " •"),
-        style!(C_DIM, "type /help for commands"));
+        style!(C_DIM, "type /help for commands")
+    );
 }
 
 fn print_reply(reply: &ModelReply, newline: bool) {
@@ -3092,41 +4267,77 @@ fn print_reply(reply: &ModelReply, newline: bool) {
         println!();
     }
     if !reply.explanation.trim().is_empty() {
-        println!("{} {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "{}", reply.explanation));
+        println!(
+            "{} {}",
+            style!(C_CYAN, "│"),
+            style!(C_WHITE_B, "{}", reply.explanation)
+        );
         println!("{}", style!(C_CYAN, "│"));
     }
 
     if !reply.files.is_empty() {
-        println!("{} {} ({} file{})",
+        println!(
+            "{} {} ({} file{})",
             style!(C_CYAN, "│  ┌"),
             style!(C_GREEN, "generated:"),
             reply.files.len(),
-            if reply.files.len() == 1 { "" } else { "s" });
+            if reply.files.len() == 1 { "" } else { "s" }
+        );
         for f in &reply.files {
             let icon = file_icon(&f.path);
             if f.path.is_empty() {
-                println!("{} {}  {}", style!(C_CYAN, "│"), icon, style!(C_GREEN, "(unnamed) {} bytes", f.content.len()));
+                println!(
+                    "{} {}  {}",
+                    style!(C_CYAN, "│"),
+                    icon,
+                    style!(C_GREEN, "(unnamed) {} bytes", f.content.len())
+                );
             } else {
-                println!("{} {}  {}", style!(C_CYAN, "│"), icon, style!(C_GREEN, "{}", f.path));
+                println!(
+                    "{} {}  {}",
+                    style!(C_CYAN, "│"),
+                    icon,
+                    style!(C_GREEN, "{}", f.path)
+                );
             }
         }
-        println!("{}   {}", style!(C_CYAN, "│  └"), style!(C_DIM, "/write <path> to save"));
+        println!(
+            "{}   {}",
+            style!(C_CYAN, "│  └"),
+            style!(C_DIM, "/write <path> to save")
+        );
         println!("{}", style!(C_CYAN, "│"));
     } else if !reply.code.trim().is_empty() {
         println!("{} {}", style!(C_CYAN, "│  ┌"), style!(C_GREEN, "code:"));
         for code_line in reply.code.lines() {
-            println!("{} {}", style!(C_CYAN, "│"), style!(C_GREEN, "  │  {}", code_line));
+            println!(
+                "{} {}",
+                style!(C_CYAN, "│"),
+                style!(C_GREEN, "  │  {}", code_line)
+            );
         }
-        println!("{}   {}", style!(C_CYAN, "│  └"), style!(C_DIM, "/write <path> to save"));
+        println!(
+            "{}   {}",
+            style!(C_CYAN, "│  └"),
+            style!(C_DIM, "/write <path> to save")
+        );
         println!("{}", style!(C_CYAN, "│"));
     }
     if !reply.commands.is_empty() {
         println!("{} {}", style!(C_CYAN, "│"), style!(C_MAGENTA, "commands:"));
         for cmd in sanitize_commands(&reply.commands) {
             if is_command_blocked(cmd) {
-                println!("{}   {}", style!(C_CYAN, "│"), style!(C_RED, "[blocked] {}", cmd));
+                println!(
+                    "{}   {}",
+                    style!(C_CYAN, "│"),
+                    style!(C_RED, "[blocked] {}", cmd)
+                );
             } else {
-                println!("{}   {}", style!(C_CYAN, "│"), style!(C_MAGENTA, "  $ {}", cmd));
+                println!(
+                    "{}   {}",
+                    style!(C_CYAN, "│"),
+                    style!(C_MAGENTA, "  $ {}", cmd)
+                );
             }
         }
         println!("{}", style!(C_CYAN, "│"));
@@ -3134,12 +4345,20 @@ fn print_reply(reply: &ModelReply, newline: bool) {
     if !reply.checks.is_empty() {
         println!("{} {}", style!(C_CYAN, "│"), style!(C_YELLOW, "checks:"));
         for item in &reply.checks {
-            println!("{}   {}", style!(C_CYAN, "│"), style!(C_DIM, "  • {}", item));
+            println!(
+                "{}   {}",
+                style!(C_CYAN, "│"),
+                style!(C_DIM, "  • {}", item)
+            );
         }
         println!("{}", style!(C_CYAN, "│"));
     }
     if !reply.caution.trim().is_empty() {
-        println!("{} {}", style!(C_CYAN, "│"), style!(C_RED, "caution: {}", reply.caution));
+        println!(
+            "{} {}",
+            style!(C_CYAN, "│"),
+            style!(C_RED, "caution: {}", reply.caution)
+        );
         println!("{}", style!(C_CYAN, "│"));
     }
     println!("{}", style!(C_CYAN, "╰──────────────────────────────────"));
@@ -3183,9 +4402,13 @@ fn build_context(target: &Path, max_bytes: usize) -> Result<String> {
         let entry = entry?;
         let p = entry.path();
         let rel = p.strip_prefix(parent).unwrap_or(p);
-        if rel.as_os_str().is_empty() { continue; }
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
         out.push_str(&format!("- {}\n", rel.display()));
-        if out.len() > max_bytes { break; }
+        if out.len() > max_bytes {
+            break;
+        }
     }
     if target.exists() {
         let content = fs::read_to_string(target)
@@ -3197,18 +4420,29 @@ fn build_context(target: &Path, max_bytes: usize) -> Result<String> {
 }
 
 fn truncate_bytes(s: &str, max: usize) -> String {
-    if max == 0 || s.is_empty() { return "[truncated]".to_string(); }
-    if s.len() <= max { return s.to_string(); }
+    if max == 0 || s.is_empty() {
+        return "[truncated]".to_string();
+    }
+    if s.len() <= max {
+        return s.to_string();
+    }
     let mut end = max;
-    while !s.is_char_boundary(end) { end -= 1; }
-    if end == 0 { return "[truncated]".to_string(); }
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end == 0 {
+        return "[truncated]".to_string();
+    }
     format!("{}\n...[truncated]", &s[..end])
 }
 
 // ── Project scaffolding ────────────────────────────────────────────────────
 
 fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
-    let dir = if args.name.starts_with('/') || args.name.starts_with("./") || args.name.starts_with("../") {
+    let dir = if args.name.starts_with('/')
+        || args.name.starts_with("./")
+        || args.name.starts_with("../")
+    {
         PathBuf::from(&args.name)
     } else if let Some(ref ws) = cfg.workspace_dir {
         let base = PathBuf::from(ws);
@@ -3229,10 +4463,12 @@ fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
         "portfolio" => template_portfolio(&args.name),
         "landing" => template_landing(&args.name),
         "blog" => template_blog(&args.name),
-        other => return Err(anyhow!(
-            "Unknown project type '{}'. Choose: bare, portfolio, landing, blog",
-            other
-        )),
+        other => {
+            return Err(anyhow!(
+                "Unknown project type '{}'. Choose: bare, portfolio, landing, blog",
+                other
+            ))
+        }
     };
 
     for file in &files {
@@ -3243,19 +4479,37 @@ fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
         fs::write(&file_path, &file.content)?;
     }
 
-    println!("{} {}", style!(C_GREEN, "✓"), style!(C_WHITE_B, "created project '{}' ({})", args.name, args.project_type));
+    println!(
+        "{} {}",
+        style!(C_GREEN, "✓"),
+        style!(
+            C_WHITE_B,
+            "created project '{}' ({})",
+            args.name,
+            args.project_type
+        )
+    );
     for f in &files {
         let icon = file_icon(&f.path);
-        println!("  {} {} ({} bytes)", icon, style!(C_WHITE_B, "{}", f.path), f.content.len());
+        println!(
+            "  {} {} ({} bytes)",
+            icon,
+            style!(C_WHITE_B, "{}", f.path),
+            f.content.len()
+        );
     }
     println!();
-    println!("{} cd {} && open index.html", style!(C_DIM, "next:"), args.name);
+    println!(
+        "{} cd {} && open index.html",
+        style!(C_DIM, "next:"),
+        args.name
+    );
 
     Ok(())
 }
 
 fn template_bare(name: &str) -> Vec<FileEntry> {
-    let title = name.split('/').last().unwrap_or(name);
+    let title = name.rsplit('/').next().unwrap_or(name);
     vec![
         FileEntry {
             path: "index.html".into(),
@@ -3387,7 +4641,8 @@ footer {
         font-size: 1.5rem;
     }
 }
-"##.into(),
+"##
+            .into(),
         },
         FileEntry {
             path: "script.js".into(),
@@ -3403,13 +4658,14 @@ document.querySelectorAll('nav a').forEach(link => {
         console.log(`Navigate to: ${link.textContent}`);
     });
 });
-"##.into(),
+"##
+            .into(),
         },
     ]
 }
 
 fn template_portfolio(name: &str) -> Vec<FileEntry> {
-    let title = name.split('/').last().unwrap_or(name);
+    let title = name.rsplit('/').next().unwrap_or(name);
     let mut files = template_bare(name);
     files.push(FileEntry {
         path: "about.html".into(),
@@ -3745,13 +5001,14 @@ footer {
         grid-template-columns: 1fr;
     }
 }
-"##.into(),
+"##
+        .into(),
     });
     files
 }
 
 fn template_landing(name: &str) -> Vec<FileEntry> {
-    let title = name.split('/').last().unwrap_or(name);
+    let title = name.rsplit('/').next().unwrap_or(name);
     vec![
         FileEntry {
             path: "index.html".into(),
@@ -4056,7 +5313,8 @@ footer {
         gap: 1rem;
     }
 }
-"##.into(),
+"##
+            .into(),
         },
         FileEntry {
             path: "script.js".into(),
@@ -4073,13 +5331,14 @@ document.querySelectorAll('a[href^="#"]').forEach(anchor => {
         }
     });
 });
-"##.into(),
+"##
+            .into(),
         },
     ]
 }
 
 fn template_blog(name: &str) -> Vec<FileEntry> {
-    let title = name.split('/').last().unwrap_or(name);
+    let title = name.rsplit('/').next().unwrap_or(name);
     vec![
         FileEntry {
             path: "index.html".into(),
@@ -4295,14 +5554,16 @@ footer {
         font-size: 1.2rem;
     }
 }
-"##.into(),
+"##
+            .into(),
         },
         FileEntry {
             path: "script.js".into(),
             content: r##"document.addEventListener('DOMContentLoaded', () => {
     console.log('Blog ready');
 });
-"##.into(),
+"##
+            .into(),
         },
     ]
 }
@@ -4316,8 +5577,20 @@ fn is_command_blocked(cmd: &str) -> bool {
 
 fn looks_like_shell_command(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or_default();
-    matches!(first, "ls" | "pwd" | "cd" | "mkdir" | "cp" | "mv" | "touch"
-        | "cat" | "echo" | "rm" | "find" | "grep")
+    matches!(
+        first,
+        "ls" | "pwd"
+            | "cd"
+            | "mkdir"
+            | "cp"
+            | "mv"
+            | "touch"
+            | "cat"
+            | "echo"
+            | "rm"
+            | "find"
+            | "grep"
+    )
 }
 
 fn sanitize_commands(cmds: &[String]) -> Vec<&str> {
@@ -4325,7 +5598,9 @@ fn sanitize_commands(cmds: &[String]) -> Vec<&str> {
     let mut out = Vec::new();
     for cmd in cmds {
         let key = cmd.trim().to_string();
-        if key.is_empty() || seen.contains_key(&key) { continue; }
+        if key.is_empty() || seen.contains_key(&key) {
+            continue;
+        }
         seen.insert(key.clone(), ());
         out.push(cmd.trim());
     }
@@ -4343,26 +5618,58 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     });
-    let dir = if dir.exists() { dir } else { PathBuf::from(".") };
+    let dir = if dir.exists() {
+        dir
+    } else {
+        PathBuf::from(".")
+    };
 
     println!("{}", style!(C_CYAN, "│"));
-    println!("{} {} {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "rem index"), style!(C_DIM, "— codebase retrieval index (pure Rust)"));
-    println!("{} target: {}", style!(C_CYAN, "│"), style!(C_DIM, "{}", dir.display()));
+    println!(
+        "{} {} {}",
+        style!(C_CYAN, "│"),
+        style!(C_WHITE_B, "rem index"),
+        style!(C_DIM, "— codebase retrieval index (pure Rust)")
+    );
+    println!(
+        "{} target: {}",
+        style!(C_CYAN, "│"),
+        style!(C_DIM, "{}", dir.display())
+    );
 
     let refreshing = load_codebase_index(&dir).is_some();
     let chunks = generate_codebase_index(&dir)?;
     if chunks.is_empty() {
-        println!("{} {} no indexable files found (after skips)", style!(C_CYAN, "│"), style!(C_YELLOW, "⚠"));
+        println!(
+            "{} {} no indexable files found (after skips)",
+            style!(C_CYAN, "│"),
+            style!(C_YELLOW, "⚠")
+        );
         return Ok(());
     }
 
     write_codebase_index(&dir, &chunks)?;
 
     let out_path = dir.join(".rem/codebase_index.json");
-    let unique_files = chunks.iter().map(|c| &c.path).collect::<std::collections::HashSet<_>>().len();
+    let unique_files = chunks
+        .iter()
+        .map(|c| &c.path)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     let action = if refreshing { "refreshed" } else { "created" };
-    println!("{} {} {} {} chunks from {} files", style!(C_CYAN, "│"), style!(C_GREEN, "✓"), action, chunks.len(), unique_files);
-    println!("{} index: {}", style!(C_CYAN, "│"), style!(C_WHITE_B, "{}", out_path.display()));
+    println!(
+        "{} {} {} {} chunks from {} files",
+        style!(C_CYAN, "│"),
+        style!(C_GREEN, "✓"),
+        action,
+        chunks.len(),
+        unique_files
+    );
+    println!(
+        "{} index: {}",
+        style!(C_CYAN, "│"),
+        style!(C_WHITE_B, "{}", out_path.display())
+    );
     println!("{} `rem chat` / `rem ask` / `/goal` will now pull relevant chunks instead of full listings.", style!(C_CYAN, "│"));
     println!("{} (keyword retrieval; raise model_ctx in ~/.config/rem-cli/config.toml for large projects)", style!(C_CYAN, "│"));
     Ok(())
@@ -4408,12 +5715,18 @@ mod tests {
 
     #[test]
     fn api_url_plain_base() {
-        assert_eq!(api_url("http://localhost:11434", "generate"), "http://localhost:11434/api/generate");
+        assert_eq!(
+            api_url("http://localhost:11434", "generate"),
+            "http://localhost:11434/api/generate"
+        );
     }
 
     #[test]
     fn api_url_with_api() {
-        assert_eq!(api_url("http://localhost:11434/api", "generate"), "http://localhost:11434/api/generate");
+        assert_eq!(
+            api_url("http://localhost:11434/api", "generate"),
+            "http://localhost:11434/api/generate"
+        );
     }
 
     #[test]
@@ -4506,47 +5819,90 @@ h1 { color: red; }
     fn greeting_is_fast_answer() {
         assert_eq!(intent::classify_intent("hii"), TaskIntent::FastAnswer);
         assert_eq!(intent::classify_intent("hello"), TaskIntent::FastAnswer);
-        assert_eq!(intent::classify_intent("heyy there"), TaskIntent::FastAnswer);
+        assert_eq!(
+            intent::classify_intent("heyy there"),
+            TaskIntent::FastAnswer
+        );
         assert_eq!(intent::classify_intent("thanks!"), TaskIntent::FastAnswer);
     }
 
     #[test]
     fn question_about_creation_is_fast_answer() {
-        assert_eq!(intent::classify_intent("explain how to make a file"), TaskIntent::FastAnswer);
-        assert_eq!(intent::classify_intent("how to create a React component properly"), TaskIntent::FastAnswer);
-        assert_eq!(intent::classify_intent("what is the best way to scaffold a project"), TaskIntent::Planning);
-        assert_eq!(intent::classify_intent("how do I build a website from scratch"), TaskIntent::FastAnswer);
+        assert_eq!(
+            intent::classify_intent("explain how to make a file"),
+            TaskIntent::FastAnswer
+        );
+        assert_eq!(
+            intent::classify_intent("how to create a React component properly"),
+            TaskIntent::FastAnswer
+        );
+        assert_eq!(
+            intent::classify_intent("what is the best way to scaffold a project"),
+            TaskIntent::Planning
+        );
+        assert_eq!(
+            intent::classify_intent("how do I build a website from scratch"),
+            TaskIntent::FastAnswer
+        );
     }
 
     #[test]
     fn clear_creation_still_code_action() {
-        assert_eq!(intent::classify_intent("create a React component called Button"), TaskIntent::CodeAction);
-        assert_eq!(intent::classify_intent("make a navbar component"), TaskIntent::CodeAction);
-        assert_eq!(intent::classify_intent("write a function to sort arrays"), TaskIntent::CodeAction);
+        assert_eq!(
+            intent::classify_intent("create a React component called Button"),
+            TaskIntent::CodeAction
+        );
+        assert_eq!(
+            intent::classify_intent("make a navbar component"),
+            TaskIntent::CodeAction
+        );
+        assert_eq!(
+            intent::classify_intent("write a function to sort arrays"),
+            TaskIntent::CodeAction
+        );
     }
 
     #[test]
     fn fix_is_still_code_action() {
-        assert_eq!(intent::classify_intent("fix the bug in auth middleware"), TaskIntent::CodeAction);
-        assert_eq!(intent::classify_intent("refactor the user service"), TaskIntent::CodeAction);
+        assert_eq!(
+            intent::classify_intent("fix the bug in auth middleware"),
+            TaskIntent::CodeAction
+        );
+        assert_eq!(
+            intent::classify_intent("refactor the user service"),
+            TaskIntent::CodeAction
+        );
     }
 
     #[test]
     fn has_creation_intent_regression() {
-        assert!(intent::has_creation_intent("create a file called index.html"));
+        assert!(intent::has_creation_intent(
+            "create a file called index.html"
+        ));
         assert!(intent::has_creation_intent("build me a website"));
         assert!(intent::has_creation_intent("make a component"));
         assert!(!intent::has_creation_intent("explain how to create a file"));
         assert!(!intent::has_creation_intent("how do i make a test"));
         assert!(!intent::has_creation_intent("hii"));
-        assert!(!intent::has_creation_intent("what is the best way to build a project"));
+        assert!(!intent::has_creation_intent(
+            "what is the best way to build a project"
+        ));
     }
 
     #[test]
     fn is_question_about_works() {
-        assert!(intent::is_question_about("how to create a file", "create a file"));
-        assert!(intent::is_question_about("explain how to make a component", "make a component"));
-        assert!(!intent::is_question_about("create a file now", "create a file"));
+        assert!(intent::is_question_about(
+            "how to create a file",
+            "create a file"
+        ));
+        assert!(intent::is_question_about(
+            "explain how to make a component",
+            "make a component"
+        ));
+        assert!(!intent::is_question_about(
+            "create a file now",
+            "create a file"
+        ));
         assert!(!intent::is_question_about("how should i", "create a file"));
     }
 
@@ -4563,7 +5919,8 @@ h1 { color: red; }
     #[test]
     fn validate_chat_response_strips_code() {
         let response = "Here is your site:\n\n### index.html\n```html\n<div>hi</div>\n```";
-        let (was_validated, text) = validate_chat_response(response, &TaskIntent::FastAnswer, &RunMode::Chat);
+        let (was_validated, text) =
+            validate_chat_response(response, &TaskIntent::FastAnswer, &RunMode::Chat);
         assert!(was_validated);
         assert!(text.contains("Here is your site"));
         assert!(!text.contains("<div>hi</div>"));
@@ -4572,14 +5929,16 @@ h1 { color: red; }
     #[test]
     fn validate_chat_response_passes_valid() {
         let response = "Hi there! How can I help you today?";
-        let (was_validated, _) = validate_chat_response(response, &TaskIntent::FastAnswer, &RunMode::Chat);
+        let (was_validated, _) =
+            validate_chat_response(response, &TaskIntent::FastAnswer, &RunMode::Chat);
         assert!(!was_validated);
     }
 
     #[test]
     fn validate_chat_allows_code_action() {
         let response = "### app.js\n```js\nconst x = 1;\n```";
-        let (was_validated, _) = validate_chat_response(response, &TaskIntent::CodeAction, &RunMode::Code);
+        let (was_validated, _) =
+            validate_chat_response(response, &TaskIntent::CodeAction, &RunMode::Code);
         assert!(!was_validated);
     }
 
@@ -4641,7 +6000,8 @@ h1 { color: red; }
                 embedding: None,
             },
         ];
-        let hits = retrieve_relevant_chunks(&fake, "implement login with password hashing", 3, 2000);
+        let hits =
+            retrieve_relevant_chunks(&fake, "implement login with password hashing", 3, 2000);
         assert!(!hits.is_empty());
         // Should prefer the auth/login chunk due to word matches in content + name
         let top = hits[0];
@@ -4666,11 +6026,15 @@ h1 { color: red; }
             let ctx = session.build_relevant_project_context("hello function");
             // When index present and keyword matches, we should see the content or header
             if !ctx.is_empty() {
-                assert!(ctx.contains("hello") || ctx.contains("app.py") || ctx.contains("Relevant code"));
+                assert!(
+                    ctx.contains("hello")
+                        || ctx.contains("app.py")
+                        || ctx.contains("Relevant code")
+                );
             }
         } else {
             // No index in this env run — still validate the fallback path doesn't blow up
-            let mut session = ChatSession::new("test-model", Some(fixture.clone())).expect("session");
+            let session = ChatSession::new("test-model", Some(fixture.clone())).expect("session");
             let _ = session.build_relevant_project_context("anything");
         }
     }
@@ -4680,21 +6044,37 @@ h1 { color: red; }
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let tmp = std::env::temp_dir().join(format!("rem-index-test-{}", stamp));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("src")).expect("temp tree");
 
         // Small file (whole chunk)
-        fs::write(tmp.join("README.md"), "# Demo\n\nThis is a test project for indexing.\nUse it to verify retrieval.\n").unwrap();
+        fs::write(
+            tmp.join("README.md"),
+            "# Demo\n\nThis is a test project for indexing.\nUse it to verify retrieval.\n",
+        )
+        .unwrap();
 
         // Larger-ish file that should split
-        let big = (0..60).map(|i| format!("fn example_{}() {{ /* chunk candidate {} */ }}\n\n", i, i)).collect::<String>();
-        fs::write(tmp.join("src/lib.rs"), format!("//! Example lib\n\n{}", big)).unwrap();
+        let big = (0..60)
+            .map(|i| format!("fn example_{}() {{ /* chunk candidate {} */ }}\n\n", i, i))
+            .collect::<String>();
+        fs::write(
+            tmp.join("src/lib.rs"),
+            format!("//! Example lib\n\n{}", big),
+        )
+        .unwrap();
 
         // Run the generator + writer (the real thing `rem index` calls)
         let chunks = generate_codebase_index(&tmp).expect("generate should succeed");
-        assert!(!chunks.is_empty(), "should have produced at least one chunk");
+        assert!(
+            !chunks.is_empty(),
+            "should have produced at least one chunk"
+        );
 
         write_codebase_index(&tmp, &chunks).expect("write should succeed");
 
@@ -4704,12 +6084,22 @@ h1 { color: red; }
 
         // Retrieval should find the lib.rs content for a query mentioning "example"
         let hits = retrieve_relevant_chunks(&loaded, "example function in lib", 5, 8000);
-        assert!(!hits.is_empty(), "keyword retrieval should surface relevant chunks");
+        assert!(
+            !hits.is_empty(),
+            "keyword retrieval should surface relevant chunks"
+        );
         let hit_paths: Vec<_> = hits.iter().map(|h| h.path.as_str()).collect();
-        assert!(hit_paths.iter().any(|p| p.contains("lib.rs") || p.contains("README")), "expected project files in hits");
+        assert!(
+            hit_paths
+                .iter()
+                .any(|p| p.contains("lib.rs") || p.contains("README")),
+            "expected project files in hits"
+        );
 
         // Lines should be populated for at least some chunks (we use them in build_retrieved_context now)
-        assert!(loaded.iter().any(|c| c.start_line > 0 && c.end_line >= c.start_line));
+        assert!(loaded
+            .iter()
+            .any(|c| c.start_line > 0 && c.end_line >= c.start_line));
 
         // Cleanup
         let _ = fs::remove_dir_all(&tmp);

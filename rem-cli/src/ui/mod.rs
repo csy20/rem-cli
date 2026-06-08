@@ -3,8 +3,8 @@
 // Public surface of the UI layer: theme system, header banner, slash palette,
 // prompt line, and streaming output. All terminal rendering flows through here.
 
-pub mod theme;
 pub mod header;
+pub mod output;
 pub mod palette;
 pub mod prompt;
-pub mod output;
+pub mod theme;

@@ -1,6 +1,6 @@
 use std::io::{self, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::StreamExt;
@@ -8,7 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{C_DIM, C_YELLOW, style};
+use crate::{style, C_DIM, C_YELLOW};
 
 #[derive(Debug, Deserialize)]
 struct LlmErrorResponse {
@@ -100,7 +100,13 @@ pub struct Provider {
 }
 
 impl Provider {
-    pub fn new_ollama(base_url: String, model: String, timeout_s: u64, system_prompt: String, model_ctx: usize) -> Self {
+    pub fn new_ollama(
+        base_url: String,
+        model: String,
+        timeout_s: u64,
+        system_prompt: String,
+        model_ctx: usize,
+    ) -> Self {
         Self {
             kind: ProviderKind::Ollama,
             client: Client::builder()
@@ -116,7 +122,12 @@ impl Provider {
     }
 
     pub fn new_openai(
-        base_url: String, model: String, timeout_s: u64, system_prompt: String, api_key: String, model_ctx: usize,
+        base_url: String,
+        model: String,
+        timeout_s: u64,
+        system_prompt: String,
+        api_key: String,
+        model_ctx: usize,
     ) -> Self {
         Self {
             kind: ProviderKind::OpenAI,
@@ -158,11 +169,20 @@ impl Provider {
     }
 
     pub async fn complete_chat_stream(
-        &self, user_prompt: &str, system_prompt: &str, history: &str,
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
     ) -> Result<String> {
         match self.kind {
-            ProviderKind::Ollama => self.complete_chat_stream_ollama(user_prompt, system_prompt, history).await,
-            ProviderKind::OpenAI => self.complete_chat_stream_openai(user_prompt, system_prompt, history).await,
+            ProviderKind::Ollama => {
+                self.complete_chat_stream_ollama(user_prompt, system_prompt, history)
+                    .await
+            }
+            ProviderKind::OpenAI => {
+                self.complete_chat_stream_openai(user_prompt, system_prompt, history)
+                    .await
+            }
         }
     }
 
@@ -188,9 +208,15 @@ impl Provider {
 
     async fn list_models_openai(&self) -> Result<Vec<String>> {
         let url = self.base_url.trim_end_matches('/').to_string() + "/models";
-        let resp = self.client.get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.as_deref().unwrap_or("")))
-            .send().await?;
+        let resp = self
+            .client
+            .get(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.as_deref().unwrap_or("")),
+            )
+            .send()
+            .await?;
         if !resp.status().is_success() {
             return Err(anyhow!("OpenAI API unreachable at {}", self.base_url));
         }
@@ -235,17 +261,34 @@ impl Provider {
             }
         });
 
-        let resp = self.client.post(&url).json(&payload).send().await.context("failed to call Ollama")?;
+        let resp = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Ollama")?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|e| format!("(read error: {})", e));
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("(read error: {})", e));
             let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
-                .map(|v| v.error).unwrap_or_else(|_| body.clone());
+                .map(|v| v.error)
+                .unwrap_or_else(|_| body.clone());
             if status.as_u16() == 404 && err_msg.to_lowercase().contains("model") {
-                return Err(anyhow!("Model '{}' not found. Pull it: `ollama pull {}`", self.model, self.model));
+                return Err(anyhow!(
+                    "Model '{}' not found. Pull it: `ollama pull {}`",
+                    self.model,
+                    self.model
+                ));
             }
             if status.as_u16() == 404 {
-                return Err(anyhow!("Endpoint not found (404 at {}). Check --ollama-url", url));
+                return Err(anyhow!(
+                    "Endpoint not found (404 at {}). Check --ollama-url",
+                    url
+                ));
             }
             return Err(anyhow!("Ollama failed: {} — {}", status, err_msg));
         }
@@ -254,7 +297,11 @@ impl Provider {
         match serde_json::from_str::<crate::ModelReply>(raw.response.trim()) {
             Ok(parsed) => Ok(parsed),
             Err(e) => {
-                eprintln!("  {} JSON parse: {} — falling back", style!(C_YELLOW, "!"), e);
+                eprintln!(
+                    "  {} JSON parse: {} — falling back",
+                    style!(C_YELLOW, "!"),
+                    e
+                );
                 Ok(crate::ModelReply::fallback(raw.response.trim()))
             }
         }
@@ -262,8 +309,13 @@ impl Provider {
 
     async fn complete_json_openai(&self, user_prompt: &str) -> Result<crate::ModelReply> {
         let url = self.base_url.trim_end_matches('/').to_string() + "/chat/completions";
-        let resp = self.client.post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.as_deref().unwrap_or("")))
+        let resp = self
+            .client
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.as_deref().unwrap_or("")),
+            )
             .json(&json!({
                 "model": self.model,
                 "messages": [
@@ -274,38 +326,53 @@ impl Provider {
                 "max_tokens": 512,
                 "response_format": {"type": "json_object"}
             }))
-            .send().await.context("failed to call OpenAI API")?;
+            .send()
+            .await
+            .context("failed to call OpenAI API")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
-                .map(|v| v.error).unwrap_or_else(|_| body.clone());
+                .map(|v| v.error)
+                .unwrap_or_else(|_| body.clone());
             return Err(anyhow!("OpenAI API failed: {} — {}", status, err_msg));
         }
 
         let parsed: OpenAIResponse = resp.json().await.context("invalid OpenAI response")?;
-        let content = parsed.choices.first()
+        let content = parsed
+            .choices
+            .first()
             .map(|c| c.message.content.as_str())
             .unwrap_or("");
 
         match serde_json::from_str::<crate::ModelReply>(content.trim()) {
             Ok(parsed) => Ok(parsed),
             Err(e) => {
-                eprintln!("  {} JSON parse: {} — falling back", style!(C_YELLOW, "!"), e);
+                eprintln!(
+                    "  {} JSON parse: {} — falling back",
+                    style!(C_YELLOW, "!"),
+                    e
+                );
                 Ok(crate::ModelReply::fallback(content.trim()))
             }
         }
     }
 
     async fn complete_chat_stream_ollama(
-        &self, user_prompt: &str, system_prompt: &str, history: &str,
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
     ) -> Result<String> {
         let url = api_url(&self.base_url, "generate");
         let final_prompt = if history.is_empty() {
             format!("{}\n\nUser: {}\n\nREM:", system_prompt, user_prompt)
         } else {
-            format!("{}\n\n{}User: {}\n\nREM:", system_prompt, history, user_prompt)
+            format!(
+                "{}\n\n{}User: {}\n\nREM:",
+                system_prompt, history, user_prompt
+            )
         };
         let payload = json!({
             "model": self.model,
@@ -313,14 +380,28 @@ impl Provider {
             "stream": true,
             "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": 4 }
         });
-        let resp = self.client.post(&url).json(&payload).send().await.context("failed to call Ollama")?;
+        let resp = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Ollama")?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_else(|e| format!("(read error: {})", e));
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("(read error: {})", e));
             let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
-                .map(|v| v.error).unwrap_or_else(|_| body.clone());
+                .map(|v| v.error)
+                .unwrap_or_else(|_| body.clone());
             if status.as_u16() == 404 && err_msg.to_lowercase().contains("model") {
-                return Err(anyhow!("Model '{}' not found. Pull it: `ollama pull {}`", self.model, self.model));
+                return Err(anyhow!(
+                    "Model '{}' not found. Pull it: `ollama pull {}`",
+                    self.model,
+                    self.model
+                ));
             }
             return Err(anyhow!("Ollama failed: {} — {}", status, err_msg));
         }
@@ -332,7 +413,9 @@ impl Provider {
             cancelled_clone.store(true, Ordering::SeqCst);
         });
 
-        let result = self.stream_response_ollama(resp, cancelled.clone(), ctrlc_task).await;
+        let result = self
+            .stream_response_ollama(resp, cancelled.clone(), ctrlc_task)
+            .await;
         if cancelled.load(Ordering::SeqCst) {
             println!();
         }
@@ -340,7 +423,10 @@ impl Provider {
     }
 
     async fn stream_response_ollama(
-        &self, resp: reqwest::Response, cancelled: Arc<AtomicBool>, ctrlc_task: tokio::task::JoinHandle<()>,
+        &self,
+        resp: reqwest::Response,
+        cancelled: Arc<AtomicBool>,
+        ctrlc_task: tokio::task::JoinHandle<()>,
     ) -> Result<String> {
         let mut stream = resp.bytes_stream();
         let mut full = String::new();
@@ -418,7 +504,10 @@ impl Provider {
     }
 
     async fn complete_chat_stream_openai(
-        &self, user_prompt: &str, system_prompt: &str, history: &str,
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
     ) -> Result<String> {
         let url = self.base_url.trim_end_matches('/').to_string() + "/chat/completions";
         let mut messages: Vec<serde_json::Value> = vec![];
@@ -436,16 +525,24 @@ impl Provider {
             "max_tokens": 512
         });
 
-        let resp = self.client.post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key.as_deref().unwrap_or("")))
+        let resp = self
+            .client
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.as_deref().unwrap_or("")),
+            )
             .json(&payload)
-            .send().await.context("failed to call OpenAI API")?;
+            .send()
+            .await
+            .context("failed to call OpenAI API")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
-                .map(|v| v.error).unwrap_or_else(|_| body.clone());
+                .map(|v| v.error)
+                .unwrap_or_else(|_| body.clone());
             return Err(anyhow!("OpenAI API failed: {} — {}", status, err_msg));
         }
 
@@ -462,8 +559,7 @@ impl Provider {
             let chunk = chunk.context("stream read error")?;
             let text = String::from_utf8_lossy(&chunk);
             for line in text.lines() {
-                if line.starts_with("data: ") {
-                    let data = &line[6..];
+                if let Some(data) = line.strip_prefix("data: ") {
                     if data == "[DONE]" {
                         let elapsed = start.elapsed();
                         let tps = if elapsed.as_secs_f64() > 0.0 {
@@ -480,7 +576,9 @@ impl Provider {
                         return Ok(full);
                     }
                     if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
-                        if let Some(content) = chunk.choices.first()
+                        if let Some(content) = chunk
+                            .choices
+                            .first()
                             .and_then(|c| c.delta.content.as_deref())
                         {
                             if io::stdout().write_all(content.as_bytes()).is_err() {

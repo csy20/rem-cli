@@ -82,18 +82,23 @@ pub(crate) const SKIP_SUFFIXES: &[&str] = &[
 ];
 
 pub(crate) fn should_skip_dir(name: &str) -> bool {
-    SKIP_NAMES.iter().any(|n| *n == name)
+    SKIP_NAMES.contains(&name)
 }
 
 pub(crate) fn should_skip_file(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".min.js") || lower.ends_with(".min.css") {
-        return true;
+    let lower_bytes = name.as_bytes();
+    let len = lower_bytes.len();
+    // Fast path: check common minified extensions using byte comparison
+    if len > 7 {
+        let end = &lower_bytes[len.saturating_sub(7)..];
+        if end.eq_ignore_ascii_case(b".min.js") || end.eq_ignore_ascii_case(b".min.css") {
+            return true;
+        }
     }
-    if SKIP_SUFFIXES.iter().any(|suf| lower.ends_with(suf)) {
-        return true;
-    }
-    false
+    SKIP_SUFFIXES.iter().any(|suf| {
+        let sufb = suf.as_bytes();
+        len >= sufb.len() && lower_bytes[len - sufb.len()..].eq_ignore_ascii_case(sufb)
+    })
 }
 
 /// Walk `root` and return every line whose contents contain `query`.
@@ -330,8 +335,10 @@ mod tests {
     #[test]
     fn max_results_caps_and_marks_truncated() {
         let root = make_tree();
-        let mut opts = FindOptions::default();
-        opts.max_results = 2;
+        let opts = FindOptions {
+            max_results: 2,
+            ..Default::default()
+        };
         let report = find_matches(&root, "handle_lint", &opts);
         assert_eq!(report.matches.len(), 2);
         assert!(report.truncated);
@@ -340,8 +347,10 @@ mod tests {
     #[test]
     fn case_insensitive_matches_variants() {
         let root = make_tree();
-        let mut opts = FindOptions::default();
-        opts.case_sensitive = false;
+        let opts = FindOptions {
+            case_sensitive: false,
+            ..Default::default()
+        };
         let report = find_matches(&root, "HANDLE_LINT", &opts);
         assert!(report.matches.iter().any(|m| m.path.ends_with("script.js")));
     }
@@ -349,8 +358,10 @@ mod tests {
     #[test]
     fn skips_empty_and_oversize_files() {
         let root = make_tree();
-        let mut opts = FindOptions::default();
-        opts.max_file_bytes = 4;
+        let opts = FindOptions {
+            max_file_bytes: 4,
+            ..Default::default()
+        };
         let report = find_matches(&root, "handle_lint", &opts);
         for m in &report.matches {
             let rel = m
@@ -383,16 +394,20 @@ mod tests {
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("leaf.txt"), "needle_in_deep_leaf\n").unwrap();
 
-        let mut shallow = FindOptions::default();
-        shallow.max_depth = 3;
+        let shallow = FindOptions {
+            max_depth: 3,
+            ..Default::default()
+        };
         let report = find_matches(&deep_root, "needle_in_deep_leaf", &shallow);
         assert!(
             report.matches.is_empty(),
             "shallow depth should not reach deeply nested leaf"
         );
 
-        let mut deep_opt = FindOptions::default();
-        deep_opt.max_depth = 12;
+        let deep_opt = FindOptions {
+            max_depth: 12,
+            ..Default::default()
+        };
         let report = find_matches(&deep_root, "needle_in_deep_leaf", &deep_opt);
         assert_eq!(report.matches.len(), 1);
 

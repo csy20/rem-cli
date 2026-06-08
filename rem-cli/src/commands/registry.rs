@@ -99,10 +99,10 @@ pub fn clear_history() {
 
 fn cmd_help() {
     let t = theme::active();
-    let border = theme::paint(&t.border, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", false);
+    let border = theme::paint(&t, "border", "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", false);
     theme::println(&format!(
         "  {} {}",
-        theme::paint(&t.accent, "COMMANDS", true),
+        theme::paint(&t, "accent", "COMMANDS", true),
         border
     ));
 
@@ -114,12 +114,14 @@ fn cmd_help() {
         .unwrap_or(20);
     for cmd in REGISTRY.iter() {
         let name = theme::paint(
-            &t.accent,
+            &t,
+            "accent",
             &format!("  {:<width$}", cmd.name, width = name_w),
             true,
         );
         let desc = theme::paint(
-            &t.text_muted,
+            &t,
+            "text_muted",
             &format!("{:<width$}", cmd.description, width = desc_w),
             false,
         );
@@ -127,8 +129,9 @@ fn cmd_help() {
             "".to_string()
         } else {
             theme::paint_on(
-                &t.kbd_text,
-                &t.kbd_bg,
+                &t,
+                "kbd_text",
+                "kbd_bg",
                 &format!(" {} ", cmd.shortcut),
                 false,
             )
@@ -139,7 +142,8 @@ fn cmd_help() {
     theme::println(&format!(
         "  {}",
         theme::paint(
-            &t.text_faint,
+            &t,
+            "text_faint",
             "tip: press / on an empty prompt to open the palette",
             false
         )
@@ -157,8 +161,8 @@ fn cmd_mode() {
     let _ = config::save_config(&cfg);
     theme::println(&format!(
         "  {} {}",
-        theme::paint(&t.accent, "▌ mode switched to", true),
-        theme::paint(&t.accent, &cfg.mode, true),
+        theme::paint(&t, "accent", "▌ mode switched to", true),
+        theme::paint(&t, "accent", &cfg.mode, true),
     ));
     crate::ui::header::render(&cfg.model, &cfg.mode);
 }
@@ -173,8 +177,8 @@ fn cmd_theme() {
                 let t = theme::active();
                 theme::println(&format!(
                     "  {} {}",
-                    theme::paint(&t.accent, "▌ theme switched to", true),
-                    theme::paint(&t.accent, &chosen, true),
+                    theme::paint(&t, "accent", "▌ theme switched to", true),
+                    theme::paint(&t, "accent", &chosen, true),
                 ));
                 let cfg = config::load_config();
                 crate::ui::header::render(&cfg.model, &cfg.mode);
@@ -184,7 +188,7 @@ fn cmd_theme() {
             let t = theme::active();
             theme::println(&format!(
                 "  {}",
-                theme::paint(&t.text_muted, "Cancelled.", false)
+                theme::paint(&t, "text_muted", "Cancelled.", false)
             ));
         }
     }
@@ -196,7 +200,12 @@ fn cmd_model() {
         let t = theme::active();
         theme::println(&format!(
             "  {}",
-            theme::paint(&t.text_muted, "(no models found via `ollama list`)", false)
+            theme::paint(
+                &t,
+                "text_muted",
+                "(no models found via `ollama list`)",
+                false
+            )
         ));
         return;
     }
@@ -209,8 +218,8 @@ fn cmd_model() {
             let t = theme::active();
             theme::println(&format!(
                 "  {} {}",
-                theme::paint(&t.accent, "▌ model set to", true),
-                theme::paint(&t.accent, &cfg.model, true),
+                theme::paint(&t, "accent", "▌ model set to", true),
+                theme::paint(&t, "accent", &cfg.model, true),
             ));
             crate::ui::header::render(&cfg.model, &cfg.mode);
         }
@@ -218,7 +227,7 @@ fn cmd_model() {
             let t = theme::active();
             theme::println(&format!(
                 "  {}",
-                theme::paint(&t.text_muted, "Cancelled.", false)
+                theme::paint(&t, "text_muted", "Cancelled.", false)
             ));
         }
     }
@@ -229,7 +238,7 @@ fn cmd_clear() {
     let t = theme::active();
     theme::println(&format!(
         "  {}",
-        theme::paint(&t.accent, "History cleared.", true)
+        theme::paint(&t, "accent", "History cleared.", true)
     ));
 }
 
@@ -237,8 +246,8 @@ fn cmd_find_usage() {
     let t = theme::active();
     theme::println(&format!(
         "  {} {}",
-        theme::paint(&t.accent, "▌ usage:", true),
-        theme::paint(&t.text_muted, "/find <query>", false)
+        theme::paint(&t, "accent", "▌ usage:", true),
+        theme::paint(&t, "text_muted", "/find <query>", false)
     ));
 }
 
@@ -259,7 +268,7 @@ fn cmd_save() {
         Err(e) => {
             theme::println(&format!(
                 "  {}",
-                theme::paint(&t.sys_color, &format!("save failed: {e}"), false)
+                theme::paint(&t, "sys_color", &format!("save failed: {e}"), false)
             ));
             return;
         }
@@ -267,12 +276,12 @@ fn cmd_save() {
     match std::fs::write(&path, serialized) {
         Ok(()) => theme::println(&format!(
             "  {} {}",
-            theme::paint(&t.accent, "▌ saved to", true),
-            theme::paint(&t.accent_dim, &path, false),
+            theme::paint(&t, "accent", "▌ saved to", true),
+            theme::paint(&t, "accent_dim", &path, false),
         )),
         Err(e) => theme::println(&format!(
             "  {}",
-            theme::paint(&t.sys_color, &format!("save failed: {e}"), false)
+            theme::paint(&t, "sys_color", &format!("save failed: {e}"), false)
         )),
     }
 }
@@ -281,7 +290,7 @@ fn cmd_exit() {
     let t = theme::active();
     theme::println(&format!(
         "  {}",
-        theme::paint(&t.text_muted, "Goodbye.", false)
+        theme::paint(&t, "text_muted", "Goodbye.", false)
     ));
     std::process::exit(0);
 }
@@ -293,7 +302,7 @@ fn render_theme_picker(names: &[String]) {
     let cfg = config::load_config();
     theme::println(&format!(
         "  {}",
-        theme::paint(&t.accent, "SELECT THEME", true)
+        theme::paint(&t, "accent", "SELECT THEME", true)
     ));
     let w = names.iter().map(|s| s.len()).max().unwrap_or(6);
     for (i, name) in names.iter().enumerate() {
@@ -303,12 +312,12 @@ fn render_theme_picker(names: &[String]) {
             " "
         };
         let num = format!("  {} ", i + 1);
-        let label = theme::paint(&t.accent, &num, true);
-        let key = theme::paint(&t.accent, &format!("{:<w$}", name, w = w), true);
+        let label = theme::paint(&t, "accent", &num, true);
+        let key = theme::paint(&t, "accent", &format!("{:<w$}", name, w = w), true);
         let mut desc = String::new();
         desc.push_str(theme_short_desc(name));
-        let desc_colored = theme::paint(&t.text_muted, &desc, false);
-        let marker_colored = theme::paint(&t.accent_dim, marker, false);
+        let desc_colored = theme::paint(&t, "text_muted", &desc, false);
+        let marker_colored = theme::paint(&t, "accent_dim", marker, false);
         theme::println(&format!("{label} {key}  {desc_colored}  {marker_colored}"));
         // Live preview line
         crate::ui::header::render_with_theme(&cfg.model, &cfg.mode, name);
@@ -316,7 +325,12 @@ fn render_theme_picker(names: &[String]) {
     theme::println("");
     theme::println(&format!(
         "  {}",
-        theme::paint(&t.text_faint, "press 1-6 to switch, ESC to cancel", false)
+        theme::paint(
+            &t,
+            "text_faint",
+            "press 1-6 to switch, ESC to cancel",
+            false
+        )
     ));
     let _ = io::stdout().flush();
 }
@@ -338,21 +352,21 @@ fn render_model_picker(models: &[String]) {
     let cfg = config::load_config();
     theme::println(&format!(
         "  {}",
-        theme::paint(&t.accent, "SELECT MODEL", true)
+        theme::paint(&t, "accent", "SELECT MODEL", true)
     ));
     let w = models.iter().map(|s| s.len()).max().unwrap_or(6);
     for (i, name) in models.iter().enumerate() {
         let marker = if name == &cfg.model { "●" } else { " " };
         let num = format!("  {} ", i + 1);
-        let label = theme::paint(&t.accent, &num, true);
-        let key = theme::paint(&t.accent_dim, &format!("{:<w$}", name, w = w), false);
-        let marker_colored = theme::paint(&t.accent, marker, true);
+        let label = theme::paint(&t, "accent", &num, true);
+        let key = theme::paint(&t, "accent_dim", &format!("{:<w$}", name, w = w), false);
+        let marker_colored = theme::paint(&t, "accent", marker, true);
         theme::println(&format!("{label} {key}  {marker_colored}"));
     }
     theme::println("");
     theme::println(&format!(
         "  {}",
-        theme::paint(&t.text_faint, "press a number, or ESC to cancel", false)
+        theme::paint(&t, "text_faint", "press a number, or ESC to cancel", false)
     ));
     let _ = io::stdout().flush();
 }
@@ -429,13 +443,13 @@ pub fn print_section(title: &str, subtitle: &str) {
     let bar = "\u{2500}".repeat(48usize.saturating_sub(title.chars().count()));
     theme::println(&format!(
         "  {} {}",
-        theme::paint(&t.accent, title, true),
-        theme::paint(&t.border, &bar, false),
+        theme::paint(&t, "accent", title, true),
+        theme::paint(&t, "border", &bar, false),
     ));
     if !subtitle.is_empty() {
         theme::println(&format!(
             "  {}",
-            theme::paint(&t.text_muted, subtitle, false),
+            theme::paint(&t, "text_muted", subtitle, false),
         ));
     }
 }
@@ -445,8 +459,8 @@ pub fn print_success(msg: &str) {
     let t = theme::active();
     theme::println(&format!(
         "  {} {}",
-        theme::paint(&t.accent, "\u{2713}", true),
-        theme::paint(&t.accent, msg, true),
+        theme::paint(&t, "accent", "\u{2713}", true),
+        theme::paint(&t, "accent", msg, true),
     ));
 }
 
@@ -455,9 +469,9 @@ pub fn print_file_row(icon: &str, path: &str, size: usize) {
     let t = theme::active();
     theme::println(&format!(
         "    {} {} {}",
-        theme::paint(&t.text_faint, icon, false),
-        theme::paint(&t.accent, path, false),
-        theme::paint(&t.text_muted, &format!("({} bytes)", size), false),
+        theme::paint(&t, "text_faint", icon, false),
+        theme::paint(&t, "accent", path, false),
+        theme::paint(&t, "text_muted", &format!("({} bytes)", size), false),
     ));
 }
 
@@ -466,8 +480,8 @@ pub fn print_hint(msg: &str) {
     let t = theme::active();
     theme::println(&format!(
         "  {} {}",
-        theme::paint(&t.text_faint, "next:", true),
-        theme::paint(&t.text_muted, msg, false),
+        theme::paint(&t, "text_faint", "next:", true),
+        theme::paint(&t, "text_muted", msg, false),
     ));
 }
 

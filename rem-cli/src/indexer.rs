@@ -102,22 +102,25 @@ pub fn retrieve_relevant_chunks<'a>(
     let mut scored: Vec<(i32, &IndexChunk)> = index
         .iter()
         .map(|c| {
-            let content_l = c.content.to_lowercase();
-            let name_l = c.name.to_lowercase();
-            let path_l = c.path.to_lowercase();
-
             let mut score = 0i32;
 
             // Strong signal: words appear in the actual code content
-            for w in &q_words {
-                if content_l.contains(w) {
-                    score += 10;
+            if c.content.len() < 20000 {
+                let content_l = c.content.to_lowercase();
+                for w in &q_words {
+                    if content_l.contains(w) {
+                        score += 10;
+                    }
                 }
             }
             // Bonus for name / path match (e.g. "auth" in auth.rs or user auth handler)
-            for w in &q_words {
-                if name_l.contains(w) || path_l.contains(w) {
-                    score += 4;
+            if c.name.len() < 500 && c.path.len() < 500 {
+                let name_l = c.name.to_lowercase();
+                let path_l = c.path.to_lowercase();
+                for w in &q_words {
+                    if name_l.contains(w) || path_l.contains(w) {
+                        score += 4;
+                    }
                 }
             }
             // Light recency / size bias not needed; prefer matches.
@@ -172,7 +175,9 @@ pub fn build_retrieved_context(chunks: &[&IndexChunk], max_chars: usize) -> Stri
         used += add;
     }
     if out.len() > 30 {
-        out.push_str("[End of retrieved context — use @path for more specific files if needed]\n\n");
+        out.push_str(
+            "[End of retrieved context — use @path for more specific files if needed]\n\n",
+        );
     }
     out
 }
@@ -191,28 +196,49 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
         .follow_links(false)
         .into_iter()
         .filter_entry(|e| {
-            if e.depth() == 0 { return true; }
+            if e.depth() == 0 {
+                return true;
+            }
             if let Some(name) = e.file_name().to_str() {
-                if e.file_type().is_dir() && find::should_skip_dir(name) { return false; }
-                if e.file_type().is_file() && find::should_skip_file(name) { return false; }
+                if e.file_type().is_dir() && find::should_skip_dir(name) {
+                    return false;
+                }
+                if e.file_type().is_file() && find::should_skip_file(name) {
+                    return false;
+                }
             }
             true
         })
     {
-        let Ok(entry) = entry else { continue; };
-        if !entry.file_type().is_file() { continue; }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_file() {
+            continue;
+        }
 
         let p = entry.path();
-        let Ok(rel) = p.strip_prefix(root) else { continue; };
+        let Ok(rel) = p.strip_prefix(root) else {
+            continue;
+        };
         let rel_str = rel.to_string_lossy().to_string();
-        if rel_str.is_empty() || rel_str.starts_with('.') { continue; }
+        if rel_str.is_empty() || rel_str.starts_with('.') {
+            continue;
+        }
 
         // Extra guard for obvious backup/generated files
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.ends_with(".rs.bk") || name.contains(".lock") || name.ends_with(".bin") { continue; }
+        if name.ends_with(".rs.bk") || name.contains(".lock") || name.ends_with(".bin") {
+            continue;
+        }
 
-        let meta = match p.metadata() { Ok(m) => m, Err(_) => continue };
-        if meta.len() > max_file_bytes { continue; }
+        let meta = match p.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.len() > max_file_bytes {
+            continue;
+        }
 
         let text = match fs::read_to_string(p) {
             Ok(t) if !t.trim().is_empty() => t,
@@ -226,7 +252,10 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
         if text.len() <= target_chunk + 400 {
             chunks.push(IndexChunk {
                 path: rel_str.clone(),
-                name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| rel_str.clone()),
+                name: p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| rel_str.clone()),
                 chunk_type: ctype.to_string(),
                 content: text,
                 start_line: 1,
@@ -236,7 +265,9 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
         } else {
             let parts = split_content_into_chunks(&text, target_chunk);
             for (i, (start_l, end_l, piece)) in parts.into_iter().enumerate() {
-                if piece.trim().is_empty() { continue; }
+                if piece.trim().is_empty() {
+                    continue;
+                }
                 let piece_ctype = if i == 0 {
                     ctype
                 } else {
@@ -245,7 +276,10 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
                 };
                 chunks.push(IndexChunk {
                     path: rel_str.clone(),
-                    name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| rel_str.clone()),
+                    name: p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| rel_str.clone()),
                     chunk_type: piece_ctype.to_string(),
                     content: piece,
                     start_line: start_l,
@@ -262,19 +296,20 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
 
 fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
-    let mut buf = String::new();
+    let mut buf = String::with_capacity(target + 256);
     let mut cur_start_line = 1usize;
     let mut cur_line = 1usize;
 
     for line in text.lines() {
-        let line_with_nl = format!("{}\n", line);
-        if buf.len() + line_with_nl.len() > target && !buf.trim().is_empty() {
+        let line_len = line.len() + 1;
+        if buf.len() + line_len > target && !buf.trim().is_empty() {
             let end_l = cur_line.saturating_sub(1).max(cur_start_line);
             out.push((cur_start_line, end_l, buf.clone()));
             buf.clear();
             cur_start_line = cur_line;
         }
-        buf.push_str(&line_with_nl);
+        buf.push_str(line);
+        buf.push('\n');
         cur_line += 1;
     }
     if !buf.trim().is_empty() {
@@ -294,7 +329,9 @@ fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, St
             out.push((lnum, lnum + piece_lines - 1, piece.to_string()));
             lnum += piece_lines;
             start = end;
-            if start < big.len() && big.as_bytes().get(start) == Some(&b'\n') { start += 1; }
+            if start < big.len() && big.as_bytes().get(start) == Some(&b'\n') {
+                start += 1;
+            }
         }
     }
     out
@@ -321,7 +358,11 @@ fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
         "rs" => {
             if head.contains("fn ") || head.contains("pub fn ") || head.contains("pub async fn ") {
                 "function"
-            } else if head.contains("struct ") || head.contains("enum ") || head.contains("trait ") || head.contains("type ") {
+            } else if head.contains("struct ")
+                || head.contains("enum ")
+                || head.contains("trait ")
+                || head.contains("type ")
+            {
                 "type"
             } else if head.contains("mod ") || head.contains("pub mod ") {
                 "module"
@@ -343,7 +384,11 @@ fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
         "js" | "jsx" | "mjs" | "cjs" => {
             if head.contains("class ") {
                 "class"
-            } else if head.contains("function ") || head.contains("=>") || head.contains("const ") || head.contains("let ") {
+            } else if head.contains("function ")
+                || head.contains("=>")
+                || head.contains("const ")
+                || head.contains("let ")
+            {
                 "function"
             } else {
                 "file"
@@ -368,7 +413,11 @@ fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
         "java" | "kt" | "scala" => {
             if head.contains("class ") || head.contains("interface ") || head.contains("object ") {
                 "class"
-            } else if head.contains("fun ") || head.contains("public ") || head.contains("private ") || head.contains("def ") {
+            } else if head.contains("fun ")
+                || head.contains("public ")
+                || head.contains("private ")
+                || head.contains("def ")
+            {
                 "function"
             } else {
                 "file"

@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum TaskIntent {
     FastAnswer,
@@ -5,6 +7,143 @@ pub enum TaskIntent {
     WebNeeded,
     CodeAction,
 }
+
+static VERB_PHRASES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "create a ",
+        "create an ",
+        "create the ",
+        "create me a ",
+        "create my ",
+        "build a ",
+        "build an ",
+        "build the ",
+        "build me a ",
+        "build my ",
+        "make a ",
+        "make an ",
+        "make the ",
+        "make me a ",
+        "make my ",
+        "generate a ",
+        "generate an ",
+        "generate the ",
+        "generate me a ",
+        "scaffold a ",
+        "scaffold an ",
+        "scaffold the ",
+        "code a ",
+        "code an ",
+        "code the ",
+        "code me a ",
+        "spin up a ",
+        "spin up an ",
+        "spin up the ",
+    ]
+});
+
+static WRITE_OBJECTS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "write a file",
+        "write a component",
+        "write a function",
+        "write a class",
+        "write a module",
+        "write a script",
+        "write a test",
+        "write a handler",
+        "write a service",
+        "write a hook",
+        "write a config",
+        "write a schema",
+        "write a migration",
+        "write a seed",
+        "write a cli",
+        "write a tool",
+        "write an app",
+        "write an api",
+        "write an endpoint",
+    ]
+});
+
+static SUFFIX_PHRASES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "a file",
+        "an app",
+        "a component",
+        "a project",
+        "a website",
+        "a script",
+        "a page",
+        "a module",
+        "a class",
+        "a function",
+        "a service",
+        "a handler",
+        "a hook",
+        "a config",
+        "a schema",
+        "a migration",
+        "a seed",
+        "a test",
+        "a cli",
+        "a tool",
+        "a layout",
+        "a route",
+        "an endpoint",
+        "an api",
+    ]
+});
+
+static VERB_ROOTS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "create", "build", "generate", "scaffold", "write", "code", "make", "spin up",
+    ]
+});
+
+static QUESTION_PREFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "how to",
+        "how do i",
+        "how do you",
+        "how can i",
+        "how would you",
+        "how should i",
+        "what is the best way to",
+        "what's the best way to",
+        "explain how to",
+        "tell me how to",
+        "describe how to",
+        "show me how to",
+        "can you explain how to",
+        "can you show me how to",
+        "why should i",
+        "when should i",
+        "where should i",
+        "what is",
+        "what are",
+        "what does",
+        "how does",
+        "why is",
+        "why are",
+        "why does",
+        "tell me about",
+        "describe",
+        "define",
+    ]
+});
+
+static PHRASE_COMBINATIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut out = Vec::new();
+    for verb in VERB_ROOTS.iter() {
+        for suffix in SUFFIX_PHRASES.iter() {
+            // Leak the Box to get &'static str
+            let s: &'static str = Box::leak(format!("{} {}", verb, suffix).into_boxed_str());
+            out.push(s);
+        }
+    }
+    out
+});
 
 pub fn classify_intent(input: &str) -> TaskIntent {
     let lower = input.to_lowercase();
@@ -56,11 +195,11 @@ pub fn classify_intent(input: &str) -> TaskIntent {
         || (lower.contains("how to") && lower.contains("design"))
         || (lower.contains("how to") && lower.contains("structure"));
 
-    if plan_indicators && !has_creation_intent(input) {
+    if plan_indicators && !has_creation_intent_lower(&lower) {
         return TaskIntent::Planning;
     }
 
-    let has_create = has_creation_intent(input);
+    let has_create = has_creation_intent_lower(&lower);
 
     if is_question && has_create {
         return TaskIntent::FastAnswer;
@@ -98,121 +237,48 @@ pub fn intent_instruction(intent: &TaskIntent) -> &'static str {
     }
 }
 
-pub fn has_creation_intent(input: &str) -> bool {
-    let lower = input.to_lowercase();
-
-    let verb_phrases = [
-        "create a ",
-        "create an ",
-        "create the ",
-        "create me a ",
-        "create my ",
-        "build a ",
-        "build an ",
-        "build the ",
-        "build me a ",
-        "build my ",
-        "make a ",
-        "make an ",
-        "make the ",
-        "make me a ",
-        "make my ",
-        "generate a ",
-        "generate an ",
-        "generate the ",
-        "generate me a ",
-        "scaffold a ",
-        "scaffold an ",
-        "scaffold the ",
-        "code a ",
-        "code an ",
-        "code the ",
-        "code me a ",
-        "spin up a ",
-        "spin up an ",
-        "spin up the ",
-    ];
-
-    let write_objects = [
-        "write a file",
-        "write a component",
-        "write a function",
-        "write a class",
-        "write a module",
-        "write a script",
-        "write a test",
-        "write a handler",
-        "write a service",
-        "write a hook",
-        "write a config",
-        "write a schema",
-        "write a migration",
-        "write a seed",
-        "write a cli",
-        "write a tool",
-        "write an app",
-        "write an api",
-        "write an endpoint",
-    ];
-
-    let is_question_input = has_question_prefix(lower.as_str());
-
-    if verb_phrases
+fn has_creation_intent_lower(lower: &str) -> bool {
+    if VERB_PHRASES
         .iter()
         .any(|v| lower.starts_with(v) || lower.contains(&format!(" {}", v)))
+        && !has_question_prefix_lower(lower)
     {
-        if !is_question_input {
-            return true;
-        }
+        return true;
     }
 
-    if write_objects.iter().any(|w| lower.contains(w)) {
-        if !is_question_input {
-            return true;
-        }
+    if WRITE_OBJECTS.iter().any(|w| lower.contains(w)) && !has_question_prefix_lower(lower) {
+        return true;
     }
 
-    let suffix_phrases = [
-        "a file",
-        "an app",
-        "a component",
-        "a project",
-        "a website",
-        "a script",
-        "a page",
-        "a module",
-        "a class",
-        "a function",
-        "a service",
-        "a handler",
-        "a hook",
-        "a config",
-        "a schema",
-        "a migration",
-        "a seed",
-        "a test",
-        "a cli",
-        "a tool",
-        "a layout",
-        "a route",
-        "an endpoint",
-        "an api",
-    ];
-
-    for verb in [
-        "create", "build", "generate", "scaffold", "write", "code", "make", "spin up",
-    ] {
-        for suffix in &suffix_phrases {
-            let combined = format!("{} {}", verb, suffix);
-            if lower.starts_with(&combined) || lower.contains(&format!(" {}", combined)) {
-                if !is_question_about(lower.as_str(), &combined) {
-                    return true;
-                }
-            }
+    for combined in PHRASE_COMBINATIONS.iter() {
+        if (lower.starts_with(combined) || lower.contains(&format!(" {}", combined)))
+            && !is_question_about_lower(lower, combined)
+        {
+            return true;
         }
     }
 
     false
+}
+
+pub fn has_creation_intent(input: &str) -> bool {
+    has_creation_intent_lower(&input.to_lowercase())
+}
+
+fn has_question_prefix_lower(lower: &str) -> bool {
+    QUESTION_PREFIXES.iter().any(|p| lower.starts_with(p))
+}
+
+fn is_question_about_lower(lower: &str, action_phrase: &str) -> bool {
+    if !lower.contains(action_phrase) {
+        return false;
+    }
+    has_question_prefix_lower(lower)
+}
+
+#[allow(dead_code)]
+pub(crate) fn is_question_about(input: &str, action_phrase: &str) -> bool {
+    is_question_about_lower(&input.to_lowercase(), action_phrase)
 }
 
 pub fn has_file_path(input: &str) -> bool {
@@ -237,48 +303,6 @@ pub fn has_file_path(input: &str) -> bool {
         || lower.contains("into /")
         || lower.contains("save to ")
         || lower.contains("save at ")
-}
-
-fn has_question_prefix(input: &str) -> bool {
-    let question_prefixes = [
-        "how to",
-        "how do i",
-        "how do you",
-        "how can i",
-        "how would you",
-        "how should i",
-        "what is the best way to",
-        "what's the best way to",
-        "explain how to",
-        "tell me how to",
-        "describe how to",
-        "show me how to",
-        "can you explain how to",
-        "can you show me how to",
-        "why should i",
-        "when should i",
-        "where should i",
-        "what is",
-        "what are",
-        "what does",
-        "how does",
-        "why is",
-        "why are",
-        "why does",
-        "tell me about",
-        "describe",
-        "define",
-    ];
-    let lowered = input.to_lowercase();
-    question_prefixes.iter().any(|p| lowered.starts_with(p))
-}
-
-pub(crate) fn is_question_about(input: &str, action_phrase: &str) -> bool {
-    let lowered = input.to_lowercase();
-    if !lowered.contains(action_phrase) {
-        return false;
-    }
-    has_question_prefix(lowered.as_str())
 }
 
 #[cfg(test)]
