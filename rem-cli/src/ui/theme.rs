@@ -327,6 +327,80 @@ pub fn paint_hint(t: &Theme, msg: &str) -> String {
     paint(t, "text_faint", msg, false)
 }
 
+pub fn paint_bright(t: &Theme, text: &str) -> String {
+    paint(t, "accent", text, true)
+}
+
+pub fn paint_dim(t: &Theme, text: &str) -> String {
+    paint(t, "text_faint", text, false)
+}
+
+pub fn paint_muted(t: &Theme, text: &str) -> String {
+    paint(t, "text_muted", text, false)
+}
+
+pub fn paint_warning(t: &Theme, text: &str) -> String {
+    paint(t, "sys_color", text, false)
+}
+
+pub fn paint_error_label(t: &Theme, text: &str) -> String {
+    paint(t, "error", text, true)
+}
+
+pub fn paint_success_label(t: &Theme, text: &str) -> String {
+    paint(t, "success", text, true)
+}
+
+pub fn paint_rail_line(t: &Theme, parts: &[(&str, &str, bool)]) -> String {
+    let rail = paint(t, "accent", "\u{258C}", true);
+    let mut out = format!("{rail}");
+    for (field, text, bold) in parts {
+        out.push(' ');
+        out.push_str(&paint(t, field, text, *bold));
+    }
+    out
+}
+
+pub fn paint_rail_header(t: &Theme, title: &str) -> String {
+    let rail = paint(t, "accent", "\u{258C}", true);
+    let title_text = paint(
+        t,
+        "accent",
+        &format!("\u{2500}\u{2500} {title} \u{2500}\u{2500}"),
+        true,
+    );
+    format!("{rail}  {title_text}")
+}
+
+pub fn paint_help_line(t: &Theme, cmd: &str, desc: &str) -> String {
+    let rail = paint(t, "accent", "\u{258C}", true);
+    let cmd_text = paint(t, "accent", cmd, true);
+    let desc_text = paint(t, "text_faint", desc, false);
+    format!("{rail}   {cmd_text:<18} {desc_text}")
+}
+
+pub fn paint_rail_bullet(t: &Theme, text: &str) -> String {
+    let rail = paint(t, "accent", "\u{258C}", true);
+    let dot = paint(t, "text_faint", "\u{2022}", false);
+    let body = paint(t, "text_faint", text, false);
+    format!("{rail}   {dot} {body}")
+}
+
+pub fn paint_bullet_line(t: &Theme, parts: &[(&str, &str, bool)]) -> String {
+    let rail = paint(t, "accent", "\u{258C}", true);
+    let dot = paint(t, "text_faint", "\u{2022}", false);
+    let mut out = format!("{rail}   {dot}");
+    for (field, text, bold) in parts {
+        out.push(' ');
+        out.push_str(&paint(t, field, text, *bold));
+    }
+    out
+}
+
+pub fn paint_rail_empty(t: &Theme) -> String {
+    paint(t, "text_faint", "\u{258C}", true)
+}
+
 pub fn paint_status_line(left: &str, right: &str) -> String {
     let t = active();
     let left = paint(&t, "text_muted", left, false);

@@ -3,17 +3,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-const C_GREEN: &str = "\x1b[32m";
-const C_RED: &str = "\x1b[31m";
-const C_YELLOW: &str = "\x1b[33m";
-const C_DIM: &str = "\x1b[2m";
-const C_RESET: &str = "\x1b[0m";
-
-macro_rules! style {
-    ($color:ident, $($arg:tt)*) => {
-        format!("{}{}{}", $color, format!($($arg)*), C_RESET)
-    };
-}
+use crate::ui;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -33,6 +23,7 @@ pub enum LintTarget {
     JavaScript,
     TypeScript,
     Css,
+    Html,
     Unknown,
 }
 
@@ -50,6 +41,8 @@ impl LintTarget {
             LintTarget::TypeScript
         } else if path.ends_with(".css") {
             LintTarget::Css
+        } else if path.ends_with(".html") || path.ends_with(".htm") {
+            LintTarget::Html
         } else {
             LintTarget::Unknown
         }
@@ -68,6 +61,7 @@ pub fn run_lint(path: &str) -> ToolResult {
             ("eslint", "npx", vec!["eslint", path, "--format", "compact"])
         }
         LintTarget::Css => ("stylelint", "npx", vec!["stylelint", path]),
+        LintTarget::Html => ("htmlhint", "npx", vec!["--no-install", "htmlhint", path]),
         LintTarget::Unknown => {
             return ToolResult {
                 tool_name: "unknown".into(),
@@ -117,7 +111,7 @@ pub fn run_test(path: &str) -> ToolResult {
         LintTarget::JavaScript | LintTarget::TypeScript => Command::new("npx")
             .args(["jest", path, "--no-coverage"])
             .output(),
-        LintTarget::Css | LintTarget::Unknown => {
+        LintTarget::Css | LintTarget::Html | LintTarget::Unknown => {
             return ToolResult {
                 tool_name: "test".into(),
                 success: false,
@@ -186,15 +180,16 @@ pub fn run_command(cmd: &str, args: &[&str], _timeout_s: u64) -> ToolResult {
 }
 
 pub fn format_tool_output(result: &ToolResult) -> String {
+    let t = ui::theme::active();
     let status = if result.success {
-        style!(C_GREEN, "PASS")
+        ui::theme::paint_success_label(&t, "PASS")
     } else {
-        style!(C_RED, "FAIL")
+        ui::theme::paint_error_label(&t, "FAIL")
     };
 
     let mut output = format!(
         "\n{} {} {} ({:.1}s)\n",
-        style!(C_DIM, "\u{2502}"),
+        ui::theme::paint_dim(&t, "\u{2502}"),
         status,
         result.tool_name,
         result.duration_ms as f64 / 1000.0
@@ -203,7 +198,7 @@ pub fn format_tool_output(result: &ToolResult) -> String {
     if !result.stdout.trim().is_empty() {
         output.push_str(&format!(
             "{} stdout:\n{}\n",
-            style!(C_DIM, "\u{2502}"),
+            ui::theme::paint_dim(&t, "\u{2502}"),
             result.stdout.trim()
         ));
     }
@@ -211,8 +206,8 @@ pub fn format_tool_output(result: &ToolResult) -> String {
     if !result.stderr.trim().is_empty() {
         output.push_str(&format!(
             "{} {} stderr:\n{}\n",
-            style!(C_DIM, "\u{2502}"),
-            style!(C_YELLOW, "\u{26a0}"),
+            ui::theme::paint_dim(&t, "\u{2502}"),
+            ui::theme::paint_warning(&t, "\u{26a0}"),
             result.stderr.trim()
         ));
     }

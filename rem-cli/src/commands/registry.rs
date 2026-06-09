@@ -454,7 +454,7 @@ pub fn print_section(title: &str, subtitle: &str) {
     }
 }
 
-/// Print a themed success message. Equivalent to the old `style!(C_GREEN, "✓")` line.
+/// Print a themed success message.
 pub fn print_success(msg: &str) {
     let t = theme::active();
     theme::println(&format!(

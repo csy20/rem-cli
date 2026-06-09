@@ -72,21 +72,16 @@ impl SpinnerGuard {
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
         let handle = tokio::spawn(async move {
+            let chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let mut i = 0usize;
             while r.load(Ordering::Relaxed) {
                 let t = theme::active();
-                let frame = match i % 4 {
-                    0 => "\u{2022}",
-                    1 => "\u{00B7}",
-                    2 => "\u{00B7}",
-                    _ => "\u{2022}",
-                };
-                let glyph = theme::paint(&t, "accent_dim", frame, true);
+                let glyph = theme::paint(&t, "accent", chars[i], true);
                 let label = theme::paint(&t, "text_muted", msg, false);
-                eprint!("\r  {glyph}  {label}   ");
+                eprint!("\r  {glyph}  {label}");
                 let _ = io::stderr().flush();
-                tokio::time::sleep(Duration::from_millis(120)).await;
-                i += 1;
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                i = (i + 1) % chars.len();
             }
         });
         Self {
@@ -100,7 +95,7 @@ impl SpinnerGuard {
         if let Some(h) = self.handle.take() {
             h.abort();
         }
-        eprint!("\r\x1b[2K");
+        eprint!("\r{}\r", " ".repeat(60));
         let _ = io::stderr().flush();
     }
 }

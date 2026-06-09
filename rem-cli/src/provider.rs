@@ -8,7 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{style, C_DIM, C_YELLOW};
+use crate::ui;
 
 #[derive(Debug, Deserialize)]
 struct LlmErrorResponse {
@@ -299,7 +299,7 @@ impl Provider {
             Err(e) => {
                 eprintln!(
                     "  {} JSON parse: {} — falling back",
-                    style!(C_YELLOW, "!"),
+                    ui::theme::paint_warning(&ui::theme::active(), "!"),
                     e
                 );
                 Ok(crate::ModelReply::fallback(raw.response.trim()))
@@ -351,7 +351,7 @@ impl Provider {
             Err(e) => {
                 eprintln!(
                     "  {} JSON parse: {} — falling back",
-                    style!(C_YELLOW, "!"),
+                    ui::theme::paint_warning(&ui::theme::active(), "!"),
                     e
                 );
                 Ok(crate::ModelReply::fallback(content.trim()))
@@ -428,6 +428,7 @@ impl Provider {
         cancelled: Arc<AtomicBool>,
         ctrlc_task: tokio::task::JoinHandle<()>,
     ) -> Result<String> {
+        let t = ui::theme::active();
         let mut stream = resp.bytes_stream();
         let mut full = String::new();
         let mut buf = String::new();
@@ -481,7 +482,7 @@ impl Provider {
                         };
                         println!(
                             "\n  {} {:.0} tokens/s in {:.1}s",
-                            style!(C_DIM, "\u{2502}"),
+                            ui::theme::paint_dim(&t, "\u{2502}"),
                             tps,
                             elapsed.as_secs_f64()
                         );
@@ -495,7 +496,7 @@ impl Provider {
         if cancelled.load(Ordering::SeqCst) {
             println!(
                 "\n  {} stream cancelled — {} tokens received (Ctrl+C again to exit)",
-                style!(C_YELLOW, "\u{2502}"),
+                ui::theme::paint_warning(&t, "\u{2502}"),
                 token_count
             );
         }
@@ -569,7 +570,7 @@ impl Provider {
                         };
                         println!(
                             "\n  {} {:.0} tokens/s in {:.1}s",
-                            style!(C_DIM, "\u{2502}"),
+                            ui::theme::paint_dim(&ui::theme::active(), "\u{2502}"),
                             tps,
                             elapsed.as_secs_f64()
                         );

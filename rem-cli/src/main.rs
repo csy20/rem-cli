@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::LazyLock;
 
 use anyhow::{anyhow, Context, Result};
@@ -38,6 +37,7 @@ use intent::{classify_intent, has_creation_intent, has_file_path, intent_instruc
 use memory::ProjectMemory;
 use parsing::{current_name_from_bold, extract_code_block, guess_filename, strip_code_blocks};
 use provider::{api_url, OllamaJsonResponse, Provider};
+use ui::output::SpinnerGuard;
 
 static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
 
@@ -59,24 +59,6 @@ fn reset_ctrlc_count() {
 }
 
 // ── ANSI styling ───────────────────────────────────────────────────────────
-
-pub const C_RESET: &str = "\x1b[0m";
-pub const C_BOLD: &str = "\x1b[1m";
-pub const C_DIM: &str = "\x1b[2m";
-pub const C_CYAN: &str = "\x1b[36m";
-pub const C_GREEN: &str = "\x1b[32m";
-pub const C_YELLOW: &str = "\x1b[33m";
-pub const C_RED: &str = "\x1b[31m";
-pub const C_MAGENTA: &str = "\x1b[35m";
-pub const C_BLUE: &str = "\x1b[34m";
-pub const C_WHITE_B: &str = "\x1b[1;37m";
-
-#[macro_export]
-macro_rules! style {
-    ($color:ident, $($arg:tt)*) => {
-        format!("{}{}{}", $color, format!($($arg)*), $crate::C_RESET)
-    };
-}
 
 // ── Lazy-compiled regexes ──────────────────────────────────────────────────
 
@@ -396,35 +378,33 @@ fn save_config(cfg: &AppConfig) -> Result<()> {
 }
 
 fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
+    let t = ui::theme::active();
     println!();
     println!(
         "{} {}",
-        style!(C_BOLD, "Welcome to REM!"),
-        style!(C_DIM, "first-time setup")
+        ui::theme::paint(&t, "accent", "Welcome to REM!", true),
+        ui::theme::paint_dim(&t, "first-time setup")
     );
     println!();
-    println!("{}", style!(C_CYAN, "│"));
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
     println!(
-        "{} {}{}",
-        style!(C_CYAN, "│"),
-        style!(C_WHITE_B, "Where should REM create your projects?"),
-        style!(C_DIM, "")
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "Where should REM create your projects?"),
     );
     println!(
-        "{} {} e.g. {} or {}",
-        style!(C_CYAN, "│"),
-        style!(C_DIM, ""),
-        style!(C_WHITE_B, "~/projects"),
-        style!(C_WHITE_B, "/home/you/code")
+        "{} e.g. {} or {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "~/projects"),
+        ui::theme::paint_bright(&t, "/home/you/code")
     );
     println!(
-        "{} {} type {} for current dir, or a full path",
-        style!(C_CYAN, "│"),
-        style!(C_DIM, ""),
-        style!(C_WHITE_B, ".")
+        "{} type {} for current dir, or a full path",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, ".")
     );
-    println!("{}", style!(C_CYAN, "│"));
-    print!("{}", style!(C_CYAN, "│  rem> "));
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+    print!("{}", ui::theme::paint(&t, "accent", "\u{258C}  rem> ", true));
     let _ = io::stdout().flush();
 
     let mut input = String::new();
@@ -444,7 +424,11 @@ fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
     };
 
     if !dir.exists() {
-        println!("{} creating {}...", style!(C_CYAN, "│"), dir.display());
+        println!(
+            "{} creating {}...",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            dir.display()
+        );
         fs::create_dir_all(&dir)?;
     }
 
@@ -452,16 +436,14 @@ fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
     save_config(cfg)?;
 
     println!(
-        "{} {} workspace saved to {}",
-        style!(C_GREEN, "│  ✓"),
-        style!(C_DIM, ""),
-        style!(C_WHITE_B, "{}", dir.display())
+        "{} workspace saved to {}",
+        ui::theme::paint_success_label(&t, "\u{258C}  ✓"),
+        ui::theme::paint_bright(&t, &dir.display().to_string())
     );
     println!(
-        "{} {} change it anytime with {}",
-        style!(C_CYAN, "│"),
-        style!(C_DIM, ""),
-        style!(C_WHITE_B, "/dir <path>")
+        "{} change it anytime with {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "/dir <path>")
     );
     println!();
 
@@ -580,6 +562,7 @@ fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
 }
 
 fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
+    let t = ui::theme::active();
     let expanded = if rel.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
             if rel == "~" || rel.starts_with("~/") {
@@ -614,8 +597,8 @@ fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
     } else {
         eprintln!(
             "  {} path traversal blocked: {}",
-            style!(C_RED, "\u{2717}"),
-            style!(C_YELLOW, "{}", rel)
+            ui::theme::paint_error_label(&t, "\u{2717}"),
+            ui::theme::paint_warning(&t, rel)
         );
         None
     }
@@ -695,22 +678,23 @@ fn strip_html(input: &str) -> String {
 }
 
 fn print_search_results(results: &[SearchResult]) {
+    let t = ui::theme::active();
     if results.is_empty() {
-        println!("{}", style!(C_YELLOW, "  no results found"));
+        println!("{}", ui::theme::paint_warning(&t, "  no results found"));
         return;
     }
-    println!("{}", style!(C_DIM, "│"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
     for (i, r) in results.iter().enumerate() {
         println!(
             "{} {}",
-            style!(C_CYAN, "│"),
-            style!(C_WHITE_B, "{}. {}", i + 1, r.title)
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, &format!("{}. {}", i + 1, r.title))
         );
-        println!("{}   {}", style!(C_CYAN, "│"), style!(C_DIM, "{}", r.url));
+        println!("{}   {}", ui::theme::paint(&t, "accent", "\u{258C}", true), ui::theme::paint_dim(&t, &r.url));
         if !r.snippet.is_empty() {
-            println!("{}   {}", style!(C_CYAN, "│"), r.snippet);
+            println!("{}   {}", ui::theme::paint(&t, "accent", "\u{258C}", true), r.snippet);
         }
-        println!("{}", style!(C_CYAN, "│"));
+        println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
     }
 }
 
@@ -916,64 +900,18 @@ fn truncate_to_lines(s: &str, max_lines: usize) -> String {
     result
 }
 
-// ── Spinner ────────────────────────────────────────────────────────────────
-
-struct SpinnerGuard {
-    running: Arc<AtomicBool>,
-    handle: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl SpinnerGuard {
-    fn new(msg: &'static str) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let r = running.clone();
-        let handle = tokio::spawn(async move {
-            let chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let mut i = 0;
-            while r.load(Ordering::Relaxed) {
-                eprint!(
-                    "\r  {} {}",
-                    style!(C_CYAN, "{}", chars[i]),
-                    style!(C_DIM, "{}", msg)
-                );
-                let _ = io::stderr().flush();
-                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-                i = (i + 1) % chars.len();
-            }
-        });
-        Self {
-            running,
-            handle: Some(handle),
-        }
-    }
-
-    fn cancel(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
-    }
-}
-
-impl Drop for SpinnerGuard {
-    fn drop(&mut self) {
-        self.cancel();
-        eprint!("\r{}\r", " ".repeat(60));
-        let _ = io::stderr().flush();
-    }
-}
-
 fn check_system_resources() {
+    let t = ui::theme::active();
     let mem_gb = detect_system_ram_gb();
     if mem_gb > 0 && mem_gb <= 16 {
         eprintln!(
             "{} {} GB RAM detected — Ollama may be slow on CPU.",
-            style!(C_YELLOW, "│ system:"),
+            ui::theme::paint_warning(&t, "\u{258C} system:"),
             mem_gb
         );
         eprintln!(
             "{} Try:  OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 ollama serve",
-            style!(C_DIM, "│")
+            ui::theme::paint_rail_empty(&t)
         );
         eprintln!();
     }
@@ -1039,7 +977,7 @@ async fn main() -> Result<()> {
             if key.is_empty() {
                 eprintln!(
                     "{}: provider '{}' requires --api-key or OPENAI_API_KEY",
-                    style!(C_YELLOW, "warning"),
+                    "\x1b[33mwarning\x1b[0m",
                     cfg.provider
                 );
             }
@@ -1066,7 +1004,7 @@ async fn main() -> Result<()> {
         let fallback = models.first().cloned().unwrap_or_else(|| cfg.model.clone());
         eprintln!(
             "{}: model '{}' not found; using '{}'",
-            style!(C_YELLOW, "warning"),
+            "\x1b[33mwarning\x1b[0m",
             cfg.model,
             fallback
         );
@@ -1140,6 +1078,7 @@ fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
 }
 
 async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, verbose: bool) -> Result<()> {
+    let t = ui::theme::active();
     let prompt = if input.len() > 12000 {
         format!(
             "Analyze the following piped input. Be concise.\n\n{}...\n[truncated]",
@@ -1160,7 +1099,7 @@ async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, verbose: boo
     match result {
         Ok(text) => {
             if verbose {
-                eprintln!("\n  {} raw:\n{}\n", style!(C_DIM, "verbose:"), text);
+                eprintln!("\n  {} raw:\n{}\n", ui::theme::paint_dim(&t, "verbose:"), text);
             }
             println!();
             println!("{}", text.trim());
@@ -1178,6 +1117,7 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
         let ctx = build_context(&path, cfg.max_context_bytes)?;
         composed = format!("{}\n\nFile context:\n{}", composed, ctx);
     }
+    let t = ui::theme::active();
     print_banner(client);
 
     let intent = classify_intent(&composed);
@@ -1226,10 +1166,10 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
     if verbose {
         eprintln!(
             "{} raw explanation: {}",
-            style!(C_DIM, "verbose:"),
+            ui::theme::paint_dim(&t, "verbose:"),
             reply.explanation
         );
-        eprintln!("{} raw files: {:?}", style!(C_DIM, "verbose:"), reply.files);
+        eprintln!("{} raw files: {:?}", ui::theme::paint_dim(&t, "verbose:"), reply.files);
     }
     print_reply(&reply, true);
     Ok(())
@@ -1249,6 +1189,7 @@ async fn run_explain(client: &Provider, args: ExplainArgs) -> Result<()> {
 }
 
 async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArgs) -> Result<()> {
+    let t = ui::theme::active();
     print_banner(client);
     let existing = fs::read_to_string(&args.file)
         .with_context(|| format!("failed to read {}", args.file.display()))?;
@@ -1262,7 +1203,7 @@ async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArgs) -> Resul
     let reply = client.complete_json(&prompt).await?;
     println!(
         "{}",
-        style!(C_CYAN, "Patch preview for {}", args.file.display())
+        ui::theme::paint(&t, "accent", &format!("Patch preview for {}", args.file.display()), true)
     );
     print_reply(&reply, true);
     Ok(())
@@ -1271,29 +1212,8 @@ async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArgs) -> Resul
 // ── Interactive chat ───────────────────────────────────────────────────────
 
 fn print_welcome(client: &Provider) {
-    let model_short = client.model.split(':').next().unwrap_or(&client.model);
     println!();
-    println!("{}",
-        style!(C_CYAN, "\u{2554}\u{2550}\u{2564}\u{2550}\u{2564}\u{2550}\u{2564}\u{2550}\u{2564}\u{2550}\u{2557}"));
-    println!(
-        "{} {} {} {} {} {} {}",
-        style!(C_CYAN, "\u{2551}"),
-        style!(C_BOLD, "REM v{}", env!("CARGO_PKG_VERSION")),
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_DIM, "model: {}", model_short),
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_GREEN, "\u{26a1} /help for commands"),
-        style!(C_CYAN, "\u{2551}")
-    );
-    println!("{}",
-        style!(C_CYAN, "\u{255a}\u{2550}\u{2567}\u{2550}\u{2567}\u{2550}\u{2567}\u{2550}\u{2567}\u{2550}\u{255d}"));
-    println!(
-        "{} {} {} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_GREEN, "┃ mode: CHAT"),
-        style!(C_CYAN, "│"),
-        style!(C_DIM, "/mode to switch → CODE → PLAN → CHAT")
-    );
+    ui::header::render(&client.model, "CHAT");
     println!();
 }
 
@@ -1406,15 +1326,12 @@ fn language_specific_guidance(project_type: &str) -> &'static str {
 }
 
 fn build_prompt(session: &ChatSession, client: &Provider) -> String {
+    let t = ui::theme::active();
     let model_short = client.model.split(':').next().unwrap_or(&client.model);
-    let mode_color = match session.mode {
-        RunMode::Chat => C_GREEN,
-        RunMode::Code => C_MAGENTA,
-        RunMode::Plan => C_BLUE,
-    };
+    let mode_key = ui::theme::accent_for_mode(session.mode.label());
     let mut p = String::new();
     p.push('\x01');
-    p.push_str(mode_color);
+    p.push_str(t.fg(mode_key));
     p.push('\x02');
     p.push('[');
     p.push_str(session.mode.label());
@@ -1422,7 +1339,7 @@ fn build_prompt(session: &ChatSession, client: &Provider) -> String {
     p.push_str("\x01\x1b[0m\x02");
     p.push(' ');
     p.push('\x01');
-    p.push_str(C_CYAN);
+    p.push_str(t.fg("accent"));
     p.push('\x02');
     p.push_str(model_short);
     p.push('>');
@@ -1445,15 +1362,15 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
     };
 
     let mut session = ChatSession::new(&client.model, workspace.clone())?;
+    let t = ui::theme::active();
     print_welcome(client);
     if let Some(ref wd) = workspace {
-        println!(
-            "{} {} {}",
-            style!(C_CYAN, "│"),
-            style!(C_DIM, "workspace →"),
-            style!(C_WHITE_B, "{}", wd.display())
-        );
-        println!("{}", style!(C_CYAN, "│"));
+        ui::theme::println(&format!(
+            "  {} {} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint(&t, "text_faint", "workspace \u{2192}", false),
+            ui::theme::paint(&t, "accent_dim", &wd.display().to_string(), false)
+        ));
     }
 
     loop {
@@ -1464,7 +1381,7 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             match line {
                 Ok(s) => break s,
                 Err(e) => {
-                    eprintln!("  {} input error: {}", style!(C_RED, "err:"), e);
+                    eprintln!("  {} input error: {}", ui::theme::paint_error_label(&t, "err:"), e);
                     if e.kind() == io::ErrorKind::Interrupted
                         || e.kind() == io::ErrorKind::UnexpectedEof
                     {
@@ -1472,7 +1389,7 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                     }
                     error_count += 1;
                     if error_count >= 3 {
-                        eprintln!("  {} too many errors, exiting", style!(C_RED, "err:"));
+                        eprintln!("  {} too many errors, exiting", ui::theme::paint_error_label(&t, "err:"));
                         return Ok(());
                     }
                     continue;
@@ -1485,7 +1402,7 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
         }
 
         if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-            println!("  {}", style!(C_DIM, "bye!"));
+            println!("  {}", ui::theme::paint_dim(&t, "bye!"));
             break;
         }
 
@@ -1546,49 +1463,31 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
         if trimmed.eq_ignore_ascii_case("/mode") {
             session.mode = session.mode.toggle();
             let mode_label = session.mode.label();
-            let mode_color = match session.mode {
-                RunMode::Chat => C_GREEN,
-                RunMode::Code => C_MAGENTA,
-                RunMode::Plan => C_BLUE,
-            };
+            let mode_key = ui::theme::accent_for_mode(mode_label);
             let hint = match session.mode {
-                RunMode::Chat => "reply in plain text — ask questions, chat",
-                RunMode::Code => "generate code/files — create, fix, build",
-                RunMode::Plan => "explore & plan — analyze, propose approach, no code",
+                RunMode::Chat => "reply in plain text \u{2014} ask questions, chat",
+                RunMode::Code => "generate code/files \u{2014} create, fix, build",
+                RunMode::Plan => "explore & plan \u{2014} analyze, propose approach, no code",
             };
-            println!("{}", style!(C_DIM, "│"));
-            println!(
-                "{} {} {}",
-                style!(C_CYAN, "│"),
-                style!(mode_color, "switched to {} mode", mode_label),
-                style!(C_DIM, "")
-            );
-            println!(
-                "{} {} {}",
-                style!(C_CYAN, "│"),
-                style!(C_DIM, "\u{2502}"),
-                style!(C_DIM, "{}", hint)
-            );
-            println!("{}", style!(C_DIM, "│"));
+            let rail = ui::theme::paint_rail_empty(&t);
+            let status = ui::theme::paint(&t, mode_key, &format!("switched to {mode_label} mode"), true);
+            let sub = ui::theme::paint_dim(&t, hint);
+            println!("{rail}");
+            println!("{rail} {status}");
+            println!("{rail}  {sub}");
+            println!("{rail}");
             continue;
         }
 
         if trimmed.eq_ignore_ascii_case("/plan") {
             session.mode = RunMode::Plan;
-            println!("{}", style!(C_DIM, "│"));
-            println!(
-                "{} {} {}",
-                style!(C_CYAN, "│"),
-                style!(C_BLUE, "switched to PLAN mode"),
-                style!(C_DIM, "")
-            );
-            println!(
-                "{} {} {}",
-                style!(C_CYAN, "│"),
-                style!(C_DIM, "\u{2502}"),
-                style!(C_DIM, "explore & plan — analyze, propose approach, no code")
-            );
-            println!("{}", style!(C_DIM, "│"));
+            let rail = ui::theme::paint_rail_empty(&t);
+            let status = ui::theme::paint(&t, "accent_info", "switched to PLAN mode", true);
+            let sub = ui::theme::paint_dim(&t, "explore & plan \u{2014} analyze, propose approach, no code");
+            println!("{rail}");
+            println!("{rail} {status}");
+            println!("{rail}  {sub}");
+            println!("{rail}");
             continue;
         }
 
@@ -1596,13 +1495,11 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             session.history.clear();
             session.last_search.clear();
             session.last_tokens = 0;
-            println!("{}", style!(C_DIM, "│"));
-            println!(
-                "{} {}",
-                style!(C_CYAN, "│"),
-                style!(C_GREEN, "conversation cleared")
-            );
-            println!("{}", style!(C_DIM, "│"));
+            let rail = ui::theme::paint_rail_empty(&t);
+            let msg = ui::theme::paint_success_label(&t, "conversation cleared");
+            println!("{rail}");
+            println!("{rail} {msg}");
+            println!("{rail}");
             continue;
         }
 
@@ -1651,25 +1548,13 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             session.last_code.clear();
             session.last_files.clear();
             session.last_files_written.clear();
-            println!("{}", style!(C_DIM, "│"));
-            println!(
-                "{} {}",
-                style!(C_CYAN, "│"),
-                style!(
-                    C_GREEN,
-                    "full reset — history, code cache, and results cleared"
-                )
-            );
-            println!(
-                "{}   {} {}",
-                style!(C_CYAN, "│"),
-                style!(C_DIM, "│"),
-                style!(
-                    C_DIM,
-                    "(memory preserved — use /memory to clear project memory)"
-                )
-            );
-            println!("{}", style!(C_DIM, "│"));
+            let rail = ui::theme::paint_rail_empty(&t);
+            let msg = ui::theme::paint_success_label(&t, "full reset \u{2014} history, code cache, and results cleared");
+            let sub = ui::theme::paint_dim(&t, "(memory preserved \u{2014} use /memory to clear project memory)");
+            println!("{rail}");
+            println!("{rail} {msg}");
+            println!("{rail}   {sub}");
+            println!("{rail}");
             continue;
         }
 
@@ -1686,7 +1571,7 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             if let Ok(n) = tail.trim().parse::<usize>() {
                 handle_copy(&session, n);
             } else {
-                println!("{} usage: /copy [N] — N is a number", style!(C_YELLOW, "│"));
+                println!("{} usage: /copy [N] — N is a number", ui::theme::paint_warning(&t, "│"));
             }
             continue;
         }
@@ -1700,7 +1585,7 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             if session.last_files.is_empty() && session.last_files_written.is_empty() {
                 println!(
                     "{} no files to lint. Generate code first.",
-                    style!(C_YELLOW, "│")
+                    ui::theme::paint_warning(&t, "│")
                 );
             } else {
                 let paths: Vec<String> = if !session.last_files_written.is_empty() {
@@ -1730,18 +1615,13 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
         }
 
         if trimmed.eq_ignore_ascii_case("/find") {
-            println!("{}", style!(C_DIM, "\u{2502}"));
-            println!(
-                "{} {}",
-                style!(C_CYAN, "\u{2502}"),
-                style!(C_WHITE_B, "usage: /find <query>")
-            );
-            println!(
-                "{} {}  search text inside the project (skips node_modules, target, .git, ...)",
-                style!(C_CYAN, "\u{2502}"),
-                style!(C_DIM, "\u{2022}")
-            );
-            println!("{}", style!(C_DIM, "\u{2502}"));
+            let rail = ui::theme::paint_rail_empty(&t);
+            let usage = ui::theme::paint_bright(&t, "usage: /find <query>");
+            let detail = ui::theme::paint_dim(&t, "search text inside the project (skips node_modules, target, .git, ...)");
+            println!("{rail}");
+            println!("{rail} {usage}");
+            println!("{rail}  {detail}");
+            println!("{rail}");
             continue;
         }
 
@@ -1767,21 +1647,11 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                 TaskIntent::WebNeeded => "web search needed",
                 TaskIntent::CodeAction => "code/file action",
             };
-            println!("{}", style!(C_DIM, "│"));
-            println!(
-                "{} {} {} {}",
-                style!(C_CYAN, "│"),
-                style!(C_WHITE_B, "last intent:"),
-                style!(C_GREEN, "{}", intent_name),
-                style!(C_DIM, "")
-            );
-            println!(
-                "{} {} {} {}",
-                style!(C_CYAN, "│"),
-                style!(C_WHITE_B, "last input:"),
-                style!(C_DIM, "\"{}\"", session.last_user_input),
-                style!(C_DIM, "")
-            );
+            let rail = ui::theme::paint_rail_empty(&t);
+            let intent_label = ui::theme::paint_bright(&t, "last intent:");
+            let intent_val = ui::theme::paint_success_label(&t, intent_name);
+            let input_label = ui::theme::paint_bright(&t, "last input:");
+            let input_val = ui::theme::paint_dim(&t, &format!("\"{}\"", session.last_user_input));
             let create_hit = has_creation_intent(&session.last_user_input);
             let lower_db = session.last_user_input.to_lowercase();
             let fix_hit = lower_db.starts_with("fix ")
@@ -1795,17 +1665,14 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                 || lower_db.starts_with("how ")
                 || lower_db.starts_with("why ")
                 || lower_db.starts_with("explain ");
-            println!(
-                "{} {}",
-                style!(C_CYAN, "│"),
-                style!(C_DIM, "  has_creation_intent={}", create_hit)
-            );
-            println!(
-                "{} {}",
-                style!(C_CYAN, "│"),
-                style!(C_DIM, "  fix_window={}  is_question={}", fix_hit, is_q)
-            );
-            println!("{}", style!(C_DIM, "│"));
+            let debug_intent = ui::theme::paint_dim(&t, &format!("  has_creation_intent={create_hit}"));
+            let debug_fix = ui::theme::paint_dim(&t, &format!("  fix_window={fix_hit}  is_question={is_q}"));
+            println!("{rail}");
+            println!("{rail} {intent_label} {intent_val}");
+            println!("{rail} {input_label} {input_val}");
+            println!("{rail} {debug_intent}");
+            println!("{rail} {debug_fix}");
+            println!("{rail}");
             continue;
         }
 
@@ -1834,14 +1701,17 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
         let instruction = intent_instruction(&intent);
 
         if session.mode == RunMode::Code {
-            print!("{} ", style!(C_CYAN, "\u{2502}"));
-            println!("{}", style!(C_MAGENTA, "generating code..."));
+            let rail = ui::theme::paint(&t, "accent", "\u{258C}", true);
+            let msg = ui::theme::paint(&t, "accent_info", "generating code...", true);
+            println!("{rail} {msg}");
         } else if session.mode == RunMode::Plan {
-            print!("{} ", style!(C_CYAN, "\u{2502}"));
-            println!("{}", style!(C_BLUE, "analyzing & planning..."));
+            let rail = ui::theme::paint(&t, "accent", "\u{258C}", true);
+            let msg = ui::theme::paint(&t, "accent_info", "analyzing & planning...", true);
+            println!("{rail} {msg}");
         } else if intent == TaskIntent::CodeAction {
-            print!("{} ", style!(C_CYAN, "\u{2502}"));
-            println!("{}", style!(C_CYAN, "Analyzing..."));
+            let rail = ui::theme::paint(&t, "accent", "\u{258C}", true);
+            let msg = ui::theme::paint(&t, "accent", "Analyzing...", true);
+            println!("{rail} {msg}");
         }
 
         let search_ctx = session.build_search_context();
@@ -1873,8 +1743,9 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             p
         };
 
-        print!("{} ", style!(C_CYAN, "\u{2502}"));
-        println!("{}", style!(C_DIM, "\u{2500}\u{2500} rem \u{2500}\u{2500}"));
+        let rail = ui::theme::paint(&t, "accent", "\u{258C}", true);
+        let header = ui::theme::paint_dim(&t, "\u{2500}\u{2500} rem \u{2500}\u{2500}");
+        println!("{rail} {header}");
 
         let start = std::time::Instant::now();
         let _chat_spinner = SpinnerGuard::new("REM is writing...");
@@ -1902,28 +1773,20 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
         };
 
         if session.mode == RunMode::Chat && intent == TaskIntent::CodeAction {
-            println!("{}", style!(C_DIM, "\u{2502}"));
-            println!(
-                "{} {}",
-                style!(C_YELLOW, "\u{2502}  hint:"),
-                style!(
-                    C_CYAN,
-                    "this looks like a code request — type /mode to switch to CODE"
-                )
-            );
-            println!("{}", style!(C_DIM, "\u{2502}"));
+            let rail = ui::theme::paint_rail_empty(&t);
+            let hint_label = ui::theme::paint_warning(&t, "hint:");
+            let hint_msg = ui::theme::paint(&t, "accent", "this looks like a code request \u{2014} type /mode to switch to CODE", false);
+            println!("{rail}");
+            println!("{rail}  {hint_label} {hint_msg}");
+            println!("{rail}");
         }
         if session.mode == RunMode::Plan && intent == TaskIntent::CodeAction {
-            println!("{}", style!(C_DIM, "\u{2502}"));
-            println!(
-                "{} {}",
-                style!(C_YELLOW, "\u{2502}  hint:"),
-                style!(
-                    C_BLUE,
-                    "in PLAN mode — I'll analyze first, then you can switch to CODE"
-                )
-            );
-            println!("{}", style!(C_DIM, "\u{2502}"));
+            let rail = ui::theme::paint_rail_empty(&t);
+            let hint_label = ui::theme::paint_warning(&t, "hint:");
+            let hint_msg = ui::theme::paint(&t, "accent_info", "in PLAN mode \u{2014} I'll analyze first, then you can switch to CODE", false);
+            println!("{rail}");
+            println!("{rail}  {hint_label} {hint_msg}");
+            println!("{rail}");
         }
         let result = client
             .complete_chat_stream(&full_prompt, &system_prompt, &history_ctx)
@@ -1936,7 +1799,7 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                 if verbose {
                     eprintln!(
                         "\n  {} raw response:\n{}\n",
-                        style!(C_DIM, "verbose:"),
+                        ui::theme::paint_dim(&t, "verbose:"),
                         text
                     );
                 }
@@ -1944,15 +1807,9 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                 let (was_validated, validated_text) =
                     validate_chat_response(&text, &intent, &session.mode);
                 let cleaned = if was_validated && session.mode != RunMode::Code {
-                    println!(
-                        "{} {}",
-                        style!(C_YELLOW, "│"),
-                        style!(
-                            C_DIM,
-                            "(response contained unexpected code — showing text only)"
-                        )
-                    );
-                    println!("{}", style!(C_CYAN, "│"));
+                    let warn = ui::theme::paint_warning(&t, "\u{258C}");
+                    let note = ui::theme::paint_dim(&t, "(response contained unexpected code \u{2014} showing text only)");
+                    println!("{warn} {note}");
                     validated_text
                 } else {
                     text.trim().to_string()
@@ -1967,75 +1824,53 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                     let code = extract_code_block(&cleaned);
                     let files = extract_code_blocks_with_names(&cleaned);
 
+                    let rail_chr = || ui::theme::paint(&t, "accent", "\u{258C}", true);
+
                     if !files.is_empty() {
                         session.last_files = files.clone();
                         session.last_code = if code.is_empty() { String::new() } else { code };
-                        println!("{}", style!(C_CYAN, "│"));
-                        println!(
-                            "{} {} {}",
-                            style!(C_CYAN, "│"),
-                            style!(C_GREEN, "generated:"),
-                            style!(C_WHITE_B, "{} file(s)", files.len())
-                        );
+                        let gen_label = ui::theme::paint_success_label(&t, "generated:");
+                        let gen_count = ui::theme::paint_bright(&t, &format!("{} file(s)", files.len()));
+                        println!("{}", rail_chr());
+                        println!("{} {} {}", rail_chr(), gen_label, gen_count);
                         for f in &files {
                             let icon = file_icon(&f.path);
                             if f.path.is_empty() {
-                                println!(
-                                    "{}   {} unnamed ({} bytes)",
-                                    style!(C_CYAN, "│"),
-                                    icon,
-                                    f.content.len()
-                                );
+                                println!("{}   {} unnamed ({} bytes)", rail_chr(), icon, f.content.len());
                             } else {
-                                println!(
-                                    "{}   {} {} ({} bytes)",
-                                    style!(C_CYAN, "│"),
-                                    icon,
-                                    style!(C_WHITE_B, "{}", f.path),
-                                    f.content.len()
-                                );
+                                let path = ui::theme::paint_bright(&t, &f.path);
+                                println!("{}   {} {} ({} bytes)", rail_chr(), icon, path, f.content.len());
                             }
                         }
-                        println!("{}", style!(C_CYAN, "│"));
+                        println!("{}", rail_chr());
 
                         auto_write_files(&mut session, &files);
                     } else if !code.is_empty() {
                         session.last_code = code;
                         session.last_files.clear();
-                        println!("{}", style!(C_CYAN, "│"));
-                        println!(
-                            "{} {}",
-                            style!(C_CYAN, "│"),
-                            style!(C_GREEN, "detected code block — use /write <path> to save")
-                        );
-                        println!("{}", style!(C_CYAN, "│"));
+                        let msg = ui::theme::paint_success_label(&t, "detected code block \u{2014} use /write <path> to save");
+                        println!("{}", rail_chr());
+                        println!("{} {}", rail_chr(), msg);
+                        println!("{}", rail_chr());
                     } else {
                         for line in cleaned.lines() {
-                            println!("{} {}", style!(C_CYAN, "│"), line);
+                            println!("{} {}", rail_chr(), line);
                         }
-                        println!("{}", style!(C_CYAN, "│"));
-                        println!(
-                            "{} {}",
-                            style!(C_CYAN, "│"),
-                            style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64())
-                        );
+                        let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                        println!("{}", rail_chr());
+                        println!("{} {}", rail_chr(), timer);
                     }
                 } else if cleaned.is_empty() {
-                    println!(
-                        "{} {}",
-                        style!(C_YELLOW, "│"),
-                        style!(C_DIM, "(empty response)")
-                    );
+                    let warn_chr = ui::theme::paint_warning(&t, "\u{258C}");
+                    let empty = ui::theme::paint_dim(&t, "(empty response)");
+                    println!("{warn_chr} {empty}");
                 } else {
                     for line in cleaned.lines() {
-                        println!("{} {}", style!(C_CYAN, "│"), line);
+                        println!("{} {}", ui::theme::paint(&t, "accent", "\u{258C}", true), line);
                     }
-                    println!("{}", style!(C_CYAN, "│"));
-                    println!(
-                        "{} {}",
-                        style!(C_CYAN, "│"),
-                        style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64())
-                    );
+                    let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+                    println!("{} {}", ui::theme::paint(&t, "accent", "\u{258C}", true), timer);
                 }
 
                 if !cleaned.is_empty() {
@@ -2045,15 +1880,13 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                     }
                 }
 
-                println!("{}", style!(C_DIM, "│"));
+                println!("{}", ui::theme::paint_rail_empty(&t));
             }
             Err(e) => {
-                println!(
-                    "{}",
-                    style!(C_DIM, "\u{23f1} {:.1}s", elapsed.as_secs_f64())
-                );
-                eprintln!("  {} {}", style!(C_RED, "err:"), e);
-                println!("{}", style!(C_DIM, "│"));
+                let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                println!("{timer}");
+                eprintln!("  {} {}", ui::theme::paint_error_label(&t, "err:"), e);
+                println!("{}", ui::theme::paint_rail_empty(&t));
             }
         }
     }
@@ -2116,32 +1949,31 @@ fn validate_chat_response(response: &str, intent: &TaskIntent, mode: &RunMode) -
 }
 
 fn prompt_for_path(session: &mut ChatSession) -> io::Result<String> {
+    let t = ui::theme::active();
     let workspace_display = session
         .project_dir
         .as_ref()
         .map(|d| d.display().to_string())
         .unwrap_or_else(|| "current dir".to_string());
-    println!("{}", style!(C_CYAN, "│"));
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
     println!(
         "{} {}",
-        style!(C_MAGENTA, "│  ?"),
-        style!(
-            C_WHITE_B,
+        ui::theme::paint(&t, "accent_info", "│  ?", true),
+        ui::theme::paint_bright(
+            &t,
             "Where should I create this? (e.g. ./my-site/index.html or ./project/)"
         )
     );
     println!(
-        "{} {} workspace: {}",
-        style!(C_MAGENTA, "│"),
-        style!(C_DIM, ""),
-        style!(C_WHITE_B, "{}", workspace_display)
+        "{} workspace: {}",
+        ui::theme::paint(&t, "accent_info", "│", true),
+        ui::theme::paint_bright(&t, &format!("{}", workspace_display))
     );
     println!(
-        "{} {} type '.' for workspace root, or /dir <path> to change",
-        style!(C_MAGENTA, "│"),
-        style!(C_DIM, "")
+        "{} type '.' for workspace root, or /dir <path> to change",
+        ui::theme::paint(&t, "accent_info", "│", true),
     );
-    println!("{}", style!(C_CYAN, "│"));
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
 
     loop {
         let line = session.readline("rem> path: ");
@@ -2169,6 +2001,7 @@ fn prompt_for_path(session: &mut ChatSession) -> io::Result<String> {
 }
 
 fn handle_write(session: &mut ChatSession, path: &str) {
+    let t = ui::theme::active();
     let trimmed = path.trim();
     let base_dir = session
         .project_dir
@@ -2183,7 +2016,7 @@ fn handle_write(session: &mut ChatSession, path: &str) {
     if session.last_code.is_empty() {
         println!(
             "  {} No code from last response. Use `/code` to view it.",
-            style!(C_YELLOW, "!")
+            ui::theme::paint_warning(&t, "!")
         );
         return;
     }
@@ -2192,14 +2025,14 @@ fn handle_write(session: &mut ChatSession, path: &str) {
         let existing_size = fs::metadata(&abs_path).map(|m| m.len()).unwrap_or(0);
         println!(
             "  {} {} exists ({} bytes) — {} [y/N]",
-            style!(C_YELLOW, "\u{26a0}"),
-            style!(C_WHITE_B, "{}", trimmed),
+            ui::theme::paint_warning(&t, "\u{26a0}"),
+            ui::theme::paint_bright(&t, trimmed),
             existing_size,
-            style!(C_DIM, "overwrite?")
+            ui::theme::paint_dim(&t, "overwrite?")
         );
         let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
         if !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
-            println!("  {} skipped", style!(C_DIM, "\u{2502}"));
+            println!("  {} skipped", ui::theme::paint_rail_empty(&t));
             return;
         }
     }
@@ -2209,7 +2042,7 @@ fn handle_write(session: &mut ChatSession, path: &str) {
             if let Err(e) = fs::create_dir_all(parent) {
                 eprintln!(
                     "  {} cannot create directory {}: {}",
-                    style!(C_RED, "\u{2717}"),
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
                     parent.display(),
                     e
                 );
@@ -2222,31 +2055,31 @@ fn handle_write(session: &mut ChatSession, path: &str) {
     match fs::write(&tmp, &session.last_code) {
         Ok(()) => {
             if let Err(e) = fs::rename(&tmp, &abs_path) {
-                eprintln!("  {} atomic write failed: {}", style!(C_RED, "\u{2717}"), e);
+                eprintln!("  {} atomic write failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
                 let _ = fs::remove_file(&tmp);
                 return;
             }
             println!(
                 "  {} wrote {} ({} bytes)",
-                style!(C_GREEN, "\u{2713}"),
-                style!(C_WHITE_B, "{}", abs_path.display()),
+                ui::theme::paint_success_label(&t, "\u{2713}"),
+                ui::theme::paint_bright(&t, &format!("{}", abs_path.display())),
                 session.last_code.len()
             );
             session.last_files_written.push(abs_path);
         }
         Err(e) => {
-            println!("  {} failed: {}", style!(C_RED, "\u{2717}"), e);
+            println!("  {} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
             let _ = fs::remove_file(&tmp);
         }
     }
 }
 
 fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
+    let t = ui::theme::active();
     if files.is_empty() || files.iter().all(|f| f.path.is_empty()) {
         println!(
-            "{} {} Type /write <path> to save.",
-            style!(C_YELLOW, "\u{2502}  !"),
-            style!(C_DIM, "")
+            "{}  Type /write <path> to save.",
+            ui::theme::paint_warning(&t, "\u{2502}  !"),
         );
         return;
     }
@@ -2266,10 +2099,10 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
             None => {
                 eprintln!(
                     "{}   {} {} {}",
-                    style!(C_RED, "\u{2502} \u{2717}"),
-                    style!(C_WHITE_B, "{}", f.path),
-                    style!(C_DIM, "—"),
-                    style!(C_RED, "path traversal blocked")
+                    ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
+                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
+                    ui::theme::paint_dim(&t, "—"),
+                    ui::theme::paint_error_label(&t, "path traversal blocked")
                 );
             }
         }
@@ -2279,44 +2112,43 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
         return;
     }
 
-    println!("{}", style!(C_CYAN, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
-        "{} {} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "Plan: creating {} file(s)", safe_entries.len()),
-        style!(C_DIM, "")
+        "{} {}",
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint_bright(&t, &format!("Plan: creating {} file(s)", safe_entries.len())),
     );
     for (f, abs_path) in &safe_entries {
         let icon = file_icon(&f.path);
         let lines = f.content.lines().count();
         let marker = if abs_path.exists() {
-            style!(C_YELLOW, " [EXISTS]")
+            ui::theme::paint_warning(&t, " [EXISTS]")
         } else {
             String::new()
         };
         println!(
             "{}   {} {} ({}, {} lines){}",
-            style!(C_CYAN, "\u{2502}"),
+            ui::theme::paint_rail_empty(&t),
             icon,
-            style!(C_WHITE_B, "{}", f.path),
-            style!(C_DIM, "{} bytes", f.content.len()),
-            style!(C_DIM, "{}", lines),
+            ui::theme::paint_bright(&t, &format!("{}", f.path)),
+            ui::theme::paint_dim(&t, &format!("{} bytes", f.content.len())),
+            ui::theme::paint_dim(&t, &format!("{}", lines)),
             marker
         );
     }
-    println!("{}", style!(C_CYAN, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
         "{} {} {}",
-        style!(C_MAGENTA, "\u{2502}  ?"),
-        style!(C_WHITE_B, "Write all {} files? [Y/n]", safe_entries.len()),
-        style!(C_DIM, "(press Enter to confirm)")
+        ui::theme::paint(&t, "accent_info", "\u{2502}  ?", true),
+        ui::theme::paint_bright(&t, &format!("Write all {} files? [Y/n]", safe_entries.len())),
+        ui::theme::paint_dim(&t, "(press Enter to confirm)")
     );
     println!(
         "{} {}",
-        style!(C_MAGENTA, "\u{2502}"),
-        style!(C_DIM, "  Type /code to preview, 'n' to cancel")
+        ui::theme::paint(&t, "accent_info", "\u{2502}", true),
+        ui::theme::paint_dim(&t, "  Type /code to preview, 'n' to cancel")
     );
-    println!("{}", style!(C_CYAN, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 
     let input = session
         .readline("rem> ")
@@ -2325,9 +2157,9 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     if !input.is_empty() && !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
         println!(
             "{} skipped. Use /write <path> to save individually.",
-            style!(C_YELLOW, "\u{2502}  !")
+            ui::theme::paint_warning(&t, "\u{2502}  !")
         );
-        println!("{}", style!(C_CYAN, "\u{2502}"));
+        println!("{}", ui::theme::paint_rail_empty(&t));
         return;
     }
 
@@ -2336,11 +2168,10 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
         let will_overwrite = abs_path.exists();
         if will_overwrite {
             println!(
-                "{}   {} {} {}",
-                style!(C_YELLOW, "\u{2502} \u{26a0}"),
-                style!(C_WHITE_B, "{}", f.path),
-                style!(C_DIM, "exists — overwriting"),
-                style!(C_DIM, "")
+                "{}   {} {}",
+                ui::theme::paint_warning(&t, "\u{2502} \u{26a0}"),
+                ui::theme::paint_bright(&t, &format!("{}", f.path)),
+                ui::theme::paint_dim(&t, "exists \u{2014} overwriting"),
             );
         }
 
@@ -2349,8 +2180,8 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
                 if let Err(e) = fs::create_dir_all(parent) {
                     eprintln!(
                         "{}   {} cannot create dir {}: {}",
-                        style!(C_RED, "\u{2502} \u{2717}"),
-                        style!(C_WHITE_B, "{}", f.path),
+                        ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
+                        ui::theme::paint_bright(&t, &format!("{}", f.path)),
                         parent.display(),
                         e
                     );
@@ -2365,8 +2196,8 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
                 if let Err(e) = fs::rename(&tmp, abs_path) {
                     eprintln!(
                         "{}   {} atomic write failed: {}",
-                        style!(C_RED, "\u{2502} \u{2717}"),
-                        style!(C_WHITE_B, "{}", f.path),
+                        ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
+                        ui::theme::paint_bright(&t, &format!("{}", f.path)),
                         e
                     );
                     let _ = fs::remove_file(&tmp);
@@ -2374,21 +2205,19 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
                 }
                 let overwrite_note = if will_overwrite { " (overwritten)" } else { "" };
                 println!(
-                    "{}   {} {} ({}{})",
-                    style!(C_GREEN, "\u{2502} \u{2713}"),
-                    style!(C_WHITE_B, "{}", f.path),
-                    style!(C_DIM, "{} bytes", f.content.len()),
-                    style!(C_DIM, "{}", overwrite_note),
-                    String::new()
+                    "{}   {} {} {}",
+                    ui::theme::paint_success_label(&t, "\u{2502} \u{2713}"),
+                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
+                    ui::theme::paint_dim(&t, &format!("{} bytes", f.content.len())),
+                    ui::theme::paint_dim(&t, &format!("{}", overwrite_note)),
                 );
                 written.push(abs_path.clone());
             }
             Err(e) => {
                 println!(
-                    "{}   {} {}: {}",
-                    style!(C_RED, "\u{2502} \u{2717}"),
-                    style!(C_WHITE_B, "{}", f.path),
-                    style!(C_DIM, ""),
+                    "{}   {} : {}",
+                    ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
+                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
                     e
                 );
                 let _ = fs::remove_file(&tmp);
@@ -2399,33 +2228,29 @@ fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     if !written.is_empty() {
         session.last_files_written = written;
         println!(
-            "{} {} {} files written.",
-            style!(C_GREEN, "\u{2502} \u{2713}"),
-            style!(C_WHITE_B, "{}", session.last_files_written.len()),
-            style!(C_DIM, "")
+            "{} {} files written.",
+            ui::theme::paint_success_label(&t, "\u{2502} \u{2713}"),
+            ui::theme::paint_bright(&t, &format!("{}", session.last_files_written.len())),
         );
     }
 }
 
 fn handle_undo(session: &mut ChatSession) {
+    let t = ui::theme::active();
     if session.last_files_written.is_empty() {
-        println!("  {} Nothing to undo.", style!(C_YELLOW, "!"));
+        println!("  {} Nothing to undo.", ui::theme::paint_warning(&t, "!"));
         return;
     }
     println!(
         "{} {}",
-        style!(C_MAGENTA, "\u{2502}  ?"),
-        style!(
-            C_WHITE_B,
-            "Delete the last {} written file(s)? [y/N]",
-            session.last_files_written.len()
-        )
+        ui::theme::paint(&t, "accent_info", "\u{258C}  ?", true),
+        ui::theme::paint_bright(&t, &format!("Delete the last {} written file(s)? [y/N]", session.last_files_written.len()))
     );
 
     let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
     let input = input.trim();
     if !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
-        println!("  {} cancelled", style!(C_DIM, "\u{2502}"));
+        println!("  {} cancelled", ui::theme::paint_rail_empty(&t));
         return;
     }
 
@@ -2440,15 +2265,15 @@ fn handle_undo(session: &mut ChatSession) {
                 Ok(()) => {
                     println!(
                         "  {} removed {}",
-                        style!(C_YELLOW, "\u{2502}"),
-                        style!(C_DIM, "{}", path.display())
+                        ui::theme::paint_warning(&t, "\u{258C}"),
+                        ui::theme::paint_dim(&t, &format!("{}", path.display()))
                     );
                     removed += 1;
                 }
                 Err(e) => {
                     println!(
                         "  {} failed to remove {}: {}",
-                        style!(C_RED, "\u{2502}"),
+                        ui::theme::paint_error_label(&t, "\u{258C}"),
                         path.display(),
                         e
                     );
@@ -2474,9 +2299,9 @@ fn handle_undo(session: &mut ChatSession) {
         }
         println!(
             "  {} {} {} file(s) removed.",
-            style!(C_GREEN, "\u{2502} \u{2713}"),
+            ui::theme::paint_success_label(&t, "\u{258C} \u{2713}"),
             removed,
-            style!(C_DIM, "")
+            ""
         );
     }
 }
@@ -2487,14 +2312,15 @@ fn handle_list_files(session: &ChatSession) {
         .as_ref()
         .cloned()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let t = ui::theme::active();
 
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
         "{} {}",
-        style!(C_DIM, "\u{2502}"),
-        style!(C_WHITE_B, "\u{1f4c2} project ({})", dir.display())
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint_bright(&t, &format!("\u{1f4c2} project ({})", dir.display()))
     );
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 
     let mut entries: Vec<(String, bool, u64)> = Vec::new();
     for entry in WalkDir::new(&dir)
@@ -2520,8 +2346,8 @@ fn handle_list_files(session: &ChatSession) {
     if entries.is_empty() {
         println!(
             "{}   {}",
-            style!(C_DIM, "\u{2502}"),
-            style!(C_YELLOW, "(empty)")
+            ui::theme::paint_rail_empty(&t),
+            ui::theme::paint_warning(&t, "(empty)")
         );
     } else {
         for (path, is_dir, size) in &entries {
@@ -2535,28 +2361,28 @@ fn handle_list_files(session: &ChatSession) {
             if *is_dir {
                 println!(
                     "{} {} {} {} {}",
-                    style!(C_DIM, "\u{2502}"),
+                    ui::theme::paint_rail_empty(&t),
                     indent,
-                    style!(C_DIM, "\u{251c}\u{2500}\u{2500}"),
-                    style!(C_BLUE, "\u{1f4c1} {}/", name),
-                    style!(C_RESET, "")
+                    ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
+                    ui::theme::paint(&t, "accent_info", &format!("\u{1f4c1} {}/", name), true),
+                    ""
                 );
             } else {
                 let icon = file_icon(name);
                 let hs = human_size(*size);
                 println!(
                     "{} {} {} {} {} {}",
-                    style!(C_DIM, "\u{2502}"),
+                    ui::theme::paint_rail_empty(&t),
                     indent,
-                    style!(C_DIM, "\u{251c}\u{2500}\u{2500}"),
+                    ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
                     icon,
-                    style!(C_WHITE_B, "{}", name),
-                    style!(C_DIM, "({})", hs)
+                    ui::theme::paint_bright(&t, name),
+                    ui::theme::paint_dim(&t, &format!("({})", hs))
                 );
             }
         }
     }
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
 fn highlight_code(content: &str, lang_hint: &str) -> String {
@@ -2577,45 +2403,45 @@ fn highlight_code(content: &str, lang_hint: &str) -> String {
 }
 
 fn highlight_html(code: &str) -> String {
+    let t = ui::theme::active();
     let mut out = code.to_string();
     out = RE_HIGHLIGHT_COMMENT
-        .replace_all(&out, |caps: &regex::Captures| style!(C_DIM, "{}", &caps[1]))
+        .replace_all(&out, |caps: &regex::Captures| ui::theme::paint_dim(&t, &caps[1]))
         .to_string();
     out = RE_HIGHLIGHT_HTML_TAG
         .replace_all(&out, |caps: &regex::Captures| {
             let tag = &caps[1];
             let inner = RE_HIGHLIGHT_ATTR
-                .replace_all(tag, |ac: &regex::Captures| style!(C_GREEN, "{}", &ac[1]))
+                .replace_all(tag, |ac: &regex::Captures| ui::theme::paint_success_label(&t, &ac[1]))
                 .to_string();
-            style!(C_CYAN, "{}", inner)
+            ui::theme::paint(&t, "accent", &inner, true)
         })
         .to_string();
     out
 }
 
 fn highlight_css(code: &str) -> String {
+    let t = ui::theme::active();
     let mut out = code.to_string();
     out = RE_CSS_COMMENT
-        .replace_all(&out, |caps: &regex::Captures| style!(C_DIM, "{}", &caps[1]))
+        .replace_all(&out, |caps: &regex::Captures| ui::theme::paint_dim(&t, &caps[1]))
         .to_string();
     out = RE_CSS_PROP
         .replace_all(&out, |caps: &regex::Captures| {
             format!(
-                "{}{}{}{}",
+                "{}{}{}",
                 &caps[1],
-                style!(C_YELLOW, "{}", &caps[2]),
+                ui::theme::paint_warning(&t, &caps[2]),
                 &caps[3],
-                style!(C_RESET, "{}", "")
             )
         })
         .to_string();
     out = RE_CSS_VAL
         .replace_all(&out, |caps: &regex::Captures| {
             format!(
-                "{}{}{}{}",
+                "{}{}{}",
                 &caps[1],
-                style!(C_GREEN, "{}", &caps[2].trim()),
-                style!(C_RESET, "{}", ""),
+                ui::theme::paint_success_label(&t, &caps[2].trim()),
                 ""
             )
         })
@@ -2624,18 +2450,19 @@ fn highlight_css(code: &str) -> String {
 }
 
 fn highlight_js(code: &str) -> String {
+    let t = ui::theme::active();
     let mut out = code.to_string();
     out = RE_JS_COMMENT
-        .replace_all(&out, |caps: &regex::Captures| style!(C_DIM, "{}", &caps[1]))
+        .replace_all(&out, |caps: &regex::Captures| ui::theme::paint_dim(&t, &caps[1]))
         .to_string();
     out = RE_JS_STR
         .replace_all(&out, |caps: &regex::Captures| {
-            style!(C_GREEN, "{}", &caps[1])
+            ui::theme::paint_success_label(&t, &caps[1])
         })
         .to_string();
     out = RE_JS_KW
         .replace_all(&out, |caps: &regex::Captures| {
-            style!(C_MAGENTA, "{}", &caps[1])
+            ui::theme::paint(&t, "accent_info", &caps[1], true)
         })
         .to_string();
     out
@@ -2667,6 +2494,7 @@ fn detect_language_from_content(code: &str) -> &str {
 }
 
 fn print_last_files(session: &ChatSession) {
+    let t = ui::theme::active();
     if !session.last_files.is_empty() {
         for f in &session.last_files {
             let label = if f.path.is_empty() {
@@ -2682,18 +2510,17 @@ fn print_last_files(session: &ChatSession) {
             };
             println!(
                 "{}",
-                style!(
-                    C_WHITE_B,
+                ui::theme::paint_bright(&t, &format!(
                     "\u{2500}\u{2500} {}{} \u{2500}\u{2500}",
                     label,
-                    style!(C_DIM, "{}", lang_display)
-                )
+                    ui::theme::paint_dim(&t, &lang_display)
+                ))
             );
             let highlighted = highlight_code(&f.content, lang);
             for code_line in highlighted.lines() {
                 println!("{}", code_line);
             }
-            println!("{}", style!(C_DIM, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
+            println!("{}", ui::theme::paint_dim(&t, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
         }
     } else if !session.last_code.is_empty() {
         let lang = detect_language_from_content(&session.last_code);
@@ -2704,21 +2531,21 @@ fn print_last_files(session: &ChatSession) {
         };
         println!(
             "{}",
-            style!(
-                C_WHITE_B,
+            ui::theme::paint_bright(&t, &format!(
                 "\u{2500}\u{2500} last code{} \u{2500}\u{2500}",
-                style!(C_DIM, "{}", lang_display)
-            )
+                ui::theme::paint_dim(&t, &lang_display)
+            ))
         );
         let highlighted = highlight_code(&session.last_code, lang);
         println!("{}", highlighted);
-        println!("{}", style!(C_DIM, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
+        println!("{}", ui::theme::paint_dim(&t, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
     } else {
-        println!("  {} No code from last response.", style!(C_YELLOW, "!"));
+        println!("  {} No code from last response.", ui::theme::paint_warning(&t, "!"));
     }
 }
 
 fn handle_dir(session: &mut ChatSession, path: &str) {
+    let t = ui::theme::active();
     let dir = PathBuf::from(path.trim());
     let resolved = if path.trim() == "." {
         std::env::current_dir().unwrap_or_default()
@@ -2731,20 +2558,16 @@ fn handle_dir(session: &mut ChatSession, path: &str) {
         persist_workspace(&resolved);
         println!(
             "  {} workspace set to {}",
-            style!(C_GREEN, "✓"),
-            style!(
-                C_WHITE_B,
-                "{}",
-                session.project_dir.as_ref().unwrap().display()
-            )
+            ui::theme::paint_success_label(&t, "✓"),
+            ui::theme::paint_bright(&t, &session.project_dir.as_ref().unwrap().display().to_string())
         );
     } else {
         println!(
             "  {} directory does not exist — creating it",
-            style!(C_YELLOW, "!")
+            ui::theme::paint_warning(&t, "!")
         );
         if let Err(e) = fs::create_dir_all(&resolved) {
-            println!("  {} failed: {}", style!(C_RED, "✗"), e);
+            println!("  {} failed: {}", ui::theme::paint_error_label(&t, "✗"), e);
             return;
         }
         session.project_dir = Some(resolved.clone());
@@ -2752,61 +2575,60 @@ fn handle_dir(session: &mut ChatSession, path: &str) {
         persist_workspace(&resolved);
         println!(
             "  {} workspace set to {}",
-            style!(C_GREEN, "✓"),
-            style!(
-                C_WHITE_B,
-                "{}",
-                session.project_dir.as_ref().unwrap().display()
-            )
+            ui::theme::paint_success_label(&t, "✓"),
+            ui::theme::paint_bright(&t, &session.project_dir.as_ref().unwrap().display().to_string())
         );
     }
 }
 
 fn persist_workspace(dir: &Path) {
+    let t = ui::theme::active();
     let mut cfg = load_config().unwrap_or_default();
     cfg.workspace_dir = Some(dir.to_string_lossy().to_string());
     if let Err(e) = save_config(&cfg) {
         eprintln!(
             "  {} failed to save workspace config: {}",
-            style!(C_RED, "✗"),
+            ui::theme::paint_error_label(&t, "✗"),
             e
         );
     }
 }
 
 async fn handle_search(client: &Provider, session: &mut ChatSession, query: &str) {
+    let t = ui::theme::active();
     println!(
         "{} {} searching the web...",
-        style!(C_DIM, "│"),
-        style!(C_CYAN, "🔍")
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint(&t, "accent", "🔍", true)
     );
     match perform_web_search(&client.client, query).await {
         Ok(results) => {
             if results.is_empty() {
-                println!("{} no results found for: {}", style!(C_YELLOW, "│"), query);
+                println!("{} no results found for: {}", ui::theme::paint_warning(&t, "│"), query);
             } else {
                 println!(
                     "{} {} results for: {}",
-                    style!(C_DIM, "│"),
+                    ui::theme::paint_rail_empty(&t),
                     results.len(),
-                    style!(C_WHITE_B, "{}", query)
+                    ui::theme::paint_bright(&t, query)
                 );
                 print_search_results(&results);
                 session.last_search = results;
             }
         }
         Err(e) => {
-            println!("{} {}", style!(C_RED, "│  search failed:"), e);
+            println!("{} {}", ui::theme::paint_error_label(&t, "│  search failed:"), e);
         }
     }
 }
 
 async fn handle_explain(client: &Provider, session: &mut ChatSession, text: &str) {
+    let t = ui::theme::active();
     if text.trim().is_empty() {
-        println!("{} usage: /explain <code snippet>", style!(C_YELLOW, "│"));
+        println!("{} usage: /explain <code snippet>", ui::theme::paint_warning(&t, "│"));
         return;
     }
-    println!("{} explaining...", style!(C_CYAN, "\u{2502}"));
+    println!("{} explaining...", ui::theme::paint(&t, "accent", "\u{258C}", true));
     let prompt = format!(
         "Explain what the following code does in clear, plain language. \
          Be concise but thorough. Cover: purpose, key components, control flow. \
@@ -2824,27 +2646,28 @@ async fn handle_explain(client: &Provider, session: &mut ChatSession, text: &str
             session.history.push((format!("/explain {}", text), response));
         }
         Err(e) => {
-            println!("\n{} explain failed: {}", style!(C_RED, "│"), e);
+            println!("\n{} explain failed: {}", ui::theme::paint_error_label(&t, "│"), e);
         }
     }
 }
 
 async fn handle_test(client: &Provider, session: &mut ChatSession, path: &str) {
+    let t = ui::theme::active();
     let file_path = Path::new(path.trim());
     if !file_path.exists() {
-        println!("{} file not found: {}", style!(C_YELLOW, "│"), path);
+        println!("{} file not found: {}", ui::theme::paint_warning(&t, "│"), path);
         return;
     }
     let content = match fs::read_to_string(file_path) {
         Ok(c) => c,
         Err(e) => {
-            println!("{} cannot read file: {}", style!(C_RED, "│"), e);
+            println!("{} cannot read file: {}", ui::theme::paint_error_label(&t, "│"), e);
             return;
         }
     };
     println!(
         "{} generating tests for {}...",
-        style!(C_CYAN, "\u{2502}"),
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
         path
     );
     let prompt = format!(
@@ -2867,32 +2690,33 @@ async fn handle_test(client: &Provider, session: &mut ChatSession, path: &str) {
             session.history.push((format!("/test {}", path), response));
             if !session.last_code.is_empty() {
                 println!("{} tests ready — use {} to save",
-                    style!(C_GREEN, "│"),
-                    style!(C_WHITE_B, "/write <path>"));
+                    ui::theme::paint_success_label(&t, "│"),
+                    ui::theme::paint_bright(&t, "/write <path>"));
             }
         }
         Err(e) => {
-            println!("\n{} test generation failed: {}", style!(C_RED, "│"), e);
+            println!("\n{} test generation failed: {}", ui::theme::paint_error_label(&t, "│"), e);
         }
     }
 }
 
 async fn handle_refactor(client: &Provider, session: &mut ChatSession, path: &str) {
+    let t = ui::theme::active();
     let file_path = Path::new(path.trim());
     if !file_path.exists() {
-        println!("{} file not found: {}", style!(C_YELLOW, "│"), path);
+        println!("{} file not found: {}", ui::theme::paint_warning(&t, "│"), path);
         return;
     }
     let content = match fs::read_to_string(file_path) {
         Ok(c) => c,
         Err(e) => {
-            println!("{} cannot read file: {}", style!(C_RED, "│"), e);
+            println!("{} cannot read file: {}", ui::theme::paint_error_label(&t, "│"), e);
             return;
         }
     };
     println!(
         "{} analyzing {} for refactoring...",
-        style!(C_CYAN, "\u{2502}"),
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
         path
     );
     let prompt = format!(
@@ -2914,62 +2738,56 @@ async fn handle_refactor(client: &Provider, session: &mut ChatSession, path: &st
             session.history.push((format!("/refactor {}", path), response));
         }
         Err(e) => {
-            println!("\n{} refactor analysis failed: {}", style!(C_RED, "│"), e);
+            println!("\n{} refactor analysis failed: {}", ui::theme::paint_error_label(&t, "│"), e);
         }
     }
 }
 
 fn handle_config(session: &ChatSession, client: &Provider) {
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_header(&t, "CONFIG"));
     println!(
-        "{}  {}{}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "\u{2500}\u{2500} CONFIG \u{2500}\u{2500}"),
-        style!(C_DIM, "")
+        "{}   {:<18} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "model:"),
+        ui::theme::paint_dim(&t, &client.model)
     );
     println!(
         "{}   {:<18} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "model:"),
-        style!(C_DIM, "{}", client.model)
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "ollama url:"),
+        ui::theme::paint_dim(&t, &client.base_url)
     );
     println!(
         "{}   {:<18} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "ollama url:"),
-        style!(C_DIM, "{}", client.base_url)
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "mode:"),
+        ui::theme::paint_dim(&t, &session.mode.label())
     );
     println!(
         "{}   {:<18} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "mode:"),
-        style!(C_DIM, "{}", session.mode.label())
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "workspace:"),
-        style!(
-            C_DIM,
-            "{}",
-            session
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "workspace:"),
+        ui::theme::paint_dim(
+            &t,
+            &session
                 .project_dir
                 .as_ref()
                 .map(|d| d.display().to_string())
                 .unwrap_or_else(|| "none".to_string())
         )
     );
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
-        "{} {} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_DIM, ""),
-        style!(C_DIM, "use /config model <name> to switch models")
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "use /config model <name> to switch models")
     );
-    println!("{}", style!(C_CYAN, "\u{2502}"));
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
 }
 
 fn handle_config_set(session: &mut ChatSession, client: &Provider, args: &str) {
+    let t = ui::theme::active();
     let parts: Vec<&str> = args.splitn(2, ' ').collect();
     if parts.is_empty() {
         handle_config(session, client);
@@ -2980,21 +2798,22 @@ fn handle_config_set(session: &mut ChatSession, client: &Provider, args: &str) {
             if parts.len() > 1 {
                 handle_dir(session, parts[1]);
             } else {
-                println!("{} usage: /config workspace <path>", style!(C_YELLOW, "│"));
+                println!("{} usage: /config workspace <path>", ui::theme::paint_warning(&t, "\u{258C}"));
             }
         }
         other => {
-            println!("{} unknown config key: {}", style!(C_YELLOW, "│"), other);
-            println!("{} available: model, workspace", style!(C_DIM, "│"));
+            println!("{} unknown config key: {}", ui::theme::paint_warning(&t, "\u{258C}"), other);
+            println!("{} available: model, workspace", ui::theme::paint_rail_empty(&t));
         }
     }
 }
 
 fn handle_diff(session: &ChatSession) {
+    let t = ui::theme::active();
     if session.last_files.is_empty() {
         println!(
             "{} No generated files to compare.",
-            style!(C_YELLOW, "\u{2502}")
+            ui::theme::paint_warning(&t, "\u{2502}")
         );
         return;
     }
@@ -3004,14 +2823,13 @@ fn handle_diff(session: &ChatSession) {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_dim(&t, "\u{2502}"));
     println!(
-        "{} {}{}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "--- DIFF ---"),
-        style!(C_DIM, "")
+        "{} {}",
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint_bright(&t, "--- DIFF ---"),
     );
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_dim(&t, "\u{2502}"));
 
     for f in &session.last_files {
         if f.path.is_empty() {
@@ -3030,10 +2848,10 @@ fn handle_diff(session: &ChatSession) {
             if existing == f.content {
                 println!(
                     "{} {} {} {}",
-                    style!(C_CYAN, "\u{2502}"),
+                    ui::theme::paint_rail_empty(&t),
                     icon,
-                    style!(C_WHITE_B, "{}", f.path),
-                    style!(C_DIM, "(unchanged)")
+                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
+                    ui::theme::paint_dim(&t, "(unchanged)")
                 );
             } else {
                 let added = f
@@ -3046,26 +2864,23 @@ fn handle_diff(session: &ChatSession) {
                     .count()
                     .saturating_sub(f.content.lines().count());
                 println!(
-                    "{} {} {} {}",
-                    style!(C_CYAN, "\u{2502}"),
+                    "{} {} {}",
+                    ui::theme::paint_rail_empty(&t),
                     icon,
-                    style!(C_WHITE_B, "{}", f.path),
-                    style!(C_DIM, "")
+                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
                 );
                 if added > 0 {
                     println!(
-                        "{}   {} {}",
-                        style!(C_CYAN, "\u{2502}"),
-                        style!(C_GREEN, "+{} lines", added),
-                        style!(C_DIM, "")
+                        "{}   {}",
+                        ui::theme::paint_rail_empty(&t),
+                        ui::theme::paint_success_label(&t, &format!("+{} lines", added)),
                     );
                 }
                 if removed > 0 {
                     println!(
-                        "{}   {} {}",
-                        style!(C_CYAN, "\u{2502}"),
-                        style!(C_RED, "-{} lines", removed),
-                        style!(C_DIM, "")
+                        "{}   {}",
+                        ui::theme::paint_rail_empty(&t),
+                        ui::theme::paint_error_label(&t, &format!("-{} lines", removed)),
                     );
                 }
                 let old_lines: Vec<&str> = existing.lines().collect();
@@ -3079,33 +2894,33 @@ fn handle_diff(session: &ChatSession) {
                         if i < old_lines.len() && !old.is_empty() {
                             println!(
                                 "{}     {} {}",
-                                style!(C_DIM, "\u{2502}"),
-                                style!(C_RED, "-"),
-                                style!(C_RED, "{}", old)
+                                ui::theme::paint_dim(&t, "\u{2502}"),
+                                ui::theme::paint_error_label(&t, "-"),
+                                ui::theme::paint_error_label(&t, &format!("{}", old))
                             );
                         }
                         if i < new_lines.len() && !new.is_empty() {
                             println!(
                                 "{}     {} {}",
-                                style!(C_DIM, "\u{2502}"),
-                                style!(C_GREEN, "+"),
-                                style!(C_GREEN, "{}", new)
+                                ui::theme::paint_dim(&t, "\u{2502}"),
+                                ui::theme::paint_success_label(&t, "+"),
+                                ui::theme::paint_success_label(&t, &format!("{}", new))
                             );
                         }
                         diff_printed += 1;
                     }
                 }
                 if max_lines > 8 && diff_printed > 0 {
-                    println!("{}     {}", style!(C_DIM, "\u{2502}"), style!(C_DIM, "..."));
+                    println!("{}     {}", ui::theme::paint_dim(&t, "\u{2502}"), ui::theme::paint_dim(&t, "..."));
                 }
             }
         } else {
             println!(
                 "{} {} {} {}",
-                style!(C_CYAN, "\u{2502}"),
+                ui::theme::paint_rail_empty(&t),
                 icon,
-                style!(C_WHITE_B, "{}", f.path),
-                style!(C_GREEN, "(new file) {} bytes", f.content.len())
+                ui::theme::paint_bright(&t, &format!("{}", f.path)),
+                ui::theme::paint_success_label(&t, &format!("(new file) {} bytes", f.content.len()))
             );
         }
     }
@@ -3117,23 +2932,23 @@ fn handle_diff(session: &ChatSession) {
 
     if let Ok(output) = cmd {
         if !output.stdout.is_empty() {
-            println!("{}", style!(C_CYAN, "\u{2502}"));
+            println!("{}", ui::theme::paint_rail_empty(&t));
             println!(
                 "{} {}",
-                style!(C_CYAN, "\u{2502}"),
-                style!(C_DIM, "git diff --stat:")
+                ui::theme::paint_rail_empty(&t),
+                ui::theme::paint_dim(&t, "git diff --stat:")
             );
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 println!(
                     "{}   {}",
-                    style!(C_CYAN, "\u{2502}"),
-                    style!(C_DIM, "{}", line)
+                    ui::theme::paint_rail_empty(&t),
+                    ui::theme::paint_dim(&t, &format!("{}", line))
                 );
             }
         }
     }
 
-    println!("{}", style!(C_CYAN, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
 fn handle_tokens(session: &ChatSession) {
@@ -3144,50 +2959,48 @@ fn handle_tokens(session: &ChatSession) {
         .iter()
         .map(|(u, a)| (u.len() + a.len()) / 4)
         .sum();
+    let t = ui::theme::active();
 
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
-        "{}  {}{}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "\u{2500}\u{2500} TOKENS \u{2500}\u{2500}"),
-        style!(C_DIM, "")
+        "{}  {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "\u{2500}\u{2500} TOKENS \u{2500}\u{2500}"),
     );
     println!(
         "{}   {:<18} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "last response:"),
-        style!(C_DIM, "~{} tokens", tokens)
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "last response:"),
+        ui::theme::paint_dim(&t, &format!("~{} tokens", tokens))
     );
 
     if elapsed > 0.0 && tokens > 0 {
         let tps = tokens as f64 / elapsed;
         println!(
             "{}   {:<18} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_WHITE_B, "speed:"),
-            style!(C_DIM, "~{:.0} tok/s", tps)
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "speed:"),
+            ui::theme::paint_dim(&t, &format!("~{:.0} tok/s", tps))
         );
     }
 
     if session.last_elapsed.as_secs() > 0 {
         println!(
             "{}   {:<18} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_WHITE_B, "elapsed:"),
-            style!(C_DIM, "{:.1}s", elapsed)
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "elapsed:"),
+            ui::theme::paint_dim(&t, &format!("{:.1}s", elapsed))
         );
     }
 
     if history_tokens > 0 {
         println!(
             "{}   {:<18} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_WHITE_B, "context history:"),
-            style!(
-                C_DIM,
-                "~{} tokens ({} turns)",
-                history_tokens,
-                session.history.len()
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "context history:"),
+            ui::theme::paint_dim(
+                &t,
+                &format!("~{} tokens ({} turns)", history_tokens, session.history.len())
             )
         );
 
@@ -3196,87 +3009,80 @@ fn handle_tokens(session: &ChatSession) {
         let pct = (history_tokens as f64 / 4096.0 * 100.0).min(100.0);
         println!(
             "{}   {:<18} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_WHITE_B, "context window:"),
-            style!(C_DIM, "{:.0}% used (4096 limit)", pct)
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "context window:"),
+            ui::theme::paint_dim(&t, &format!("{:.0}% used (4096 limit)", pct))
         );
     } else {
         println!(
             "{}   {:<18} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_WHITE_B, "context:"),
-            style!(C_DIM, "empty (no history)")
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "context:"),
+            ui::theme::paint_dim(&t, "empty (no history)")
         );
     }
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
 fn handle_memory(session: &ChatSession) {
-    println!("{}", style!(C_DIM, "\u{2502}"));
-    println!(
-        "{}  {}{}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "\u{2500}\u{2500} MEMORY \u{2500}\u{2500}"),
-        style!(C_DIM, "")
-    );
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_header(&t, "MEMORY"));
     if session.project_memory.loaded && !session.project_memory.content.is_empty() {
         for line in session.project_memory.content.lines() {
             println!(
                 "{} {}",
-                style!(C_CYAN, "\u{2502}"),
-                style!(C_DIM, "{}", line)
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, line)
             );
         }
     } else {
         println!(
-            "{} {} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_DIM, "no project memory yet."),
-            style!(C_DIM, "")
+            "{} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "no project memory yet.")
         );
         println!(
-            "{} {} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_DIM, ""),
-            style!(C_DIM, "use /init to generate, or /memory add <text>")
+            "{} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "use /init to generate, or /memory add <text>")
         );
     }
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
-        "{} {} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_DIM, ""),
-        style!(C_DIM, "/memory add <text>  /init  /memory clear")
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "/memory add <text>  /init  /memory clear")
     );
-    println!("{}", style!(C_CYAN, "\u{2502}"));
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
 }
 
 fn handle_memory_set(session: &mut ChatSession, args: &str) {
+    let t = ui::theme::active();
     if args.eq_ignore_ascii_case("clear") {
         session.project_memory.content.clear();
         session.project_memory.loaded = false;
         let _ = session.project_memory.save();
-        println!("{} memory cleared", style!(C_GREEN, "✓"));
+        println!("{} memory cleared", ui::theme::paint_success_label(&t, "\u{2713}"));
         return;
     }
     if let Some(text) = args.strip_prefix("add ") {
         if let Err(e) = session.project_memory.append(text) {
-            println!("{} failed: {}", style!(C_RED, "✗"), e);
+            println!("{} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
         } else {
             println!(
                 "{} appended to memory ({} bytes)",
-                style!(C_GREEN, "✓"),
+                ui::theme::paint_success_label(&t, "\u{2713}"),
                 text.len()
             );
         }
         return;
     }
     if let Err(e) = session.project_memory.set(args) {
-        println!("{} failed: {}", style!(C_RED, "✗"), e);
+        println!("{} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
     } else {
         println!(
             "{} memory saved ({} bytes)",
-            style!(C_GREEN, "✓"),
+            ui::theme::paint_success_label(&t, "\u{2713}"),
             args.len()
         );
     }
@@ -3289,48 +3095,50 @@ fn handle_init(session: &mut ChatSession) {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let ptype = detect_project_type(&dir);
     let ptype_label = if ptype.is_empty() { "unknown" } else { ptype };
-    println!("{}", style!(C_DIM, "│"));
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
         "{} {}",
-        style!(C_CYAN, "│"),
-        style!(C_WHITE_B, "detected project type: {}", ptype_label)
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &format!("detected project type: {}", ptype_label))
     );
     println!(
         "{} {}",
-        style!(C_CYAN, "│"),
-        style!(C_DIM, "generating .rem/memory.md...")
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "generating .rem/memory.md...")
     );
     let starter = ProjectMemory::generate_starter(&dir, ptype);
     if let Err(e) = session.project_memory.set(&starter) {
         println!(
             "{} {} failed: {}",
-            style!(C_RED, "│"),
-            style!(C_RED, "✗"),
+            ui::theme::paint_error_label(&t, "\u{258C}"),
+            ui::theme::paint_error_label(&t, "✗"),
             e
         );
     } else {
         println!(
             "{} {} {} ({} bytes)",
-            style!(C_GREEN, "│"),
-            style!(C_GREEN, "✓"),
-            style!(C_WHITE_B, ".rem/memory.md created"),
+            ui::theme::paint_success_label(&t, "\u{258C}"),
+            ui::theme::paint_success_label(&t, "✓"),
+            ui::theme::paint_bright(&t, ".rem/memory.md created"),
             starter.len()
         );
         println!(
             "{} {} use {} to view",
-            style!(C_CYAN, "│"),
-            style!(C_DIM, ""),
-            style!(C_WHITE_B, "/memory")
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            "",
+            ui::theme::paint_bright(&t, "/memory")
         );
     }
-    println!("{}", style!(C_DIM, "│"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
 async fn handle_compact(client: &Provider, session: &mut ChatSession) {
+    let t = ui::theme::active();
     if session.history.is_empty() {
         println!(
             "{} nothing to compact — history is empty",
-            style!(C_YELLOW, "│")
+            ui::theme::paint_warning(&t, "│")
         );
         return;
     }
@@ -3341,7 +3149,7 @@ async fn handle_compact(client: &Provider, session: &mut ChatSession) {
     );
     println!(
         "{} compacting {} turns...",
-        style!(C_CYAN, "│"),
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
         session.history.len()
     );
     match client
@@ -3361,8 +3169,8 @@ async fn handle_compact(client: &Provider, session: &mut ChatSession) {
             ));
             println!(
                 "{} {} {} → {} turns",
-                style!(C_GREEN, "│"),
-                style!(C_GREEN, "✓ compacted:"),
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_success_label(&t, "✓ compacted:"),
                 old_count,
                 session.history.len()
             );
@@ -3370,8 +3178,8 @@ async fn handle_compact(client: &Provider, session: &mut ChatSession) {
         Err(e) => {
             println!(
                 "{} {} compact failed: {}",
-                style!(C_RED, "│"),
-                style!(C_RED, "✗"),
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_error_label(&t, "✗"),
                 e
             );
         }
@@ -3379,20 +3187,19 @@ async fn handle_compact(client: &Provider, session: &mut ChatSession) {
 }
 
 async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &str) {
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
-        "{} {} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "GOAL: {}", condition),
-        style!(C_DIM, "")
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &format!("GOAL: {}", condition)),
     );
     println!(
-        "{} {} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_DIM, ""),
-        style!(C_DIM, "REM will work until goal is met. Ctrl+C to stop.")
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "REM will work until goal is met. Ctrl+C to stop."),
     );
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 
     let goal_prompt_text = format!(
         "GOAL: {}\n\nYour task is to achieve this goal. You may need to:\n\
@@ -3411,12 +3218,12 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
 
     for i in 0..max_iter {
         if i > 0 {
-            println!("{}", style!(C_DIM, "\u{2502}"));
+            println!("{}", ui::theme::paint_rail_empty(&t));
         }
         println!(
             "{} {} {}/{}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_BOLD, "iteration"),
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint(&t, "accent", "iteration", true),
             i + 1,
             max_iter
         );
@@ -3449,8 +3256,8 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
                     session.last_files.clear();
                     println!(
                         "{} {} use /write <path> to save",
-                        style!(C_CYAN, "\u{2502}"),
-                        style!(C_DIM, "code detected \u{2014}")
+                        ui::theme::paint(&t, "accent", "\u{258C}", true),
+                        ui::theme::paint_dim(&t, "code detected \u{2014}")
                     );
                 }
 
@@ -3458,15 +3265,15 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
                     if achieved {
                         println!(
                             "{} {} goal achieved! {}",
-                            style!(C_GREEN, "\u{2502}"),
-                            style!(C_GREEN, "\u{2713}"),
+                            ui::theme::paint_success_label(&t, "\u{258C}"),
+                            ui::theme::paint_success_label(&t, "\u{2713}"),
                             msg
                         );
                     } else {
                         println!(
                             "{} {} {}",
-                            style!(C_YELLOW, "\u{2502}"),
-                            style!(C_YELLOW, "!"),
+                            ui::theme::paint_warning(&t, "\u{258C}"),
+                            ui::theme::paint_warning(&t, "!"),
                             msg
                         );
                     }
@@ -3476,16 +3283,16 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
                 if cleaned.contains("GOAL_ACHIEVED") {
                     println!(
                         "{} {} goal achieved!",
-                        style!(C_GREEN, "\u{2502}"),
-                        style!(C_GREEN, "\u{2713}")
+                        ui::theme::paint_success_label(&t, "\u{258C}"),
+                        ui::theme::paint_success_label(&t, "\u{2713}")
                     );
                     break;
                 }
                 if cleaned.contains("GOAL_FAILED") {
                     println!(
                         "{} {} goal could not be achieved.",
-                        style!(C_YELLOW, "\u{2502}"),
-                        style!(C_YELLOW, "!")
+                        ui::theme::paint_warning(&t, "\u{258C}"),
+                        ui::theme::paint_warning(&t, "!")
                     );
                     break;
                 }
@@ -3513,18 +3320,19 @@ async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &s
             Err(e) => {
                 println!(
                     "{} {} error: {}",
-                    style!(C_RED, "\u{2502}"),
-                    style!(C_RED, "\u{2717}"),
+                    ui::theme::paint_error_label(&t, "\u{258C}"),
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
                     e
                 );
                 break;
             }
         }
     }
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
 fn handle_copy(session: &ChatSession, n: usize) {
+    let t = ui::theme::active();
     let response = if n == 1 || session.history.is_empty() {
         session
             .history
@@ -3534,12 +3342,12 @@ fn handle_copy(session: &ChatSession, n: usize) {
     } else {
         let total = session.history.len();
         if n > total {
-            println!(
-                "{} only {} responses in history",
-                style!(C_YELLOW, "│"),
-                total
-            );
-            return;
+        println!(
+            "{} only {} responses in history",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            total
+        );
+        return;
         }
         session
             .history
@@ -3549,7 +3357,7 @@ fn handle_copy(session: &ChatSession, n: usize) {
     };
 
     if response.is_empty() {
-        println!("{} nothing to copy", style!(C_YELLOW, "│"));
+        println!("{} nothing to copy", ui::theme::paint_warning(&t, "\u{258C}"));
         return;
     }
 
@@ -3560,15 +3368,15 @@ fn handle_copy(session: &ChatSession, n: usize) {
 
     match use_clipboard {
         Ok(out) if String::from_utf8_lossy(&out.stdout).contains("no-clipboard") => {
-            println!("{} copied to console:", style!(C_GREEN, "│ ✓"));
-            println!("{}", style!(C_DIM, "│"));
+            println!("{} copied to console:", ui::theme::paint_success_label(&t, "│ ✓"));
+            println!("{}", ui::theme::paint_rail_empty(&t));
             for line in response.lines().take(20) {
-                println!("{} {}", style!(C_DIM, "│"), line);
+                println!("{} {}", ui::theme::paint_rail_empty(&t), line);
             }
             if response.lines().count() > 20 {
                 println!(
                     "{} ... ({} lines total)",
-                    style!(C_DIM, "│"),
+                    ui::theme::paint_rail_empty(&t),
                     response.lines().count()
                 );
             }
@@ -3576,103 +3384,40 @@ fn handle_copy(session: &ChatSession, n: usize) {
         Ok(_) => {
             println!(
                 "{} copied to clipboard ({} chars)",
-                style!(C_GREEN, "│ ✓"),
+                ui::theme::paint_success_label(&t, "│ ✓"),
                 response.len()
             );
         }
         Err(_) => {
             println!(
                 "{} copied to console ({}) — install xclip/xsel for clipboard",
-                style!(C_GREEN, "│ ✓"),
+                ui::theme::paint_success_label(&t, "│ ✓"),
                 response.chars().count()
             );
             for line in response.lines().take(20) {
-                println!("{} {}", style!(C_DIM, "│"), line);
+                println!("{} {}", ui::theme::paint_rail_empty(&t), line);
             }
         }
     }
 }
 
 fn handle_lint(_session: &mut ChatSession, path: &str) {
+    let t = ui::theme::active();
     let file_path = Path::new(path);
     if !file_path.exists() {
-        println!("{} file not found: {}", style!(C_YELLOW, "│"), path);
+        println!("{} file not found: {}", ui::theme::paint_warning(&t, "\u{258C}"), path);
         return;
     }
 
-    let path_str = file_path.display().to_string();
-    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let cmd: (&str, Vec<String>) = match ext {
-        "py" => (
-            "python3",
-            vec!["-m".into(), "py_compile".into(), path_str.clone()],
-        ),
-        "rs" => ("cargo", vec!["fmt".into(), "--check".into(), "--".into()]),
-        "go" => ("go", vec!["fmt".into()]),
-        "js" | "ts" => (
-            "npx",
-            vec!["--no-install".into(), "eslint".into(), path_str.clone()],
-        ),
-        "html" => (
-            "npx",
-            vec!["--no-install".into(), "htmlhint".into(), path_str.clone()],
-        ),
-        "css" => (
-            "npx",
-            vec!["--no-install".into(), "stylelint".into(), path_str.clone()],
-        ),
-        _ => {
-            println!(
-                "{} no linter configured for .{} files",
-                style!(C_YELLOW, "│"),
-                ext
-            );
-            return;
-        }
-    };
-
-    println!("{} linting {}...", style!(C_CYAN, "│"), path);
-    let output = std::process::Command::new(cmd.0).args(&cmd.1).output();
-
-    match output {
-        Ok(out) => {
-            if out.status.success() {
-                println!("{} {} passed lint", style!(C_GREEN, "│ ✓"), path);
-            } else {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let msg = if stderr.trim().is_empty() {
-                    stdout.trim().to_string()
-                } else {
-                    stderr.trim().to_string()
-                };
-                if msg.is_empty() {
-                    println!(
-                        "{} {} lint completed with warnings",
-                        style!(C_YELLOW, "│ !"),
-                        path
-                    );
-                } else {
-                    println!("{} {} lint issues:", style!(C_YELLOW, "│ !"), path);
-                    for line in msg.lines().take(10) {
-                        println!("{}   {}", style!(C_YELLOW, "│"), line);
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!(
-                "{} lint failed: {} (is the tool installed?)",
-                style!(C_YELLOW, "│"),
-                e
-            );
-        }
-    }
+    println!("{} linting {}...", ui::theme::paint(&t, "accent", "\u{258C}", true), path);
+    let result = run_lint(path);
+    println!("{}", agentic::format_tool_output(&result));
 }
 
 async fn handle_review(client: &Provider, session: &mut ChatSession) {
+    let t = ui::theme::active();
     if session.last_files.is_empty() {
-        println!("{} no generated code to review", style!(C_YELLOW, "│"));
+        println!("{} no generated code to review", ui::theme::paint_warning(&t, "│"));
         return;
     }
 
@@ -3691,7 +3436,7 @@ async fn handle_review(client: &Provider, session: &mut ChatSession) {
         code_for_review = format!("```\n{}\n```", truncate_bytes(&session.last_code, 3000));
     }
     if code_for_review.is_empty() {
-        println!("{} no code to review", style!(C_YELLOW, "│"));
+        println!("{} no code to review", ui::theme::paint_warning(&t, "│"));
         return;
     }
 
@@ -3708,7 +3453,7 @@ async fn handle_review(client: &Provider, session: &mut ChatSession) {
 
     println!(
         "{} reviewing {} file(s)...",
-        style!(C_CYAN, "│"),
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
         session.last_files.len()
     );
     match client.complete_chat_stream(
@@ -3722,20 +3467,21 @@ async fn handle_review(client: &Provider, session: &mut ChatSession) {
             session.history.push(("/review".to_string(), response));
         }
         Err(e) => {
-            println!("\n{} review failed: {}", style!(C_RED, "│"), e);
+            println!("\n{} review failed: {}", ui::theme::paint_error_label(&t, "│"), e);
         }
     }
 }
 
 fn handle_find(session: &ChatSession, query: &str) {
+    let t = ui::theme::active();
     if query.is_empty() {
-        println!("{}", style!(C_DIM, "\u{2502}"));
+        println!("{}", ui::theme::paint_rail_empty(&t));
         println!(
             "{} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_WHITE_B, "usage: /find <query>")
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "usage: /find <query>")
         );
-        println!("{}", style!(C_DIM, "\u{2502}"));
+        println!("{}", ui::theme::paint_rail_empty(&t));
         return;
     }
 
@@ -3746,28 +3492,27 @@ fn handle_find(session: &ChatSession, query: &str) {
 
     let report = find_matches(&root, query, &FindOptions::default());
 
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
-        "{} {} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_WHITE_B, "\u{203a} FIND  {}", query),
-        style!(C_DIM, "")
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &format!("\u{203a} FIND  {}", query)),
     );
     println!(
         "{} {} {}",
-        style!(C_CYAN, "\u{2502}"),
-        style!(C_DIM, "in"),
-        style!(C_WHITE_B, "{}", root.display())
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "in"),
+        ui::theme::paint_bright(&t, &format!("{}", root.display()))
     );
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 
     if report.matches.is_empty() {
         println!(
             "{} {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_YELLOW, "(no matches)")
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_warning(&t, "(no matches)")
         );
-        println!("{}", style!(C_DIM, "\u{2502}"));
+        println!("{}", ui::theme::paint_rail_empty(&t));
         return;
     }
 
@@ -3782,13 +3527,12 @@ fn handle_find(session: &ChatSession, query: &str) {
             .unwrap_or_else(|_| m.path.display().to_string());
         if last_path.as_deref() != Some(rel.as_str()) {
             if last_path.is_some() {
-                println!("{}", style!(C_DIM, "\u{2502}"));
+                println!("{}", ui::theme::paint_rail_empty(&t));
             }
             println!(
-                "{} {} {}",
-                style!(C_CYAN, "\u{2502}"),
-                style!(C_BLUE, "\u{2500}\u{2500} {} \u{2500}\u{2500}", rel),
-                style!(C_DIM, "")
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint(&t, "accent_info", &format!("\u{2500}\u{2500} {} \u{2500}\u{2500}", rel), true),
             );
             last_path = Some(rel);
         }
@@ -3796,16 +3540,16 @@ fn handle_find(session: &ChatSession, query: &str) {
         let col_w = 3usize;
         println!(
             "{} {}   {:>lw$}:{:<cw$}  {}",
-            style!(C_CYAN, "\u{2502}"),
-            style!(C_DIM, "\u{251c}\u{2500}\u{2500}"),
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
             m.line_no,
             m.column,
-            style!(C_WHITE_B, "{}", trim_for_display(&m.line, 120)),
+            ui::theme::paint_bright(&t, &trim_for_display(&m.line, 120)),
             lw = line_no_w,
             cw = col_w
         );
     }
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 
     let unique_files: std::collections::BTreeSet<String> = report
         .matches
@@ -3834,9 +3578,9 @@ fn handle_find(session: &ChatSession, query: &str) {
     if shown < report.matches.len() {
         summary.push_str(&format!("  (showing first {})", shown));
     }
-    println!("{}", style!(C_DIM, "\u{2502}"));
-    println!("{}", style!(C_GREEN, "{}", summary));
-    println!("{}", style!(C_DIM, "\u{2502}"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!("{}", ui::theme::paint_success_label(&t, &summary));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
 fn trim_for_display(s: &str, max: usize) -> String {
@@ -3850,6 +3594,7 @@ fn trim_for_display(s: &str, max: usize) -> String {
 }
 
 fn handle_save_session(session: &ChatSession) {
+    let t = ui::theme::active();
     let dir = session
         .project_dir
         .clone()
@@ -3877,12 +3622,12 @@ fn handle_save_session(session: &ChatSession) {
     ) {
         Ok(()) => println!(
             "{} session saved to {}",
-            style!(C_GREEN, "\u{2713}"),
+            ui::theme::paint_success_label(&t, "\u{2713}"),
             session_file.display()
         ),
         Err(e) => println!(
             "{} failed to save session: {}",
-            style!(C_RED, "\u{2717}"),
+            ui::theme::paint_error_label(&t, "\u{2717}"),
             e
         ),
     }
@@ -3897,6 +3642,7 @@ fn chrono_now() -> String {
 }
 
 fn handle_resume_session(session: &mut ChatSession) {
+    let t = ui::theme::active();
     let dir = session
         .project_dir
         .clone()
@@ -3905,7 +3651,7 @@ fn handle_resume_session(session: &mut ChatSession) {
     if !session_file.exists() {
         println!(
             "{} no saved session found at {}",
-            style!(C_YELLOW, "\u{2502}"),
+            ui::theme::paint_warning(&t, "\u{258C}"),
             session_file.display()
         );
         return;
@@ -3925,21 +3671,21 @@ fn handle_resume_session(session: &mut ChatSession) {
                     }
                     println!(
                         "{} restored {} turns from {}",
-                        style!(C_GREEN, "\u{2713}"),
+                        ui::theme::paint_success_label(&t, "\u{2713}"),
                         restored,
                         session_file.display()
                     );
                     println!(
                         "{} current conversation is now merged with saved session",
-                        style!(C_DIM, "\u{2502}")
+                        ui::theme::paint_dim(&t, "\u{258C}")
                     );
                 }
                 if let Some(m) = data["mode"].as_str() {
                     println!(
                         "{} {} {}",
-                        style!(C_DIM, "\u{2502}"),
-                        style!(C_DIM, "saved mode:"),
-                        style!(C_WHITE_B, "{}", m)
+                        ui::theme::paint_dim(&t, "\u{258C}"),
+                        ui::theme::paint_dim(&t, "saved mode:"),
+                        ui::theme::paint_bright(&t, m)
                     );
                 }
                 if let Some(code) = data["last_code"].as_str() {
@@ -3947,9 +3693,9 @@ fn handle_resume_session(session: &mut ChatSession) {
                         session.last_code = code.to_string();
                         println!(
                             "{} {} {}",
-                            style!(C_DIM, "\u{2502}"),
-                            style!(C_DIM, "last code:"),
-                            style!(C_GREEN, "restored")
+                            ui::theme::paint_dim(&t, "\u{258C}"),
+                            ui::theme::paint_dim(&t, "last code:"),
+                            ui::theme::paint_success_label(&t, "restored")
                         );
                     }
                 }
@@ -3966,8 +3712,8 @@ fn handle_resume_session(session: &mut ChatSession) {
                     if !restored_files.is_empty() {
                         println!(
                             "{} {} {} file(s) restored",
-                            style!(C_DIM, "\u{2502}"),
-                            style!(C_DIM, "last files:"),
+                            ui::theme::paint_dim(&t, "\u{258C}"),
+                            ui::theme::paint_dim(&t, "last files:"),
                             restored_files.len()
                         );
                         session.last_files = restored_files;
@@ -3983,404 +3729,203 @@ fn handle_resume_session(session: &mut ChatSession) {
                     }
                 }
             } else {
-                println!("{} invalid session file", style!(C_RED, "\u{2502}"));
+                println!("{} invalid session file", ui::theme::paint_error_label(&t, "\u{258C}"));
             }
         }
         Err(e) => println!(
             "{} failed to read session: {}",
-            style!(C_RED, "\u{2502}"),
+            ui::theme::paint_error_label(&t, "\u{258C}"),
             e
         ),
     }
 }
 
 fn print_chat_help() {
-    let v = C_CYAN;
-    let d = C_DIM;
-    let h = C_WHITE_B;
-    println!("{}", style!(d, "\u{2502}"));
-    println!(
-        "{}  {}{}",
-        style!(v, "\u{2502}"),
-        style!(h, "\u{2500}\u{2500} COMMANDS \u{2500}\u{2500}"),
-        style!(d, "")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/help"),
-        style!(d, "show this help")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/mode"),
-        style!(d, "toggle CHAT → CODE → PLAN")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/plan"),
-        style!(d, "switch to PLAN mode (explore & analyze)")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/clear"),
-        style!(d, "reset conversation history")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/explain <code>"),
-        style!(d, "explain what code does")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/test <file>"),
-        style!(d, "generate tests for a file")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/refactor <file>"),
-        style!(d, "suggest refactoring for a file")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/write <path>"),
-        style!(d, "save last code to file")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/save <path>"),
-        style!(d, "same as /write")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/dir <path>"),
-        style!(d, "set project root")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/search <q>"),
-        style!(d, "search the web (DuckDuckGo)")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/code"),
-        style!(d, "show last generated code")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/files"),
-        style!(d, "list project files tree")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/undo"),
-        style!(d, "delete last written files")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/diff"),
-        style!(d, "compare generated vs existing files")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/tokens"),
-        style!(d, "show token usage & context stats")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/config"),
-        style!(d, "view current configuration")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/memory"),
-        style!(d, "view/set project memory (.rem/memory.md)")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/init"),
-        style!(d, "auto-generate project memory file")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/compact"),
-        style!(d, "summarize & free context window")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/goal <cond>"),
-        style!(d, "autonomous loop until goal is met")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/copy [N]"),
-        style!(d, "copy last response to clipboard")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/lint [file]"),
-        style!(d, "run linter on generated files")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/review"),
-        style!(d, "AI code review of generated code")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/find <q>"),
-        style!(d, "search text inside the project")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/reset"),
-        style!(d, "full reset — clear history & code cache")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/save"),
-        style!(d, "save current session to .rem/session.json")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/resume"),
-        style!(d, "restore saved session history")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "/why"),
-        style!(d, "show why last intent was chosen")
-    );
-    println!(
-        "{}   {:<18} {}",
-        style!(v, "\u{2502}"),
-        style!(h, "exit / quit"),
-        style!(d, "exit REM")
-    );
-    println!("{}", style!(v, "\u{2502}"));
-    println!(
-        "{}  {}",
-        style!(v, "\u{2502}"),
-        style!(h, "\u{2500}\u{2500} TIPS \u{2500}\u{2500}")
-    );
-    println!(
-        "{}   {} use {} to include file context: {}",
-        style!(v, "\u{2502}"),
-        style!(d, "\u{2022}"),
-        style!(h, "@<path>"),
-        style!(d, "@src/main.rs")
-    );
-    println!(
-        "{}   {} use {} to toggle between chat, code, and plan modes",
-        style!(v, "\u{2502}"),
-        style!(d, "\u{2022}"),
-        style!(h, "/mode")
-    );
-    println!(
-        "{}   {} {} for analysis first — REM explores codebase before coding",
-        style!(v, "\u{2502}"),
-        style!(d, "\u{2022}"),
-        style!(h, "/plan")
-    );
-    println!(
-        "{}   {} describe what you want \u{2014} REM detects intent",
-        style!(v, "\u{2502}"),
-        style!(d, "\u{2022}")
-    );
-    println!(
-        "{}   {} multi-file intent and auto-writes after confirmation",
-        style!(v, "\u{2502}"),
-        style!(d, "\u{2022}")
-    );
-    println!(
-        "{}   {} use {} {} {} for analysis, tests, and refactoring",
-        style!(v, "\u{2502}"),
-        style!(d, "\u{2022}"),
-        style!(h, "/explain"),
-        style!(h, "/test"),
-        style!(h, "/refactor")
-    );
-    println!(
-        "{}   {} run {} for persistent project memory across sessions",
-        style!(v, "\u{2502}"),
-        style!(d, "\u{2022}"),
-        style!(h, "/init")
-    );
-    println!(
-        "{}   {} run {} to scaffold a new project instantly",
-        style!(v, "\u{2502}"),
-        style!(d, "\u{2022}"),
-        style!(h, "rem new <name>")
-    );
-    println!("{}", style!(v, "\u{2502}"));
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!("{}", ui::theme::paint_rail_header(&t, "COMMANDS"));
+    println!("{}", ui::theme::paint_help_line(&t, "/help", "show this help"));
+    println!("{}", ui::theme::paint_help_line(&t, "/mode", "toggle CHAT \u{2192} CODE \u{2192} PLAN"));
+    println!("{}", ui::theme::paint_help_line(&t, "/plan", "switch to PLAN mode (explore & analyze)"));
+    println!("{}", ui::theme::paint_help_line(&t, "/clear", "reset conversation history"));
+    println!("{}", ui::theme::paint_help_line(&t, "/explain <code>", "explain what code does"));
+    println!("{}", ui::theme::paint_help_line(&t, "/test <file>", "generate tests for a file"));
+    println!("{}", ui::theme::paint_help_line(&t, "/refactor <file>", "suggest refactoring for a file"));
+    println!("{}", ui::theme::paint_help_line(&t, "/write <path>", "save last code to file"));
+    println!("{}", ui::theme::paint_help_line(&t, "/save <path>", "same as /write"));
+    println!("{}", ui::theme::paint_help_line(&t, "/dir <path>", "set project root"));
+    println!("{}", ui::theme::paint_help_line(&t, "/search <q>", "search the web (DuckDuckGo)"));
+    println!("{}", ui::theme::paint_help_line(&t, "/code", "show last generated code"));
+    println!("{}", ui::theme::paint_help_line(&t, "/files", "list project files tree"));
+    println!("{}", ui::theme::paint_help_line(&t, "/undo", "delete last written files"));
+    println!("{}", ui::theme::paint_help_line(&t, "/diff", "compare generated vs existing files"));
+    println!("{}", ui::theme::paint_help_line(&t, "/tokens", "show token usage & context stats"));
+    println!("{}", ui::theme::paint_help_line(&t, "/config", "view current configuration"));
+    println!("{}", ui::theme::paint_help_line(&t, "/memory", "view/set project memory (.rem/memory.md)"));
+    println!("{}", ui::theme::paint_help_line(&t, "/init", "auto-generate project memory file"));
+    println!("{}", ui::theme::paint_help_line(&t, "/compact", "summarize & free context window"));
+    println!("{}", ui::theme::paint_help_line(&t, "/goal <cond>", "autonomous loop until goal is met"));
+    println!("{}", ui::theme::paint_help_line(&t, "/copy [N]", "copy last response to clipboard"));
+    println!("{}", ui::theme::paint_help_line(&t, "/lint [file]", "run linter on generated files"));
+    println!("{}", ui::theme::paint_help_line(&t, "/review", "AI code review of generated code"));
+    println!("{}", ui::theme::paint_help_line(&t, "/find <q>", "search text inside the project"));
+    println!("{}", ui::theme::paint_help_line(&t, "/reset", "full reset \u{2014} clear history & code cache"));
+    println!("{}", ui::theme::paint_help_line(&t, "/save", "save current session to .rem/session.json"));
+    println!("{}", ui::theme::paint_help_line(&t, "/resume", "restore saved session history"));
+    println!("{}", ui::theme::paint_help_line(&t, "/why", "show why last intent was chosen"));
+    println!("{}", ui::theme::paint_help_line(&t, "exit / quit", "exit REM"));
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!("{}", ui::theme::paint_rail_header(&t, "TIPS"));
+    println!("{}", ui::theme::paint_bullet_line(&t, &[
+        ("text_faint", "use ", false),
+        ("accent", "@<path>", true),
+        ("text_faint", " to include file context: @src/main.rs", false),
+    ]));
+    println!("{}", ui::theme::paint_bullet_line(&t, &[
+        ("text_faint", "use ", false),
+        ("accent", "/mode", true),
+        ("text_faint", " to toggle between chat, code, and plan modes", false),
+    ]));
+    println!("{}", ui::theme::paint_bullet_line(&t, &[
+        ("accent", "/plan", true),
+        ("text_faint", " for analysis first \u{2014} REM explores codebase before coding", false),
+    ]));
+    println!("{}", ui::theme::paint_rail_bullet(&t, "describe what you want \u{2014} REM detects intent"));
+    println!("{}", ui::theme::paint_rail_bullet(&t, "multi-file intent and auto-writes after confirmation"));
+    println!("{}", ui::theme::paint_bullet_line(&t, &[
+        ("text_faint", "use ", false),
+        ("accent", "/explain", true),
+        ("text_faint", " ", false),
+        ("accent", "/test", true),
+        ("text_faint", " ", false),
+        ("accent", "/refactor", true),
+        ("text_faint", " for analysis, tests, and refactoring", false),
+    ]));
+    println!("{}", ui::theme::paint_bullet_line(&t, &[
+        ("text_faint", "run ", false),
+        ("accent", "/init", true),
+        ("text_faint", " for persistent project memory across sessions", false),
+    ]));
+    println!("{}", ui::theme::paint_bullet_line(&t, &[
+        ("text_faint", "run ", false),
+        ("accent", "rem new <name>", true),
+        ("text_faint", " to scaffold a new project instantly", false),
+    ]));
+    println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
 // ── Output formatting ──────────────────────────────────────────────────────
 
 fn print_banner(client: &Provider) {
+    let t = ui::theme::active();
     println!();
-    println!(
-        "{} {} {}",
-        style!(C_CYAN, "╭─"),
-        style!(C_BOLD, "REM"),
-        style!(C_DIM, "─────────────────────────────")
-    );
-    println!(
-        "{} model {}{} {}",
-        style!(C_CYAN, "│"),
-        style!(C_GREEN, "{}", client.model),
-        style!(C_DIM, " •"),
-        style!(C_DIM, "type /help for commands")
-    );
+    ui::theme::println(&ui::theme::paint_rail(&t, "accent", "text_muted", "REM"));
+    ui::theme::println(&format!(
+        "  {} {} {} {}",
+        ui::theme::paint(&t, "accent_dim", "\u{258C}", true),
+        ui::theme::paint(&t, "text_faint", "model", false),
+        ui::theme::paint(&t, "accent", &client.model, false),
+        ui::theme::paint(&t, "text_faint", "\u{00B7} type /help for commands", false)
+    ));
 }
 
 fn print_reply(reply: &ModelReply, newline: bool) {
+    let t = ui::theme::active();
     if newline {
         println!();
     }
     if !reply.explanation.trim().is_empty() {
-        println!(
-            "{} {}",
-            style!(C_CYAN, "│"),
-            style!(C_WHITE_B, "{}", reply.explanation)
-        );
-        println!("{}", style!(C_CYAN, "│"));
+        ui::theme::println(&format!(
+            "  {} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            reply.explanation
+        ));
     }
 
     if !reply.files.is_empty() {
-        println!(
-            "{} {} ({} file{})",
-            style!(C_CYAN, "│  ┌"),
-            style!(C_GREEN, "generated:"),
-            reply.files.len(),
-            if reply.files.len() == 1 { "" } else { "s" }
-        );
+        ui::theme::println(&format!(
+            "  {}",
+            ui::theme::paint_success(&t, &format!("generated: {} file(s)", reply.files.len()))
+        ));
         for f in &reply.files {
             let icon = file_icon(&f.path);
             if f.path.is_empty() {
-                println!(
-                    "{} {}  {}",
-                    style!(C_CYAN, "│"),
+                ui::theme::println(&format!(
+                    "    {}  {}",
                     icon,
-                    style!(C_GREEN, "(unnamed) {} bytes", f.content.len())
-                );
+                    ui::theme::paint(&t, "accent_dim", &format!("(unnamed) {} bytes", f.content.len()), false)
+                ));
             } else {
-                println!(
-                    "{} {}  {}",
-                    style!(C_CYAN, "│"),
+                ui::theme::println(&format!(
+                    "    {}  {}",
                     icon,
-                    style!(C_GREEN, "{}", f.path)
-                );
+                    ui::theme::paint(&t, "accent", &f.path, false)
+                ));
             }
         }
-        println!(
-            "{}   {}",
-            style!(C_CYAN, "│  └"),
-            style!(C_DIM, "/write <path> to save")
-        );
-        println!("{}", style!(C_CYAN, "│"));
+        ui::theme::println(&format!(
+            "    {}",
+            ui::theme::paint(&t, "text_faint", "/write <path> to save", false)
+        ));
     } else if !reply.code.trim().is_empty() {
-        println!("{} {}", style!(C_CYAN, "│  ┌"), style!(C_GREEN, "code:"));
+        ui::theme::println(&format!(
+            "  {}",
+            ui::theme::paint_success(&t, "code:")
+        ));
         for code_line in reply.code.lines() {
-            println!(
-                "{} {}",
-                style!(C_CYAN, "│"),
-                style!(C_GREEN, "  │  {}", code_line)
-            );
+            ui::theme::println(&format!(
+                "    {}",
+                ui::theme::paint(&t, "accent_dim", code_line, false)
+            ));
         }
-        println!(
-            "{}   {}",
-            style!(C_CYAN, "│  └"),
-            style!(C_DIM, "/write <path> to save")
-        );
-        println!("{}", style!(C_CYAN, "│"));
+        ui::theme::println(&format!(
+            "    {}",
+            ui::theme::paint(&t, "text_faint", "/write <path> to save", false)
+        ));
     }
     if !reply.commands.is_empty() {
-        println!("{} {}", style!(C_CYAN, "│"), style!(C_MAGENTA, "commands:"));
+        ui::theme::println(&format!(
+            "  {}",
+            ui::theme::paint(&t, "accent", "commands:", true)
+        ));
         for cmd in sanitize_commands(&reply.commands) {
             if is_command_blocked(cmd) {
-                println!(
-                    "{}   {}",
-                    style!(C_CYAN, "│"),
-                    style!(C_RED, "[blocked] {}", cmd)
-                );
+                ui::theme::println(&format!(
+                    "    {}",
+                    ui::theme::paint_error(&t, &format!("[blocked] {}", cmd))
+                ));
             } else {
-                println!(
-                    "{}   {}",
-                    style!(C_CYAN, "│"),
-                    style!(C_MAGENTA, "  $ {}", cmd)
-                );
+                ui::theme::println(&format!(
+                    "    $ {}",
+                    ui::theme::paint(&t, "accent_dim", cmd, false)
+                ));
             }
         }
-        println!("{}", style!(C_CYAN, "│"));
     }
     if !reply.checks.is_empty() {
-        println!("{} {}", style!(C_CYAN, "│"), style!(C_YELLOW, "checks:"));
+        ui::theme::println(&format!(
+            "  {}",
+            ui::theme::paint(&t, "accent", "checks:", true)
+        ));
         for item in &reply.checks {
-            println!(
-                "{}   {}",
-                style!(C_CYAN, "│"),
-                style!(C_DIM, "  • {}", item)
-            );
+            ui::theme::println(&format!(
+                "    {}",
+                ui::theme::paint(&t, "text_muted", &format!("\u{2022} {}", item), false)
+            ));
         }
-        println!("{}", style!(C_CYAN, "│"));
     }
     if !reply.caution.trim().is_empty() {
-        println!(
-            "{} {}",
-            style!(C_CYAN, "│"),
-            style!(C_RED, "caution: {}", reply.caution)
-        );
-        println!("{}", style!(C_CYAN, "│"));
+        ui::theme::println(&format!(
+            "  {}",
+            ui::theme::paint_error(&t, &format!("caution: {}", reply.caution))
+        ));
     }
-    println!("{}", style!(C_CYAN, "╰──────────────────────────────────"));
 }
 
 fn file_icon(path: &str) -> String {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".html") || lower.ends_with(".htm") {
-        style!(C_MAGENTA, "🌐")
-    } else if lower.ends_with(".css") {
-        style!(C_BLUE, "🎨")
-    } else if lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".ts") {
-        style!(C_YELLOW, "⚡")
-    } else if lower.ends_with(".json") {
-        style!(C_CYAN, "📋")
-    } else if lower.ends_with(".md") || lower.ends_with(".txt") {
-        style!(C_DIM, "📄")
-    } else if lower.ends_with(".py") {
-        style!(C_GREEN, "🐍")
-    } else {
-        style!(C_DIM, "📄")
-    }
+    let t = ui::theme::active();
+    let emoji = commands::registry::file_icon_for(path);
+    ui::theme::paint(&t, "text_muted", emoji, false)
 }
 
 fn human_size(bytes: u64) -> String {
@@ -4439,6 +3984,7 @@ fn truncate_bytes(s: &str, max: usize) -> String {
 // ── Project scaffolding ────────────────────────────────────────────────────
 
 fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
+    let t = ui::theme::active();
     let dir = if args.name.starts_with('/')
         || args.name.starts_with("./")
         || args.name.starts_with("../")
@@ -4481,27 +4027,22 @@ fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
 
     println!(
         "{} {}",
-        style!(C_GREEN, "✓"),
-        style!(
-            C_WHITE_B,
-            "created project '{}' ({})",
-            args.name,
-            args.project_type
-        )
+        ui::theme::paint_success_label(&t, "✓"),
+        ui::theme::paint_bright(&t, &format!("created project '{}' ({})", args.name, args.project_type))
     );
     for f in &files {
         let icon = file_icon(&f.path);
         println!(
             "  {} {} ({} bytes)",
             icon,
-            style!(C_WHITE_B, "{}", f.path),
+            ui::theme::paint_bright(&t, &f.path),
             f.content.len()
         );
     }
     println!();
     println!(
         "{} cd {} && open index.html",
-        style!(C_DIM, "next:"),
+        ui::theme::paint_dim(&t, "next:"),
         args.name
     );
 
@@ -5612,6 +5153,7 @@ fn sanitize_commands(cmds: &[String]) -> Vec<&str> {
 // pure logic (chunking, writing, loading, retrieval) lives in its own module.
 
 fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
+    let t = ui::theme::active();
     let dir = args.dir.clone().unwrap_or_else(|| {
         cfg.workspace_dir
             .clone()
@@ -5624,17 +5166,17 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
         PathBuf::from(".")
     };
 
-    println!("{}", style!(C_CYAN, "│"));
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
     println!(
         "{} {} {}",
-        style!(C_CYAN, "│"),
-        style!(C_WHITE_B, "rem index"),
-        style!(C_DIM, "— codebase retrieval index (pure Rust)")
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "rem index"),
+        ui::theme::paint_dim(&t, "— codebase retrieval index (pure Rust)")
     );
     println!(
         "{} target: {}",
-        style!(C_CYAN, "│"),
-        style!(C_DIM, "{}", dir.display())
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, &dir.display().to_string())
     );
 
     let refreshing = load_codebase_index(&dir).is_some();
@@ -5642,8 +5184,8 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     if chunks.is_empty() {
         println!(
             "{} {} no indexable files found (after skips)",
-            style!(C_CYAN, "│"),
-            style!(C_YELLOW, "⚠")
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_warning(&t, "⚠")
         );
         return Ok(());
     }
@@ -5659,19 +5201,19 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     let action = if refreshing { "refreshed" } else { "created" };
     println!(
         "{} {} {} {} chunks from {} files",
-        style!(C_CYAN, "│"),
-        style!(C_GREEN, "✓"),
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_success_label(&t, "✓"),
         action,
         chunks.len(),
         unique_files
     );
     println!(
         "{} index: {}",
-        style!(C_CYAN, "│"),
-        style!(C_WHITE_B, "{}", out_path.display())
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &out_path.display().to_string())
     );
-    println!("{} `rem chat` / `rem ask` / `/goal` will now pull relevant chunks instead of full listings.", style!(C_CYAN, "│"));
-    println!("{} (keyword retrieval; raise model_ctx in ~/.config/rem-cli/config.toml for large projects)", style!(C_CYAN, "│"));
+    println!("{} `rem chat` / `rem ask` / `/goal` will now pull relevant chunks instead of full listings.", ui::theme::paint(&t, "accent", "\u{258C}", true));
+    println!("{} (keyword retrieval; raise model_ctx in ~/.config/rem-cli/config.toml for large projects)", ui::theme::paint(&t, "accent", "\u{258C}", true));
     Ok(())
 }
 
