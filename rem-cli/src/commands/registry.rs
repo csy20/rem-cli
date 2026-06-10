@@ -320,7 +320,7 @@ fn render_theme_picker(names: &[String]) {
         let marker_colored = theme::paint(&t, "accent_dim", marker, false);
         theme::println(&format!("{label} {key}  {desc_colored}  {marker_colored}"));
         // Live preview line
-        crate::ui::header::render_with_theme(&cfg.model, &cfg.mode, name);
+        crate::ui::header::render(&cfg.model, &cfg.mode);
     }
     theme::println("");
     theme::println(&format!(

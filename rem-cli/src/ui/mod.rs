@@ -4,6 +4,7 @@
 // prompt line, and streaming output. All terminal rendering flows through here.
 
 pub mod header;
+pub mod markdown;
 pub mod output;
 pub mod palette;
 pub mod prompt;

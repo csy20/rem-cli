@@ -11,7 +11,7 @@ use regex::Regex;
 use reqwest::Client;
 use rustyline::DefaultEditor;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+
 use walkdir::WalkDir;
 
 mod agentic;
@@ -36,7 +36,7 @@ use indexer::{
 use intent::{classify_intent, has_creation_intent, has_file_path, intent_instruction, TaskIntent};
 use memory::ProjectMemory;
 use parsing::{current_name_from_bold, extract_code_block, guess_filename, strip_code_blocks};
-use provider::{api_url, OllamaJsonResponse, Provider};
+use provider::{Provider, ProviderKind};
 use ui::output::SpinnerGuard;
 
 static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
@@ -964,40 +964,7 @@ async fn main() -> Result<()> {
     }
 
     let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
-    let base_url = cfg
-        .api_url
-        .clone()
-        .unwrap_or_else(|| cfg.ollama_url.clone());
-    let mut client = match cfg.provider.as_str() {
-        "openai" | "vllm" => {
-            let key = cfg
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
-            if key.is_empty() {
-                eprintln!(
-                    "{}: provider '{}' requires --api-key or OPENAI_API_KEY",
-                    "\x1b[33mwarning\x1b[0m",
-                    cfg.provider
-                );
-            }
-            Provider::new_openai(
-                base_url,
-                cfg.model.clone(),
-                cfg.timeout_s,
-                system_prompt,
-                key,
-                cfg.model_ctx,
-            )
-        }
-        _ => Provider::new_ollama(
-            base_url,
-            cfg.model.clone(),
-            cfg.timeout_s,
-            system_prompt,
-            cfg.model_ctx,
-        ),
-    };
+    let mut client = build_provider(&cfg, system_prompt)?;
     client.healthcheck().await?;
     let models = client.list_models().await?;
     if !models.iter().any(|m| m == &cfg.model) {
@@ -1028,7 +995,7 @@ async fn main() -> Result<()> {
                     return run_pipe(&client, &cfg, stdin_data.trim(), verbose).await;
                 }
             }
-            run_chat(&client, &mut cfg, verbose).await
+            run_chat(&mut client, &mut cfg, verbose).await
         }
         Some(Commands::Index(_)) => {
             // handled by early return before client creation
@@ -1056,6 +1023,97 @@ fn load_config() -> Result<AppConfig> {
         cfg.apply_partial(partial);
     }
     Ok(cfg)
+}
+
+fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<Provider> {
+    let kind = ProviderKind::from_str(&cfg.provider);
+    match kind {
+        ProviderKind::OpenAI => {
+            let base_url = cfg
+                .api_url
+                .clone()
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let key = cfg
+                .api_key
+                .clone()
+                .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
+            if key.is_empty() {
+                eprintln!(
+                    "{}: provider 'openai' requires --api-key or OPENAI_API_KEY",
+                    "\x1b[33mwarning\x1b[0m"
+                );
+            }
+            Ok(Provider::new_openai(
+                base_url,
+                cfg.model.clone(),
+                cfg.timeout_s,
+                system_prompt,
+                key,
+                cfg.model_ctx,
+            ))
+        }
+        ProviderKind::Gemini => {
+            let key = cfg
+                .api_key
+                .clone()
+                .unwrap_or_else(|| std::env::var("GEMINI_API_KEY").unwrap_or_default());
+            if key.is_empty() {
+                eprintln!(
+                    "{}: provider 'gemini' requires --api-key or GEMINI_API_KEY",
+                    "\x1b[33mwarning\x1b[0m"
+                );
+            }
+            let model = if cfg.model == "rem-coder:latest" || cfg.model == "rem-coder" {
+                "gemini-2.0-flash".to_string()
+            } else {
+                cfg.model.clone()
+            };
+            Ok(Provider::new_gemini(
+                key,
+                model,
+                cfg.timeout_s,
+                system_prompt,
+                cfg.model_ctx,
+            ))
+        }
+        ProviderKind::Anthropic => {
+            let key = cfg
+                .api_key
+                .clone()
+                .unwrap_or_else(|| std::env::var("ANTHROPIC_API_KEY").unwrap_or_default());
+            if key.is_empty() {
+                eprintln!(
+                    "{}: provider 'anthropic' requires --api-key or ANTHROPIC_API_KEY",
+                    "\x1b[33mwarning\x1b[0m"
+                );
+            }
+            let model = if cfg.model == "rem-coder:latest" || cfg.model == "rem-coder" {
+                "claude-sonnet-4-20250514".to_string()
+            } else {
+                cfg.model.clone()
+            };
+            Ok(Provider::new_anthropic(
+                key,
+                model,
+                cfg.timeout_s,
+                system_prompt,
+                cfg.model_ctx,
+            ))
+        }
+        _ => {
+            let base_url = cfg
+                .api_url
+                .clone()
+                .unwrap_or_else(|| cfg.ollama_url.clone());
+            Ok(Provider::new_ollama(
+                base_url,
+                cfg.model.clone(),
+                cfg.timeout_s,
+                system_prompt,
+                cfg.model_ctx,
+            ))
+        }
+    }
 }
 
 fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
@@ -1132,27 +1190,9 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
                 TaskIntent::WebNeeded => CHAT_SYSTEM_PROMPT_CONVERSATIONAL,
                 TaskIntent::CodeAction => unreachable!(),
             };
-            let inline_prompt = format!("{}\n\nUser: {}\n\nREM:", system_prompt, composed);
-            let url = api_url(&cfg.ollama_url, "generate");
-            let payload = json!({
-                "model": &client.model,
-                "prompt": inline_prompt,
-                "stream": false
-            });
-            let resp = client
-                .client
-                .post(&url)
-                .json(&payload)
-                .send()
-                .await
-                .context("failed to call Ollama")?;
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(anyhow!("Ollama error: {}", body));
-            }
-            let raw: OllamaJsonResponse = resp.json().await.context("invalid Ollama response")?;
+            let text = client.complete_chat_stream(&composed, system_prompt, "").await?;
             Ok(ModelReply {
-                explanation: raw.response.trim().to_string(),
+                explanation: text.trim().to_string(),
                 code: String::new(),
                 files: vec![],
                 commands: vec![],
@@ -1213,7 +1253,7 @@ async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArgs) -> Resul
 
 fn print_welcome(client: &Provider) {
     println!();
-    ui::header::render(&client.model, "CHAT");
+    ui::header::render(&client.provider_label(), "CHAT");
     println!();
 }
 
@@ -1329,6 +1369,10 @@ fn build_prompt(session: &ChatSession, client: &Provider) -> String {
     let t = ui::theme::active();
     let model_short = client.model.split(':').next().unwrap_or(&client.model);
     let mode_key = ui::theme::accent_for_mode(session.mode.label());
+    let provider_prefix = match client.kind {
+        ProviderKind::Ollama => "",
+        _ => client.kind.as_str(),
+    };
     let mut p = String::new();
     p.push('\x01');
     p.push_str(t.fg(mode_key));
@@ -1341,6 +1385,10 @@ fn build_prompt(session: &ChatSession, client: &Provider) -> String {
     p.push('\x01');
     p.push_str(t.fg("accent"));
     p.push('\x02');
+    if !provider_prefix.is_empty() {
+        p.push_str(provider_prefix);
+        p.push('/');
+    }
     p.push_str(model_short);
     p.push('>');
     p.push_str("\x01\x1b[0m\x02");
@@ -1348,7 +1396,7 @@ fn build_prompt(session: &ChatSession, client: &Provider) -> String {
     p
 }
 
-async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Result<()> {
+async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> Result<()> {
     reset_ctrlc_count();
 
     let workspace = if let Some(ref dir) = cfg.workspace_dir {
@@ -1408,6 +1456,101 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
 
         if trimmed.eq_ignore_ascii_case("/help") || trimmed.eq_ignore_ascii_case("help") {
             print_chat_help();
+            continue;
+        }
+
+        if trimmed.eq_ignore_ascii_case("/theme") {
+            let themes = ui::theme::list_names();
+            println!("{}", ui::theme::paint_rail_empty(&t));
+            println!("{} {}", ui::theme::paint_rail_empty(&t), ui::theme::paint_bright(&t, "themes"));
+            println!("{}", ui::theme::paint_rail_empty(&t));
+            for name in &themes {
+                let preview = ui::theme::by_name(name);
+                let is_active = name == &t.name;
+                let marker = if is_active { "\u{25C8}" } else { "\u{25C7}" };
+                let accent = ui::theme::paint(&preview, "accent", marker, true);
+                let label = if is_active {
+                    ui::theme::paint_bright(&preview, &format!(" {} (active)", name))
+                } else {
+                    ui::theme::paint(&preview, "accent_dim", &format!(" {}", name), false)
+                };
+                let swatch = ui::theme::paint_on(&preview, "accent", "surface", "  ", false);
+                println!("{accent} {label}  {swatch}");
+            }
+            println!("{}", ui::theme::paint_rail_empty(&t));
+            println!("{} {}", ui::theme::paint_rail_empty(&t), ui::theme::paint_dim(&t, "use /theme <name> to switch"));
+            println!("{}", ui::theme::paint_rail_empty(&t));
+            continue;
+        }
+        if let Some(tail) = trimmed.strip_prefix("/theme ") {
+            let name = tail.trim();
+            if ui::theme::set_active(name) {
+                let active_theme = ui::theme::active();
+                let rail = ui::theme::paint_rail_empty(&t);
+                let msg = ui::theme::paint_success_label(&t, &format!("theme \u{2192} {}", active_theme.name));
+                println!("{rail}");
+                println!("{rail} {msg}");
+                println!("{rail}");
+            } else {
+                let rail = ui::theme::paint_rail_empty(&t);
+                let msg = ui::theme::paint_warning(&t, &format!("unknown theme '{}'", name));
+                println!("{rail} {msg}");
+                println!("{rail} {}", ui::theme::paint_dim(&t, "available: GHOST, PHOSPHOR, MIST, EMBER, SAKURA, PAPER"));
+                println!("{rail}");
+            }
+            continue;
+        }
+
+        if let Some(tail) = trimmed.strip_prefix("/model ") {
+            let new_model = tail.trim().to_string();
+            if new_model.is_empty() {
+                println!("{} model: {}", ui::theme::paint_rail_empty(&t), client.model);
+            } else {
+                client.set_model(new_model.clone());
+                cfg.model = new_model;
+                let _ = save_config(cfg);
+                let rail = ui::theme::paint_rail_empty(&t);
+                let msg = ui::theme::paint_success_label(&t, &format!("model \u{2192} {}", client.model));
+                println!("{rail}");
+                println!("{rail} {msg}");
+                println!("{rail}");
+            }
+            continue;
+        }
+
+        if let Some(tail) = trimmed.strip_prefix("/provider ") {
+            let new_provider = tail.trim().to_lowercase();
+            if new_provider.is_empty() {
+                let rail = ui::theme::paint_rail_empty(&t);
+                let label = ui::theme::paint_bright(&t, "current provider:");
+                let val = ui::theme::paint_dim(&t, &client.kind.as_str());
+                println!("{rail}");
+                println!("{rail} {label} {val}");
+                println!("{rail}");
+                continue;
+            }
+            cfg.provider = new_provider;
+            let _ = save_config(cfg);
+            // Rebuild provider with new config
+            let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
+            match build_provider(cfg, system_prompt) {
+                Ok(new_client) => {
+                    *client = new_client;
+                    let rail = ui::theme::paint_rail_empty(&t);
+                    let msg = ui::theme::paint_success_label(&t, &format!("provider \u{2192} {}", client.kind.as_str()));
+                    println!("{rail}");
+                    println!("{rail} {msg}");
+                    let model_msg = ui::theme::paint_dim(&t, &format!("model: {}", client.model));
+                    println!("{rail}  {model_msg}");
+                    println!("{rail}");
+                }
+                Err(e) => {
+                    let rail = ui::theme::paint_rail_empty(&t);
+                    let msg = ui::theme::paint_error_label(&t, &format!("failed to switch provider: {}", e));
+                    println!("{rail} {msg}");
+                    println!("{rail}");
+                }
+            }
             continue;
         }
 
@@ -1743,9 +1886,11 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
             p
         };
 
-        let rail = ui::theme::paint(&t, "accent", "\u{258C}", true);
-        let header = ui::theme::paint_dim(&t, "\u{2500}\u{2500} rem \u{2500}\u{2500}");
-        println!("{rail} {header}");
+        let label = ui::theme::paint(&t, "accent", "\u{258C}", true);
+        let model_tag = ui::theme::paint(&t, "accent", &client.model, false);
+        let mode_tag = ui::theme::paint_chip(&t, session.mode.label());
+        let dot = ui::theme::paint_dim(&t, "\u{00B7}");
+        println!("{label} {model_tag} {dot} {mode_tag}");
 
         let start = std::time::Instant::now();
         let _chat_spinner = SpinnerGuard::new("REM is writing...");
@@ -1820,11 +1965,11 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                 let treat_as_code =
                     intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
 
+                let rail_chr = || ui::theme::paint(&t, "accent", "\u{258C}", true);
+
                 if treat_as_code {
                     let code = extract_code_block(&cleaned);
                     let files = extract_code_blocks_with_names(&cleaned);
-
-                    let rail_chr = || ui::theme::paint(&t, "accent", "\u{258C}", true);
 
                     if !files.is_empty() {
                         session.last_files = files.clone();
@@ -1843,7 +1988,6 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                             }
                         }
                         println!("{}", rail_chr());
-
                         auto_write_files(&mut session, &files);
                     } else if !code.is_empty() {
                         session.last_code = code;
@@ -1856,22 +2000,29 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                         for line in cleaned.lines() {
                             println!("{} {}", rail_chr(), line);
                         }
-                        let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
-                        println!("{}", rail_chr());
-                        println!("{} {}", rail_chr(), timer);
                     }
                 } else if cleaned.is_empty() {
-                    let warn_chr = ui::theme::paint_warning(&t, "\u{258C}");
-                    let empty = ui::theme::paint_dim(&t, "(empty response)");
-                    println!("{warn_chr} {empty}");
+                    println!("{} {}", ui::theme::paint_warning(&t, "\u{258C}"), ui::theme::paint_dim(&t, "(empty response)"));
                 } else {
                     for line in cleaned.lines() {
-                        println!("{} {}", ui::theme::paint(&t, "accent", "\u{258C}", true), line);
+                        println!("{} {}", rail_chr(), line);
                     }
-                    let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
-                    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-                    println!("{} {}", ui::theme::paint(&t, "accent", "\u{258C}", true), timer);
                 }
+
+                let tps = if elapsed.as_secs_f64() > 0.0 {
+                    session.last_tokens as f64 / elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
+
+                let rail = ui::theme::paint_rail_empty(&t);
+                let provider_tag = ui::theme::paint_chip(&t, client.kind.as_str());
+                let dur = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                let speed = ui::theme::paint_dim(&t, &format!("{:.0} tok/s", tps));
+                let dot = ui::theme::paint_dim(&t, "\u{00B7}");
+                println!("{rail}");
+                println!("{rail} {provider_tag} {dot} {dur} {dot} {speed}");
+                println!("{rail}");
 
                 if !cleaned.is_empty() {
                     session.history.push((trimmed.to_string(), cleaned));
@@ -1879,14 +2030,16 @@ async fn run_chat(client: &Provider, cfg: &mut AppConfig, verbose: bool) -> Resu
                         session.history.remove(0);
                     }
                 }
-
-                println!("{}", ui::theme::paint_rail_empty(&t));
             }
             Err(e) => {
+                let rail = ui::theme::paint_rail_empty(&t);
+                let err_label = ui::theme::paint_error_label(&t, "\u{2717}");
+                let err_msg = ui::theme::paint(&t, "error", &e.to_string(), false);
                 let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
-                println!("{timer}");
-                eprintln!("  {} {}", ui::theme::paint_error_label(&t, "err:"), e);
-                println!("{}", ui::theme::paint_rail_empty(&t));
+                println!("{rail}");
+                println!("{rail} {err_label} {err_msg}");
+                println!("{rail} {timer}");
+                println!("{rail}");
             }
         }
     }
@@ -2749,13 +2902,19 @@ fn handle_config(session: &ChatSession, client: &Provider) {
     println!(
         "{}   {:<18} {}",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "provider:"),
+        ui::theme::paint_dim(&t, client.kind.as_str())
+    );
+    println!(
+        "{}   {:<18} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
         ui::theme::paint_bright(&t, "model:"),
         ui::theme::paint_dim(&t, &client.model)
     );
     println!(
         "{}   {:<18} {}",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "ollama url:"),
+        ui::theme::paint_bright(&t, "base url:"),
         ui::theme::paint_dim(&t, &client.base_url)
     );
     println!(
@@ -2781,7 +2940,7 @@ fn handle_config(session: &ChatSession, client: &Provider) {
     println!(
         "{} {}",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_dim(&t, "use /config model <name> to switch models")
+        ui::theme::paint_dim(&t, "/model <name>  /provider <name>  /config workspace <path>")
     );
     println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
 }
@@ -3747,6 +3906,8 @@ fn print_chat_help() {
     println!("{}", ui::theme::paint_help_line(&t, "/help", "show this help"));
     println!("{}", ui::theme::paint_help_line(&t, "/mode", "toggle CHAT \u{2192} CODE \u{2192} PLAN"));
     println!("{}", ui::theme::paint_help_line(&t, "/plan", "switch to PLAN mode (explore & analyze)"));
+    println!("{}", ui::theme::paint_help_line(&t, "/model <name>", "switch model (e.g. gpt-4, claude-sonnet-4)"));
+    println!("{}", ui::theme::paint_help_line(&t, "/provider <name>", "switch provider: ollama, openai, gemini, anthropic"));
     println!("{}", ui::theme::paint_help_line(&t, "/clear", "reset conversation history"));
     println!("{}", ui::theme::paint_help_line(&t, "/explain <code>", "explain what code does"));
     println!("{}", ui::theme::paint_help_line(&t, "/test <file>", "generate tests for a file"));
@@ -3762,6 +3923,7 @@ fn print_chat_help() {
     println!("{}", ui::theme::paint_help_line(&t, "/tokens", "show token usage & context stats"));
     println!("{}", ui::theme::paint_help_line(&t, "/config", "view current configuration"));
     println!("{}", ui::theme::paint_help_line(&t, "/memory", "view/set project memory (.rem/memory.md)"));
+    println!("{}", ui::theme::paint_help_line(&t, "/theme [name]", "show or switch color theme"));
     println!("{}", ui::theme::paint_help_line(&t, "/init", "auto-generate project memory file"));
     println!("{}", ui::theme::paint_help_line(&t, "/compact", "summarize & free context window"));
     println!("{}", ui::theme::paint_help_line(&t, "/goal <cond>", "autonomous loop until goal is met"));
@@ -3821,10 +3983,10 @@ fn print_banner(client: &Provider) {
     println!();
     ui::theme::println(&ui::theme::paint_rail(&t, "accent", "text_muted", "REM"));
     ui::theme::println(&format!(
-        "  {} {} {} {}",
+        "  {} {} {}  {}",
         ui::theme::paint(&t, "accent_dim", "\u{258C}", true),
-        ui::theme::paint(&t, "text_faint", "model", false),
-        ui::theme::paint(&t, "accent", &client.model, false),
+        ui::theme::paint(&t, "text_faint", "provider", false),
+        ui::theme::paint(&t, "accent", &client.provider_label(), false),
         ui::theme::paint(&t, "text_faint", "\u{00B7} type /help for commands", false)
     ));
 }
@@ -5222,6 +5384,7 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::api_url;
 
     #[test]
     fn blocks_dangerous_commands() {

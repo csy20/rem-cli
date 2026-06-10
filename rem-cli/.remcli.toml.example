@@ -2,13 +2,31 @@
 # ~/.config/rem-cli/config.toml for global defaults).
 # Keys here merge with (and override) the global config.
 
-model = "rem-coder:latest"     # or qwen2.5-coder:1.5b, etc.
+model = "rem-coder:latest"     # or qwen2.5-coder:1.5b, gpt-4o, gemini-2.0-flash, claude-sonnet-4-20250514, deepseek-chat, etc.
 ollama_url = "http://localhost:11434"
 timeout_s = 120
 max_context_bytes = 16000      # cap for injected context (@files + memory + retrieval)
 model_ctx = 4096               # num_ctx passed to the model; raise (e.g. 8192+) when using retrieval/index for larger codebases
 prompts_dir = "prompts"
 # workspace_dir = "/path/to/default/projects"   # set by first-run or /dir
-# provider = "ollama"                           # ollama | openai | vllm
-# api_url = "..."                               # for OpenAI-compatible
-# api_key = "..."                               # or use OPENAI_API_KEY env
+
+# ── Provider configuration ─────────────────────────────────────────────
+# Choose your LLM provider. Supported values:
+#   ollama   - local via Ollama (default)
+#   openai   - OpenAI or any OpenAI-compatible API (DeepSeek, Groq, etc.)
+#   gemini   - Google Gemini
+#   anthropic - Anthropic Claude
+#
+provider = "ollama"
+
+# For OpenAI-compatible providers (openai, deepseek, groq, etc.):
+#   api_url = "https://api.openai.com/v1"      # OpenAI
+#   api_url = "https://api.deepseek.com/v1"    # DeepSeek
+#   api_url = "https://api.groq.com/openai/v1"  # Groq
+#   api_key = "sk-..."                          # or use OPENAI_API_KEY env
+
+# For Gemini:
+#   api_key = "AIza..."   # or use GEMINI_API_KEY env
+
+# For Anthropic:
+#   api_key = "sk-ant-..."  # or use ANTHROPIC_API_KEY env

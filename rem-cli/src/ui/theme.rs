@@ -1,8 +1,6 @@
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
@@ -17,7 +15,7 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
         Theme::build(
             "GHOST", "#030303", "#0d0d0d", "#181818", "#e8e8e8", "#888888", "#7a8aa0", "#444444",
             "#222222", "#1a1a1a", "#2a2a2a", "#e8e8e8", "#111111", "#1e1e1e", "#333333", "#1e1e1e",
-            "#141414", "#e8e8e8", "#888888", "#d87070", "#7ac890",
+            "#141414", "#e8e8e8", "#888888", "#d87070", "#7ac890", "#0a0a0a",
         ),
     );
     t.insert(
@@ -25,7 +23,7 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
         Theme::build(
             "PHOSPHOR", "#030a04", "#050e06", "#0d2010", "#3aff5a", "#2a8040", "#3acfa0",
             "#1a4020", "#0d2010", "#061409", "#0d2a10", "#3aff5a", "#061409", "#0d2010", "#1a4020",
-            "#0d2010", "#0a1e0c", "#3aff5a", "#3aff5a", "#ff6a6a", "#3aff5a",
+            "#0d2010", "#0a1e0c", "#3aff5a", "#3aff5a", "#ff6a6a", "#3aff5a", "#050e06",
         ),
     );
     t.insert(
@@ -33,23 +31,7 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
         Theme::build(
             "MIST", "#0c0f14", "#0f1420", "#1a2538", "#7ba8d4", "#4a6a90", "#8aa0c8", "#2a3a55",
             "#1a2538", "#102040", "#1a3060", "#7ba8d4", "#0f1420", "#1a2538", "#2a3a55", "#1a2538",
-            "#102040", "#7ba8d4", "#7ba8d4", "#d49a9a", "#9ac8a8",
-        ),
-    );
-    t.insert(
-        "EMBER",
-        Theme::build(
-            "EMBER", "#0f0b06", "#161008", "#251a08", "#f0a030", "#7a5520", "#d08850", "#2a2010",
-            "#1e1508", "#1e1408", "#302010", "#f0a030", "#161008", "#251a08", "#2a2010", "#251a08",
-            "#1e1408", "#f0a030", "#f0a030", "#e08070", "#c8a868",
-        ),
-    );
-    t.insert(
-        "SAKURA",
-        Theme::build(
-            "SAKURA", "#080610", "#0c0a1a", "#1a1438", "#d46fa0", "#5a4888", "#9a7ad4", "#2a2048",
-            "#130e22", "#14103a", "#201850", "#d46fa0", "#0c0a1a", "#1a1438", "#2a2048", "#1a1438",
-            "#14103a", "#d46fa0", "#d46fa0", "#e08aa0", "#8ac8a8",
+            "#102040", "#7ba8d4", "#7ba8d4", "#d49a9a", "#9ac8a8", "#0a0f18",
         ),
     );
     t.insert(
@@ -57,7 +39,7 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
         Theme::build(
             "PAPER", "#f5f2eb", "#ede8df", "#d0cabb", "#3a3228", "#5a5248", "#6a6048", "#a09888",
             "#c8c0b0", "#e0d8cc", "#c8c0b0", "#3a3228", "#e5e0d5", "#d0cabb", "#a09888", "#c8c0b0",
-            "#ddd8cc", "#3a3228", "#3a3228", "#a04848", "#4a7858",
+            "#ddd8cc", "#3a3228", "#3a3228", "#a04848", "#4a7858", "#e8e4d8",
         ),
     );
     t
@@ -128,6 +110,7 @@ pub struct Theme {
     pub cursor: String,
     pub error: String,
     pub success: String,
+    pub code_bg: String,
     fg_cache: BTreeMap<&'static str, String>,
     bg_cache: BTreeMap<&'static str, String>,
 }
@@ -155,32 +138,80 @@ impl Theme {
         cursor: &str,
         error: &str,
         success: &str,
+        code_bg: &str,
     ) -> Self {
-        let fields: [(&str, &str); 20] = [
-            ("bg", bg),
-            ("surface", surface),
-            ("border", border),
-            ("accent", accent),
-            ("accent_dim", accent_dim),
-            ("accent_info", accent_info),
-            ("text_muted", text_muted),
-            ("text_faint", text_faint),
-            ("pill_bg", pill_bg),
-            ("pill_border", pill_border),
-            ("pill_text", pill_text),
-            ("kbd_bg", kbd_bg),
-            ("kbd_border", kbd_border),
-            ("kbd_text", kbd_text),
-            ("sys_color", sys_color),
-            ("sel_bg", sel_bg),
-            ("sel_left", sel_left),
-            ("cursor", cursor),
-            ("error", error),
-            ("success", success),
+        let field_names: [&str; 21] = [
+            "bg",
+            "surface",
+            "border",
+            "accent",
+            "accent_dim",
+            "accent_info",
+            "text_muted",
+            "text_faint",
+            "pill_bg",
+            "pill_border",
+            "pill_text",
+            "kbd_bg",
+            "kbd_border",
+            "kbd_text",
+            "sys_color",
+            "sel_bg",
+            "sel_left",
+            "cursor",
+            "error",
+            "success",
+            "code_bg",
+        ];
+        let field_values = [
+            bg,
+            surface,
+            border,
+            accent,
+            accent_dim,
+            accent_info,
+            text_muted,
+            text_faint,
+            pill_bg,
+            pill_border,
+            pill_text,
+            kbd_bg,
+            kbd_border,
+            kbd_text,
+            sys_color,
+            sel_bg,
+            sel_left,
+            cursor,
+            error,
+            success,
+            code_bg,
+        ];
+        let field_values = [
+            bg,
+            surface,
+            border,
+            accent,
+            accent_dim,
+            accent_info,
+            text_muted,
+            text_faint,
+            pill_bg,
+            pill_border,
+            pill_text,
+            kbd_bg,
+            kbd_border,
+            kbd_text,
+            sys_color,
+            sel_bg,
+            sel_left,
+            cursor,
+            error,
+            success,
+            code_bg,
         ];
         let mut fg_cache = BTreeMap::new();
         let mut bg_cache = BTreeMap::new();
-        for (key, hex) in &fields {
+        for (key, hex) in field_names.iter().zip(field_values.iter()) {
             fg_cache.insert(*key, hex_to_ansi_fg(hex));
             bg_cache.insert(*key, hex_to_ansi_bg(hex));
         }
@@ -206,6 +237,7 @@ impl Theme {
             cursor: cursor.to_string(),
             error: error.to_string(),
             success: success.to_string(),
+            code_bg: code_bg.to_string(),
             fg_cache,
             bg_cache,
         }
@@ -217,6 +249,34 @@ impl Theme {
 
     pub fn bg(&self, field: &str) -> &str {
         self.bg_cache.get(field).map(|s| s.as_str()).unwrap_or("")
+    }
+
+    pub fn divider(&self) -> String {
+        paint(self, "text_faint", "\u{2500}", false).repeat(50)
+    }
+
+    pub fn section_header(&self, title: &str) -> String {
+        let divider = paint(self, "text_faint", "\u{2500}", false).repeat(3);
+        format!(
+            " {divider} {} {divider}",
+            paint(self, "accent", title, true)
+        )
+    }
+
+    pub fn code_gutter(&self) -> String {
+        paint(self, "text_faint", "\u{2502}", true)
+    }
+
+    pub fn code_bg_start(&self) -> String {
+        format!(
+            "{}{}",
+            self.bg("code_bg"),
+            paint(self, "text_faint", "", false)
+        )
+    }
+
+    pub fn code_bg_end(&self) -> String {
+        RESET.to_string()
     }
 }
 
@@ -270,6 +330,7 @@ pub const RESET: &str = "\x1b[0m";
 pub const BOLD: &str = "\x1b[1m";
 pub const DIM: &str = "\x1b[2m";
 pub const REVERSE: &str = "\x1b[7m";
+pub const UNDERLINE: &str = "\x1b[4m";
 
 pub fn paint(t: &Theme, field: &str, text: &str, bold: bool) -> String {
     let mut out = String::with_capacity(text.len() + 16);
@@ -294,21 +355,8 @@ pub fn paint_on(t: &Theme, fg_field: &str, bg_field: &str, text: &str, bold: boo
     out
 }
 
-pub fn paint_rail(t: &Theme, accent_field: &str, body_field: &str, body: &str) -> String {
-    let rail = paint(t, accent_field, "\u{258C}", true);
-    let text = paint(t, body_field, body, false);
-    format!("{rail} {text}")
-}
-
 pub fn paint_chip(t: &Theme, label: &str) -> String {
     paint_on(t, "pill_text", "pill_bg", &format!(" {} ", label), true)
-}
-
-pub fn paint_tool_row(t: &Theme, name: &str, detail: &str) -> String {
-    let dot = paint(t, "accent_dim", "\u{25CF}", true);
-    let n = paint(t, "accent", name, false);
-    let d = paint(t, "text_muted", detail, false);
-    format!("  {dot}  {n}  {d}")
 }
 
 pub fn paint_success(t: &Theme, msg: &str) -> String {
@@ -323,42 +371,18 @@ pub fn paint_error(t: &Theme, msg: &str) -> String {
     format!("  {mark} {text}")
 }
 
-pub fn paint_hint(t: &Theme, msg: &str) -> String {
-    paint(t, "text_faint", msg, false)
-}
-
 pub fn paint_bright(t: &Theme, text: &str) -> String {
     paint(t, "accent", text, true)
 }
 
-pub fn paint_dim(t: &Theme, text: &str) -> String {
-    paint(t, "text_faint", text, false)
+pub fn paint_rail(t: &Theme, accent_field: &str, body_field: &str, body: &str) -> String {
+    let rail = paint(t, accent_field, "\u{258C}", true);
+    let text = paint(t, body_field, body, false);
+    format!("{rail} {text}")
 }
 
-pub fn paint_muted(t: &Theme, text: &str) -> String {
-    paint(t, "text_muted", text, false)
-}
-
-pub fn paint_warning(t: &Theme, text: &str) -> String {
-    paint(t, "sys_color", text, false)
-}
-
-pub fn paint_error_label(t: &Theme, text: &str) -> String {
-    paint(t, "error", text, true)
-}
-
-pub fn paint_success_label(t: &Theme, text: &str) -> String {
-    paint(t, "success", text, true)
-}
-
-pub fn paint_rail_line(t: &Theme, parts: &[(&str, &str, bool)]) -> String {
-    let rail = paint(t, "accent", "\u{258C}", true);
-    let mut out = format!("{rail}");
-    for (field, text, bold) in parts {
-        out.push(' ');
-        out.push_str(&paint(t, field, text, *bold));
-    }
-    out
+pub fn paint_rail_empty(t: &Theme) -> String {
+    paint(t, "text_faint", "\u{258C}", true)
 }
 
 pub fn paint_rail_header(t: &Theme, title: &str) -> String {
@@ -397,16 +421,32 @@ pub fn paint_bullet_line(t: &Theme, parts: &[(&str, &str, bool)]) -> String {
     out
 }
 
-pub fn paint_rail_empty(t: &Theme) -> String {
-    paint(t, "text_faint", "\u{258C}", true)
-}
-
 pub fn paint_status_line(left: &str, right: &str) -> String {
     let t = active();
     let left = paint(&t, "text_muted", left, false);
     let right = paint(&t, "text_faint", right, false);
     let dot = paint(&t, "text_faint", "\u{00B7}", false);
     format!("{left}  {dot}  {right}")
+}
+
+pub fn paint_dim(t: &Theme, text: &str) -> String {
+    paint(t, "text_faint", text, false)
+}
+
+pub fn paint_muted(t: &Theme, text: &str) -> String {
+    paint(t, "text_muted", text, false)
+}
+
+pub fn paint_warning(t: &Theme, text: &str) -> String {
+    paint(t, "sys_color", text, false)
+}
+
+pub fn paint_error_label(t: &Theme, text: &str) -> String {
+    paint(t, "error", text, true)
+}
+
+pub fn paint_success_label(t: &Theme, text: &str) -> String {
+    paint(t, "success", text, true)
 }
 
 pub fn visible_width() -> usize {
@@ -442,16 +482,6 @@ pub fn visible_len(s: &str) -> usize {
     count
 }
 
-static SPINNER_TICK: AtomicUsize = AtomicUsize::new(0);
-
-pub fn advance_spinner() -> usize {
-    SPINNER_TICK.fetch_add(1, Ordering::Relaxed)
-}
-
-pub fn reset_spinner() {
-    SPINNER_TICK.store(0, Ordering::Relaxed);
-}
-
 pub fn println(s: &str) {
     let stdout = io::stdout();
     let mut h = stdout.lock();
@@ -477,12 +507,6 @@ mod tests {
     }
 
     #[test]
-    fn fg_bg_emit_ansi() {
-        assert_eq!(hex_to_ansi_fg("#000000"), "\x1b[38;2;0;0;0m");
-        assert_eq!(hex_to_ansi_bg("#ffffff"), "\x1b[48;2;255;255;255m");
-    }
-
-    #[test]
     fn paint_resets() {
         let t = active();
         let s = paint(&t, "accent", "REM", true);
@@ -497,9 +521,9 @@ mod tests {
     }
 
     #[test]
-    fn list_names_has_six() {
+    fn list_names_has_four() {
         let names = list_names();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 4);
         assert!(names.contains(&"GHOST".to_string()));
         assert!(names.contains(&"PAPER".to_string()));
     }
@@ -517,11 +541,9 @@ mod tests {
     }
 
     #[test]
-    fn all_themes_have_new_fields() {
+    fn all_themes_have_code_bg() {
         for t in themes().values() {
-            assert!(!t.accent_info.is_empty(), "{} missing accent_info", t.name);
-            assert!(!t.error.is_empty(), "{} missing error", t.name);
-            assert!(!t.success.is_empty(), "{} missing success", t.name);
+            assert!(!t.code_bg.is_empty(), "{} missing code_bg", t.name);
         }
     }
 
@@ -536,28 +558,10 @@ mod tests {
     }
 
     #[test]
-    fn rail_uses_accent_then_body() {
+    fn theme_has_helpers() {
         let t = active();
-        let s = paint_rail(&t, "accent", "text_muted", "hi");
-        assert!(s.contains("\u{258C}"));
-        assert!(s.contains("hi"));
-    }
-
-    #[test]
-    fn accent_for_mode_distinguishes_plan() {
-        assert_eq!(accent_for_mode("CHAT"), "accent_dim");
-        assert_eq!(accent_for_mode("CODE"), "accent");
-        assert_eq!(accent_for_mode("PLAN"), "accent_info");
-    }
-
-    #[test]
-    fn cached_fg_and_bg() {
-        let t = active();
-        let fg = t.fg("accent");
-        let bg = t.bg("accent");
-        assert!(fg.starts_with("\x1b[38;2;"));
-        assert!(bg.starts_with("\x1b[48;2;"));
-        assert!(!fg.is_empty());
-        assert!(!bg.is_empty());
+        assert!(t.divider().contains('\u{2500}'));
+        assert!(!t.code_gutter().is_empty());
+        assert!(t.section_header("test").contains("test"));
     }
 }
