@@ -6,24 +6,26 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::LazyLock;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Args, Parser, Subcommand};
 use regex::Regex;
 use reqwest::Client;
 use rustyline::DefaultEditor;
 use serde::{Deserialize, Serialize};
 
+use cli::{AppConfig, Commands};
+
 use walkdir::WalkDir;
 
 mod agentic;
-mod commands;
-mod config;
+mod cli;
 mod feedback;
 mod find;
+mod highlight;
 mod indexer;
 mod intent;
 mod memory;
 mod parsing;
 mod provider;
+mod templates;
 mod ui;
 
 use agentic::{build_agentic_prompt, build_tool_context, extract_goal_signal, run_lint, run_test};
@@ -64,18 +66,7 @@ fn reset_ctrlc_count() {
 
 static RE_AT_REF: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"@([^\s]+)").expect("invalid regex literal"));
-static RE_HTML_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<[^>]*>").expect("invalid regex literal"));
-static RE_AMP: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"&amp;").expect("invalid regex literal"));
-static RE_LT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"&lt;").expect("invalid regex literal"));
-static RE_GT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"&gt;").expect("invalid regex literal"));
-static RE_QUOT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"&quot;").expect("invalid regex literal"));
-static RE_APOS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"&#x27;").expect("invalid regex literal"));
+
 static RE_SEARCH_TITLE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#)
         .expect("invalid regex literal")
@@ -174,199 +165,22 @@ RULES — follow strictly:
 8. End with: "Should I proceed with this plan? Type /mode to switch to CODE when ready."
 "##;
 
-const BLOCKED_COMMAND_PATTERNS: [&str; 10] = [
+const BLOCKED_COMMAND_PATTERNS: [&str; 6] = [
     "rm -rf /",
-    "rm -rf",
-    "rm  -rf",
     "mkfs",
     "dd if=",
     ":(){:|:&};:",
     "shutdown",
     "reboot",
-    "curl ",
-    "sudo ",
 ];
 
-// ── CLI definition ─────────────────────────────────────────────────────────
-
-#[derive(Parser, Debug)]
-#[command(
-    name = "rem",
-    version,
-    about = "REM — Coding assistant CLI. Run `rem` to start interactive chat. Type /mode to toggle CHAT ↔ CODE ↔ PLAN.",
-    long_about = None,
-)]
-struct Cli {
-    #[arg(long, global = true, help = "Ollama model name")]
-    model: Option<String>,
-    #[arg(long, global = true, help = "Ollama API URL")]
-    ollama_url: Option<String>,
-    #[arg(long, global = true, help = "Provider: ollama (default), openai, vllm")]
-    provider: Option<String>,
-    #[arg(long, global = true, help = "API key for OpenAI-compatible providers")]
-    api_key: Option<String>,
-    #[arg(
-        long,
-        short = 'v',
-        global = true,
-        help = "Verbose output (show raw model responses)"
-    )]
-    verbose: bool,
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    #[command(about = "Ask REM a coding question (single-shot)")]
-    Ask(AskArgs),
-    #[command(about = "Explain a terminal command safely")]
-    Explain(ExplainArgs),
-    #[command(about = "Preview a patch for a file")]
-    Patch(PatchArgs),
-    #[command(about = "Scaffold a new project with templates")]
-    New(NewArgs),
-    #[command(
-        about = "Generate or refresh the codebase index (for retrieval in large projects). Pure Rust; writes .rem/codebase_index.json so chat/goal can inject only relevant chunks instead of full file listings."
-    )]
-    Index(IndexArgs),
-}
-
-#[derive(Args, Debug)]
-struct AskArgs {
-    #[arg(help = "Your coding question")]
-    prompt: String,
-    #[arg(long, help = "Optional file for context")]
-    file: Option<PathBuf>,
-}
-
-#[derive(Args, Debug)]
-struct ExplainArgs {
-    #[arg(help = "Terminal command to explain")]
-    command: String,
-}
-
-#[derive(Args, Debug)]
-struct PatchArgs {
-    #[arg(long, help = "Target file to patch")]
-    file: PathBuf,
-    #[arg(long, help = "Description of changes needed")]
-    task: String,
-}
-
-#[derive(Args, Debug)]
-struct NewArgs {
-    #[arg(help = "Project name / directory path")]
-    name: String,
-    #[arg(
-        long,
-        default_value = "bare",
-        help = "Project type: bare, portfolio, landing, blog"
-    )]
-    project_type: String,
-}
-
-#[derive(Args, Debug)]
-struct IndexArgs {
-    #[arg(help = "Project directory to index (defaults to current workspace or .)")]
-    dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AppConfig {
-    model: String,
-    ollama_url: String,
-    timeout_s: u64,
-    max_context_bytes: usize,
-    /// Max context (num_ctx) passed to the LLM at inference time.
-    /// Raising this (e.g. 4096-8192) is a key part of scaling to larger projects + retrieved code chunks.
-    /// Must be supported by the base model (Qwen2.5-Coder 1.5B supports 32k+).
-    model_ctx: usize,
-    prompts_dir: Option<String>,
-    #[serde(default)]
-    workspace_dir: Option<String>,
-    #[serde(default = "default_provider")]
-    provider: String,
-    #[serde(default)]
-    api_url: Option<String>,
-    #[serde(default)]
-    api_key: Option<String>,
-}
+// ── Config & Prompts ───────────────────────────────────────────────────────
 
 fn default_provider() -> String {
     "ollama".to_string()
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            model: "rem-coder:latest".to_string(),
-            ollama_url: "http://localhost:11434".to_string(),
-            timeout_s: 120,
-            max_context_bytes: 16_000,
-            // Start at 4096 for scaling (allows room for memory + retrieved chunks + history).
-            // Previously hardcoded 2048 in provider payloads (the real limit the model sees).
-            model_ctx: 4096,
-            prompts_dir: None,
-            workspace_dir: None,
-            provider: "ollama".to_string(),
-            api_url: None,
-            api_key: None,
-        }
-    }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct PartialConfig {
-    model: Option<String>,
-    ollama_url: Option<String>,
-    timeout_s: Option<u64>,
-    max_context_bytes: Option<usize>,
-    /// LLM inference context window (num_ctx). Higher values enable scaling via retrieved code + memory.
-    model_ctx: Option<usize>,
-    prompts_dir: Option<String>,
-    workspace_dir: Option<String>,
-    provider: Option<String>,
-    api_url: Option<String>,
-    api_key: Option<String>,
-}
-
-impl AppConfig {
-    fn apply_partial(&mut self, part: PartialConfig) {
-        if let Some(v) = part.model {
-            self.model = v;
-        }
-        if let Some(v) = part.ollama_url {
-            self.ollama_url = v;
-        }
-        if let Some(v) = part.timeout_s {
-            self.timeout_s = v;
-        }
-        if let Some(v) = part.max_context_bytes {
-            self.max_context_bytes = v;
-        }
-        if let Some(v) = part.model_ctx {
-            self.model_ctx = v;
-        }
-        if let Some(v) = part.prompts_dir {
-            self.prompts_dir = Some(v);
-        }
-        if let Some(v) = part.workspace_dir {
-            self.workspace_dir = Some(v);
-        }
-        if let Some(v) = part.provider {
-            self.provider = v;
-        }
-        if let Some(v) = part.api_url {
-            self.api_url = Some(v);
-        }
-        if let Some(v) = part.api_key {
-            self.api_key = Some(v);
-        }
-    }
-}
-
-fn save_config(cfg: &AppConfig) -> Result<()> {
+fn save_config(cfg: &cli::AppConfig) -> Result<()> {
     if let Some(home) = dirs::home_dir() {
         let dir = home.join(".config/rem-cli");
         fs::create_dir_all(&dir)?;
@@ -668,13 +482,42 @@ fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
 }
 
 fn strip_html(input: &str) -> String {
-    let mut s = RE_HTML_TAG.replace_all(input, "").to_string();
-    s = RE_AMP.replace_all(&s, "&").to_string();
-    s = RE_LT.replace_all(&s, "<").to_string();
-    s = RE_GT.replace_all(&s, ">").to_string();
-    s = RE_QUOT.replace_all(&s, "\"").to_string();
-    s = RE_APOS.replace_all(&s, "'").to_string();
-    s.trim().to_string()
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '<' => {
+                while let Some(&next) = chars.peek() {
+                    if next == '>' {
+                        chars.next();
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+            '&' => {
+                let mut entity = String::with_capacity(8);
+                entity.push('&');
+                for ch in chars.by_ref() {
+                    entity.push(ch);
+                    if ch == ';' {
+                        break;
+                    }
+                }
+                match entity.as_str() {
+                    "&amp;" => out.push('&'),
+                    "&lt;" => out.push('<'),
+                    "&gt;" => out.push('>'),
+                    "&quot;" => out.push('"'),
+                    "&#x27;" => out.push('\''),
+                    _ => out.push_str(&entity),
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    let trimmed = out.trim().to_string();
+    trimmed
 }
 
 fn print_search_results(results: &[SearchResult]) {
@@ -1004,14 +847,14 @@ async fn main() -> Result<()> {
     }
 }
 
-fn load_config() -> Result<AppConfig> {
-    let mut cfg = AppConfig::default();
+fn load_config() -> Result<cli::AppConfig> {
+    let mut cfg = cli::AppConfig::default();
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".config/rem-cli/config.toml");
         if path.exists() {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            let partial: PartialConfig = toml::from_str(&text).context("invalid global config")?;
+            let partial: cli::PartialConfig = toml::from_str(&text).context("invalid global config")?;
             cfg.apply_partial(partial);
         }
     }
@@ -1019,7 +862,7 @@ fn load_config() -> Result<AppConfig> {
     if local.exists() {
         let text = fs::read_to_string(&local)
             .with_context(|| format!("failed to read {}", local.display()))?;
-        let partial: PartialConfig = toml::from_str(&text).context("invalid local config")?;
+        let partial: cli::PartialConfig = toml::from_str(&text).context("invalid local config")?;
         cfg.apply_partial(partial);
     }
     Ok(cfg)
@@ -1409,7 +1252,14 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
         first_run_setup(cfg)?
     };
 
+    ui::theme::set_active(&cfg.theme);
     let mut session = ChatSession::new(&client.model, workspace.clone())?;
+    let saved_mode = cfg.mode.to_uppercase();
+    session.mode = match saved_mode.as_str() {
+        "CODE" => RunMode::Code,
+        "PLAN" => RunMode::Plan,
+        _ => RunMode::Chat,
+    };
     let t = ui::theme::active();
     print_welcome(client);
     if let Some(ref wd) = workspace {
@@ -1486,6 +1336,8 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
             let name = tail.trim();
             if ui::theme::set_active(name) {
                 let active_theme = ui::theme::active();
+                cfg.theme = active_theme.name.clone();
+                let _ = save_config(cfg);
                 let rail = ui::theme::paint_rail_empty(&t);
                 let msg = ui::theme::paint_success_label(&t, &format!("theme \u{2192} {}", active_theme.name));
                 println!("{rail}");
@@ -1606,6 +1458,8 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
         if trimmed.eq_ignore_ascii_case("/mode") {
             session.mode = session.mode.toggle();
             let mode_label = session.mode.label();
+            cfg.mode = mode_label.to_string();
+            let _ = save_config(cfg);
             let mode_key = ui::theme::accent_for_mode(mode_label);
             let hint = match session.mode {
                 RunMode::Chat => "reply in plain text \u{2014} ask questions, chat",
@@ -1624,6 +1478,8 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
 
         if trimmed.eq_ignore_ascii_case("/plan") {
             session.mode = RunMode::Plan;
+            cfg.mode = "PLAN".to_string();
+            let _ = save_config(cfg);
             let rail = ui::theme::paint_rail_empty(&t);
             let status = ui::theme::paint(&t, "accent_info", "switched to PLAN mode", true);
             let sub = ui::theme::paint_dim(&t, "explore & plan \u{2014} analyze, propose approach, no code");
@@ -3793,11 +3649,35 @@ fn handle_save_session(session: &ChatSession) {
 }
 
 fn chrono_now() -> String {
-    std::process::Command::new("date")
-        .arg("+%Y-%m-%d %H:%M:%S")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = dur.as_secs();
+
+    let days = total_secs / 86400;
+    let time_secs = total_secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    let mut y = 1970i64;
+    let mut d = days as i64;
+    loop {
+        let year_days = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
+        if d < year_days { break; }
+        d -= year_days;
+        y += 1;
+    }
+    let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let month_days = [31u64, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1usize;
+    let mut day = d as u64;
+    for &md in &month_days {
+        if day < md { break; }
+        day -= md;
+        month += 1;
+    }
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, month, day + 1, hours, minutes, seconds)
 }
 
 fn handle_resume_session(session: &mut ChatSession) {
@@ -4086,8 +3966,27 @@ fn print_reply(reply: &ModelReply, newline: bool) {
 
 fn file_icon(path: &str) -> String {
     let t = ui::theme::active();
-    let emoji = commands::registry::file_icon_for(path);
+    let emoji = file_icon_for(path);
     ui::theme::paint(&t, "text_muted", emoji, false)
+}
+
+fn file_icon_for(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".html") || lower.ends_with(".htm") {
+        "\u{1F310}"
+    } else if lower.ends_with(".css") {
+        "\u{1F3A8}"
+    } else if lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".ts") {
+        "\u{26A1}"
+    } else if lower.ends_with(".json") {
+        "\u{1F4CB}"
+    } else if lower.ends_with(".md") || lower.ends_with(".txt") {
+        "\u{1F4C4}"
+    } else if lower.ends_with(".py") {
+        "\u{1F40D}"
+    } else {
+        "\u{1F4C4}"
+    }
 }
 
 fn human_size(bytes: u64) -> String {

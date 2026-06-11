@@ -8,8 +8,57 @@
 
 use std::io::{self, Read, Write};
 
-use crate::commands::registry::{Command, REGISTRY};
 use crate::ui::theme;
+
+#[derive(Debug, Clone)]
+pub struct Command {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub shortcut: &'static str,
+}
+
+pub const REGISTRY: &[Command] = &[
+    Command {
+        name: "/help",
+        description: "show all commands and keybindings",
+        shortcut: "?",
+    },
+    Command {
+        name: "/mode",
+        description: "switch CHAT <-> CODE <-> PLAN",
+        shortcut: "m",
+    },
+    Command {
+        name: "/model",
+        description: "change active model",
+        shortcut: "M",
+    },
+    Command {
+        name: "/theme",
+        description: "change color theme",
+        shortcut: "t",
+    },
+    Command {
+        name: "/clear",
+        description: "clear conversation history",
+        shortcut: "c",
+    },
+    Command {
+        name: "/find",
+        description: "search text inside the project",
+        shortcut: "f",
+    },
+    Command {
+        name: "/save",
+        description: "save session to file",
+        shortcut: "s",
+    },
+    Command {
+        name: "/exit",
+        description: "quit rem",
+        shortcut: "q",
+    },
+];
 
 /// Read a single raw keypress from stdin in non-canonical mode. Returns
 /// the byte (or multi-byte sequence) that was read, or `None` for ESC.

@@ -1,4 +1,8 @@
 use regex::Regex;
+use std::sync::LazyLock;
+
+static RE_BOLD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").expect("invalid regex literal"));
 
 pub fn extract_code_block(text: &str) -> String {
     let mut in_fence = false;
@@ -24,8 +28,7 @@ pub fn extract_code_block(text: &str) -> String {
 }
 
 pub fn current_name_from_bold(line: &str) -> Option<String> {
-    let re = Regex::new(r"\*\*(.+?)\*\*").ok()?;
-    if let Some(cap) = re.captures(line) {
+    if let Some(cap) = RE_BOLD.captures(line) {
         let name = cap.get(1)?.as_str().trim().to_lowercase();
         if name.contains('.') {
             return Some(name);

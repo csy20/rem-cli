@@ -33,6 +33,12 @@ pub struct OllamaJsonResponse {
     pub response: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OllamaStreamLine {
+    response: Option<String>,
+    done: Option<bool>,
+}
+
 // ── OpenAI-compatible response types ───────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -536,6 +542,7 @@ impl Provider {
         let mut stream = resp.bytes_stream();
         let mut full = String::new();
         let mut buf = String::new();
+        let mut cursor = 0usize;
 
         while let Some(chunk) = stream.next().await {
             if cancelled.load(Ordering::SeqCst) {
@@ -554,25 +561,31 @@ impl Provider {
                 ctrlc_task.abort();
                 return Err(anyhow!("response too large ({} bytes buffered)", buf.len()));
             }
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].to_string();
-                buf = buf[pos + 1..].to_string();
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                    if let Some(token) = obj["response"].as_str() {
-                        full.push_str(token);
-                    }
-                    if obj["done"].as_bool() == Some(true) {
-                        if cancelled.load(Ordering::SeqCst) {
-                            ctrlc_task.abort();
-                            break;
+            loop {
+                let tail = &buf[cursor..];
+                match tail.find('\n') {
+                    Some(pos) => {
+                        let line = &tail[..pos];
+                        cursor += pos + 1;
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
                         }
-                        ctrlc_task.abort();
-                        return Ok(full);
+                        if let Ok(obj) = serde_json::from_str::<OllamaStreamLine>(trimmed) {
+                            if let Some(token) = obj.response {
+                                full.push_str(&token);
+                            }
+                            if obj.done == Some(true) {
+                                if cancelled.load(Ordering::SeqCst) {
+                                    ctrlc_task.abort();
+                                    break;
+                                }
+                                ctrlc_task.abort();
+                                return Ok(full);
+                            }
+                        }
                     }
+                    None => break,
                 }
             }
         }
@@ -820,34 +833,41 @@ impl Provider {
         let mut stream = resp.bytes_stream();
         let mut full = String::new();
         let mut buf = String::new();
+        let mut cursor = 0usize;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("stream read error")?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
 
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].to_string();
-                buf = buf[pos + 1..].to_string();
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with(':') {
-                    continue;
-                }
-                if let Some(data) = trimmed.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        continue;
-                    }
-                    if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
-                        if let Some(text) = chunk
-                            .candidates
-                            .and_then(|c| c.into_iter().next())
-                            .and_then(|c| c.content)
-                            .and_then(|c| c.parts)
-                            .and_then(|p| p.into_iter().next())
-                            .and_then(|p| p.text)
-                        {
-                            full.push_str(&text);
+            loop {
+                let tail = &buf[cursor..];
+                match tail.find('\n') {
+                    Some(pos) => {
+                        let line = &tail[..pos];
+                        cursor += pos + 1;
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || trimmed.starts_with(':') {
+                            continue;
+                        }
+                        if let Some(data) = trimmed.strip_prefix("data: ") {
+                            if data == "[DONE]" {
+                                continue;
+                            }
+                            if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
+                                if let Some(text) = chunk
+                                    .candidates
+                                    .and_then(|c| c.into_iter().next())
+                                    .and_then(|c| c.content)
+                                    .and_then(|c| c.parts)
+                                    .and_then(|p| p.into_iter().next())
+                                    .and_then(|p| p.text)
+                                {
+                                    full.push_str(&text);
+                                }
+                            }
                         }
                     }
+                    None => break,
                 }
             }
         }
@@ -1017,36 +1037,43 @@ impl Provider {
         let mut full = String::new();
         let mut event_type = String::new();
         let mut buf = String::new();
+        let mut cursor = 0usize;
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.context("stream read error")?;
             buf.push_str(&String::from_utf8_lossy(&chunk));
 
-            while let Some(pos) = buf.find('\n') {
-                let line = buf[..pos].to_string();
-                buf = buf[pos + 1..].to_string();
-                let trimmed = line.trim();
+            loop {
+                let tail = &buf[cursor..];
+                match tail.find('\n') {
+                    Some(pos) => {
+                        let line = &tail[..pos];
+                        cursor += pos + 1;
+                        let trimmed = line.trim();
 
-                if trimmed.is_empty() {
-                    event_type.clear();
-                    continue;
-                }
+                        if trimmed.is_empty() {
+                            event_type.clear();
+                            continue;
+                        }
 
-                if let Some(event_val) = trimmed.strip_prefix("event: ") {
-                    event_type = event_val.to_string();
-                    continue;
-                }
+                        if let Some(event_val) = trimmed.strip_prefix("event: ") {
+                            event_type = event_val.to_string();
+                            continue;
+                        }
 
-                if let Some(data) = trimmed.strip_prefix("data: ") {
-                    if let Ok(chunk) =
-                        serde_json::from_str::<AnthropicStreamChunk>(data)
-                    {
-                        if chunk.chunk_type.as_deref() == Some("content_block_delta") {
-                            if let Some(text) = chunk.delta.and_then(|d| d.text) {
-                                full.push_str(&text);
+                        if let Some(data) = trimmed.strip_prefix("data: ") {
+                            if let Ok(chunk) =
+                                serde_json::from_str::<AnthropicStreamChunk>(data)
+                            {
+                                if chunk.chunk_type.as_deref() == Some("content_block_delta") {
+                                    if let Some(text) = chunk.delta.and_then(|d| d.text) {
+                                        full.push_str(&text);
+                                    }
+                                }
                             }
                         }
                     }
+                    None => break,
                 }
             }
         }

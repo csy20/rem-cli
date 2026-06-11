@@ -1,10 +1,8 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::sync::LazyLock;
-use std::sync::Mutex;
-
-use crate::config;
+use std::sync::RwLock;
 
 const DEFAULT_THEME_NAME: &str = "GHOST";
 
@@ -45,17 +43,10 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
     t
 });
 
-static ACTIVE_THEME_CACHE: LazyLock<Mutex<ActiveThemeCache>> = LazyLock::new(|| {
-    Mutex::new(ActiveThemeCache {
-        name: String::new(),
-        theme: None,
-    })
+static ACTIVE_THEME: LazyLock<RwLock<Arc<Theme>>> = LazyLock::new(|| {
+    let theme = by_name(DEFAULT_THEME_NAME);
+    RwLock::new(Arc::new(theme))
 });
-
-struct ActiveThemeCache {
-    name: String,
-    theme: Option<Theme>,
-}
 
 fn hex_to_ansi_fg(hex: &str) -> String {
     debug_assert!(
@@ -294,14 +285,8 @@ pub fn by_name(name: &str) -> Theme {
     })
 }
 
-pub fn active() -> Theme {
-    let cfg = config::load_config();
-    let mut cache = ACTIVE_THEME_CACHE.lock().expect("theme cache lock");
-    if cache.name != cfg.theme || cache.theme.is_none() {
-        cache.name = cfg.theme.clone();
-        cache.theme = Some(by_name(&cache.name));
-    }
-    cache.theme.clone().expect("active theme resolved")
+pub fn active() -> Arc<Theme> {
+    ACTIVE_THEME.read().expect("theme lock").clone()
 }
 
 pub fn set_active(name: &str) -> bool {
@@ -309,9 +294,9 @@ pub fn set_active(name: &str) -> bool {
     if !THEMES.contains_key(upper.as_str()) {
         return false;
     }
-    let mut cfg = config::load_config();
-    cfg.theme = upper;
-    config::save_config(&cfg).is_ok()
+    let theme = Arc::new(by_name(&upper));
+    *ACTIVE_THEME.write().expect("theme lock") = theme;
+    true
 }
 
 pub fn list_names() -> Vec<String> {

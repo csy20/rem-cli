@@ -23,7 +23,8 @@ enum BlockType {
 /// Returns a Vec of lines (with ANSI escapes) ready to print.
 pub fn render(text: &str) -> Vec<String> {
     let t = theme::active();
-    let mut out: Vec<String> = Vec::new();
+    let line_count = text.lines().count();
+    let mut out: Vec<String> = Vec::with_capacity(line_count + 16);
     let mut in_fence = false;
     let mut fence_lang = String::new();
     let mut fence_lines: Vec<String> = Vec::new();

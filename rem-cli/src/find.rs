@@ -186,31 +186,40 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
         report.files_scanned += 1;
 
         for (idx, raw_line) in contents.lines().enumerate() {
-            let line = raw_line.to_string();
-            let haystack: Vec<u8> = if opts.case_sensitive {
-                raw_line.as_bytes().to_vec()
-            } else {
-                raw_line.to_lowercase().into_bytes()
-            };
-
             let mut search_from = 0usize;
-            while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
-                let column = byte_to_column(&haystack[..search_from + pos]);
-                report.matches.push(Match {
-                    path: path.to_path_buf(),
-                    line_no: idx + 1,
-                    column: column + 1,
-                    line: line.clone(),
-                });
-                if report.matches.len() >= opts.max_results {
-                    report.truncated = true;
-                    report.elapsed_ms = start.elapsed().as_millis();
-                    return report;
-                }
-                search_from += pos + needle.len();
-                if search_from > haystack.len() {
-                    break;
-                }
+            let line_no = idx + 1;
+
+            macro_rules! search_in {
+                ($haystack:expr) => {{
+                    while let Some(pos) = find_subslice(&$haystack[search_from..], &needle) {
+                        let column = byte_to_column(&$haystack[..search_from + pos]);
+                        let line = raw_line.to_string();
+                        report.matches.push(Match {
+                            path: path.to_path_buf(),
+                            line_no,
+                            column: column + 1,
+                            line,
+                        });
+                        if report.matches.len() >= opts.max_results {
+                            report.truncated = true;
+                            report.elapsed_ms = start.elapsed().as_millis();
+                            return report;
+                        }
+                        search_from += pos + needle.len();
+                        if search_from > $haystack.len() {
+                            break;
+                        }
+                    }
+                }};
+            }
+
+            if opts.case_sensitive {
+                let haystack = raw_line.as_bytes();
+                search_in!(haystack);
+            } else {
+                let lowered = raw_line.to_lowercase();
+                let haystack = lowered.as_bytes();
+                search_in!(haystack);
             }
         }
     }

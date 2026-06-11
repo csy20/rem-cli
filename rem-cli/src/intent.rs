@@ -145,6 +145,28 @@ static PHRASE_COMBINATIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     out
 });
 
+static VERB_PHRASES_SPACE: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    VERB_PHRASES
+        .iter()
+        .map(|p| {
+            let leaked: &'static mut str = Box::leak(format!(" {}", p).into_boxed_str());
+            let static_ref: &'static str = leaked;
+            static_ref
+        })
+        .collect()
+});
+
+static PHRASE_COMBINATIONS_SPACE: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    PHRASE_COMBINATIONS
+        .iter()
+        .map(|p| {
+            let leaked: &'static mut str = Box::leak(format!(" {}", p).into_boxed_str());
+            let static_ref: &'static str = leaked;
+            static_ref
+        })
+        .collect()
+});
+
 pub fn classify_intent(input: &str) -> TaskIntent {
     let lower = input.to_lowercase();
 
@@ -238,9 +260,8 @@ pub fn intent_instruction(intent: &TaskIntent) -> &'static str {
 }
 
 fn has_creation_intent_lower(lower: &str) -> bool {
-    if VERB_PHRASES
-        .iter()
-        .any(|v| lower.starts_with(v) || lower.contains(&format!(" {}", v)))
+    if (VERB_PHRASES.iter().any(|v| lower.starts_with(v))
+        || VERB_PHRASES_SPACE.iter().any(|v| lower.contains(v)))
         && !has_question_prefix_lower(lower)
     {
         return true;
@@ -250,8 +271,11 @@ fn has_creation_intent_lower(lower: &str) -> bool {
         return true;
     }
 
-    for combined in PHRASE_COMBINATIONS.iter() {
-        if (lower.starts_with(combined) || lower.contains(&format!(" {}", combined)))
+    for (combined, combined_space) in PHRASE_COMBINATIONS
+        .iter()
+        .zip(PHRASE_COMBINATIONS_SPACE.iter())
+    {
+        if (lower.starts_with(combined) || lower.contains(combined_space))
             && !is_question_about_lower(lower, combined)
         {
             return true;
