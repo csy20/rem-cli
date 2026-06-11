@@ -124,7 +124,7 @@ mod tests {
     ]
 }
 
-pub fn template_python(name: &str) -> Vec<FileEntry> {
+pub fn template_python(_name: &str) -> Vec<FileEntry> {
     vec![
         FileEntry {
             path: "main.py".into(),
