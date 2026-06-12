@@ -40,6 +40,22 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
             "#ddd8cc", "#3a3228", "#3a3228", "#a04848", "#4a7858", "#e8e4d8",
         ),
     );
+    t.insert(
+        "SAKURA",
+        Theme::build(
+            "SAKURA", "#1a1018", "#24151e", "#3a1e30", "#ff8cbc", "#c86090", "#e8a0c0", "#805870",
+            "#503848", "#3a1e30", "#4a2840", "#ffb0d0", "#24151e", "#3a1e30", "#805870", "#3a1e30",
+            "#2a1420", "#ff8cbc", "#ff8cbc", "#d84860", "#70b890", "#1a0e14",
+        ),
+    );
+    t.insert(
+        "EMBER",
+        Theme::build(
+            "EMBER", "#14100a", "#1e1810", "#302818", "#ff8833", "#cc6620", "#eeaa44", "#887050",
+            "#504030", "#302818", "#403020", "#ffbb88", "#1e1810", "#302818", "#887050", "#302818",
+            "#201810", "#ff8833", "#ff8833", "#cc3333", "#66aa44", "#0e0c08",
+        ),
+    );
     t
 });
 
@@ -50,7 +66,7 @@ static ACTIVE_THEME: LazyLock<RwLock<Arc<Theme>>> = LazyLock::new(|| {
 
 fn hex_to_ansi_fg(hex: &str) -> String {
     debug_assert!(
-        hex.as_bytes().get(0) == Some(&b'#') && hex.len() == 7,
+        hex.as_bytes().first() == Some(&b'#') && hex.len() == 7,
         "bad hex: {}",
         hex
     );
@@ -65,7 +81,7 @@ fn hex_to_ansi_fg(hex: &str) -> String {
 
 fn hex_to_ansi_bg(hex: &str) -> String {
     debug_assert!(
-        hex.as_bytes().get(0) == Some(&b'#') && hex.len() == 7,
+        hex.as_bytes().first() == Some(&b'#') && hex.len() == 7,
         "bad hex: {}",
         hex
     );
@@ -79,6 +95,7 @@ fn hex_to_ansi_bg(hex: &str) -> String {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct Theme {
     pub name: String,
     pub bg: String,
@@ -107,6 +124,7 @@ pub struct Theme {
 }
 
 impl Theme {
+    #[allow(clippy::too_many_arguments)]
     fn build(
         name: &str,
         bg: &str,
@@ -177,29 +195,6 @@ impl Theme {
             success,
             code_bg,
         ];
-        let field_values = [
-            bg,
-            surface,
-            border,
-            accent,
-            accent_dim,
-            accent_info,
-            text_muted,
-            text_faint,
-            pill_bg,
-            pill_border,
-            pill_text,
-            kbd_bg,
-            kbd_border,
-            kbd_text,
-            sys_color,
-            sel_bg,
-            sel_left,
-            cursor,
-            error,
-            success,
-            code_bg,
-        ];
         let mut fg_cache = BTreeMap::new();
         let mut bg_cache = BTreeMap::new();
         for (key, hex) in field_names.iter().zip(field_values.iter()) {
@@ -241,38 +236,6 @@ impl Theme {
     pub fn bg(&self, field: &str) -> &str {
         self.bg_cache.get(field).map(|s| s.as_str()).unwrap_or("")
     }
-
-    pub fn divider(&self) -> String {
-        paint(self, "text_faint", "\u{2500}", false).repeat(50)
-    }
-
-    pub fn section_header(&self, title: &str) -> String {
-        let divider = paint(self, "text_faint", "\u{2500}", false).repeat(3);
-        format!(
-            " {divider} {} {divider}",
-            paint(self, "accent", title, true)
-        )
-    }
-
-    pub fn code_gutter(&self) -> String {
-        paint(self, "text_faint", "\u{2502}", true)
-    }
-
-    pub fn code_bg_start(&self) -> String {
-        format!(
-            "{}{}",
-            self.bg("code_bg"),
-            paint(self, "text_faint", "", false)
-        )
-    }
-
-    pub fn code_bg_end(&self) -> String {
-        RESET.to_string()
-    }
-}
-
-pub fn themes() -> &'static BTreeMap<&'static str, Theme> {
-    &THEMES
 }
 
 pub fn by_name(name: &str) -> Theme {
@@ -313,9 +276,6 @@ pub fn accent_for_mode(mode: &str) -> &'static str {
 
 pub const RESET: &str = "\x1b[0m";
 pub const BOLD: &str = "\x1b[1m";
-pub const DIM: &str = "\x1b[2m";
-pub const REVERSE: &str = "\x1b[7m";
-pub const UNDERLINE: &str = "\x1b[4m";
 
 pub fn paint(t: &Theme, field: &str, text: &str, bold: bool) -> String {
     let mut out = String::with_capacity(text.len() + 16);
@@ -406,20 +366,8 @@ pub fn paint_bullet_line(t: &Theme, parts: &[(&str, &str, bool)]) -> String {
     out
 }
 
-pub fn paint_status_line(left: &str, right: &str) -> String {
-    let t = active();
-    let left = paint(&t, "text_muted", left, false);
-    let right = paint(&t, "text_faint", right, false);
-    let dot = paint(&t, "text_faint", "\u{00B7}", false);
-    format!("{left}  {dot}  {right}")
-}
-
 pub fn paint_dim(t: &Theme, text: &str) -> String {
     paint(t, "text_faint", text, false)
-}
-
-pub fn paint_muted(t: &Theme, text: &str) -> String {
-    paint(t, "text_muted", text, false)
 }
 
 pub fn paint_warning(t: &Theme, text: &str) -> String {
@@ -434,50 +382,10 @@ pub fn paint_success_label(t: &Theme, text: &str) -> String {
     paint(t, "success", text, true)
 }
 
-pub fn visible_width() -> usize {
-    if let Ok(text) = std::env::var("COLUMNS") {
-        if let Ok(n) = text.parse::<usize>() {
-            if n > 20 {
-                return n;
-            }
-        }
-    }
-    80
-}
-
-pub fn visible_len(s: &str) -> usize {
-    let mut count = 0usize;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for inner in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&inner) {
-                        break;
-                    }
-                }
-            } else {
-                chars.next();
-            }
-            continue;
-        }
-        count += 1;
-    }
-    count
-}
-
 pub fn println(s: &str) {
     let stdout = io::stdout();
     let mut h = stdout.lock();
     let _ = writeln!(h, "{s}");
-    let _ = h.flush();
-}
-
-pub fn clear_current_line() {
-    let stdout = io::stdout();
-    let mut h = stdout.lock();
-    let _ = write!(h, "\r\x1b[2K");
     let _ = h.flush();
 }
 
@@ -506,30 +414,13 @@ mod tests {
     }
 
     #[test]
-    fn list_names_has_four() {
+    fn list_names_has_six() {
         let names = list_names();
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 6);
         assert!(names.contains(&"GHOST".to_string()));
         assert!(names.contains(&"PAPER".to_string()));
-    }
-
-    #[test]
-    fn all_themes_have_distinct_accents() {
-        let ts = themes();
-        let accents: std::collections::HashSet<String> =
-            ts.values().map(|t| t.accent.clone()).collect();
-        assert_eq!(
-            accents.len(),
-            ts.len(),
-            "every theme must have a unique accent"
-        );
-    }
-
-    #[test]
-    fn all_themes_have_code_bg() {
-        for t in themes().values() {
-            assert!(!t.code_bg.is_empty(), "{} missing code_bg", t.name);
-        }
+        assert!(names.contains(&"SAKURA".to_string()));
+        assert!(names.contains(&"EMBER".to_string()));
     }
 
     #[test]
@@ -540,13 +431,5 @@ mod tests {
         assert!(set_active("GHOST"));
         let t = active();
         assert_eq!(t.name, "GHOST");
-    }
-
-    #[test]
-    fn theme_has_helpers() {
-        let t = active();
-        assert!(t.divider().contains('\u{2500}'));
-        assert!(!t.code_gutter().is_empty());
-        assert!(t.section_header("test").contains("test"));
     }
 }

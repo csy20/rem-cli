@@ -6,6 +6,4 @@
 pub mod header;
 pub mod markdown;
 pub mod output;
-pub mod palette;
-pub mod prompt;
 pub mod theme;

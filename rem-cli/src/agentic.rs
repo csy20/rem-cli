@@ -152,33 +152,6 @@ pub fn run_test(path: &str) -> ToolResult {
     }
 }
 
-#[allow(dead_code)]
-pub fn run_command(cmd: &str, args: &[&str], _timeout_s: u64) -> ToolResult {
-    let start = Instant::now();
-    match Command::new(cmd).args(args).output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            ToolResult {
-                tool_name: cmd.into(),
-                success: output.status.success(),
-                stdout,
-                stderr,
-                duration_ms: start.elapsed().as_millis() as u64,
-                action: "shell".into(),
-            }
-        }
-        Err(e) => ToolResult {
-            tool_name: cmd.into(),
-            success: false,
-            stdout: String::new(),
-            stderr: format!("Command failed: {}", e),
-            duration_ms: start.elapsed().as_millis() as u64,
-            action: "shell".into(),
-        },
-    }
-}
-
 pub fn format_tool_output(result: &ToolResult) -> String {
     let t = ui::theme::active();
     let status = if result.success {

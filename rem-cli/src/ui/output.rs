@@ -16,7 +16,10 @@ impl SpinnerGuard {
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
         let handle = tokio::spawn(async move {
-            let chars = ["\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}"];
+            let chars = [
+                "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}",
+                "\u{2827}", "\u{2807}", "\u{280F}",
+            ];
             let mut i = 0usize;
             while r.load(Ordering::Relaxed) {
                 let t = theme::active();
@@ -48,10 +51,4 @@ impl Drop for SpinnerGuard {
     fn drop(&mut self) {
         self.stop();
     }
-}
-
-/// Clear the spinner line before final rendering.
-pub fn clear_spinner_line() {
-    eprint!("\r{}\r", " ".repeat(60));
-    let _ = io::stderr().flush();
 }

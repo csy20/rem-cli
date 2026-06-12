@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -95,46 +94,6 @@ impl FeedbackTracker {
         self.dirty = true;
     }
 
-    pub fn _adjust_confidence(&self, original_intent: &TaskIntent) -> Option<TaskIntent> {
-        let classified_str = intent_to_str(original_intent);
-        let mut corrections = 0u32;
-        let mut alternative = String::new();
-
-        for entry in &self.store.entries {
-            if entry.classified_as == classified_str && entry.count >= 3 {
-                corrections += entry.count;
-                if alternative.is_empty() {
-                    alternative = entry.correct_intent.clone();
-                }
-            }
-        }
-
-        if corrections >= 3 && !alternative.is_empty() {
-            str_to_intent(&alternative)
-        } else {
-            None
-        }
-    }
-
-    pub fn _summary(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if self.store.total_corrections == 0 {
-            return lines;
-        }
-
-        let mut by_class: HashMap<String, u32> = HashMap::new();
-        for entry in &self.store.entries {
-            *by_class
-                .entry(format!("{}->{}", entry.classified_as, entry.correct_intent))
-                .or_insert(0) += entry.count;
-        }
-
-        for (pattern, count) in by_class.iter().filter(|(_, &c)| c >= 3) {
-            lines.push(format!("  {} : {} times", pattern, count));
-        }
-        lines
-    }
-
     pub fn flush(&mut self) {
         if self.dirty {
             if let Some(parent) = self.path.parent() {
@@ -160,16 +119,5 @@ fn intent_to_str(intent: &TaskIntent) -> String {
         TaskIntent::Planning => "Planning".to_string(),
         TaskIntent::WebNeeded => "WebNeeded".to_string(),
         TaskIntent::CodeAction => "CodeAction".to_string(),
-    }
-}
-
-#[allow(dead_code)]
-fn str_to_intent(s: &str) -> Option<TaskIntent> {
-    match s {
-        "FastAnswer" => Some(TaskIntent::FastAnswer),
-        "Planning" => Some(TaskIntent::Planning),
-        "WebNeeded" => Some(TaskIntent::WebNeeded),
-        "CodeAction" => Some(TaskIntent::CodeAction),
-        _ => None,
     }
 }

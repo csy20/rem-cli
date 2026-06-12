@@ -1062,9 +1062,7 @@ impl Provider {
                         }
 
                         if let Some(data) = trimmed.strip_prefix("data: ") {
-                            if let Ok(chunk) =
-                                serde_json::from_str::<AnthropicStreamChunk>(data)
-                            {
+                            if let Ok(chunk) = serde_json::from_str::<AnthropicStreamChunk>(data) {
                                 if chunk.chunk_type.as_deref() == Some("content_block_delta") {
                                     if let Some(text) = chunk.delta.and_then(|d| d.text) {
                                         full.push_str(&text);
@@ -1088,9 +1086,7 @@ impl Provider {
         let body = resp.text().await.unwrap_or_default();
         let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
             .map(|v| v.error)
-            .unwrap_or_else(|_| {
-                body.chars().take(300).collect::<String>()
-            });
+            .unwrap_or_else(|_| body.chars().take(300).collect::<String>());
         anyhow!("{} API failed ({}): {}", provider, status, err_msg)
     }
 }

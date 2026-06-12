@@ -86,7 +86,7 @@ fn highlight_css(code: &str) -> String {
             format!(
                 "{}{}",
                 &caps[1],
-                ui::theme::paint_success_label(&t, &caps[2].trim())
+                ui::theme::paint_success_label(&t, caps[2].trim())
             )
         })
         .to_string();

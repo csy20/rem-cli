@@ -96,9 +96,7 @@ impl ProjectMemory {
                 let name = e.file_name().to_string_lossy();
                 e.file_type().is_dir()
                     && !name.starts_with('.')
-                    && !name.contains("node_modules")
-                    && !name.contains("target")
-                    && !name.contains("__pycache__")
+                    && !crate::find::should_skip_dir(&name)
             })
             .count();
 

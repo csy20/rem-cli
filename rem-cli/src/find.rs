@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use walkdir::WalkDir;
 
-const DEFAULT_MAX_FILE_BYTES: u64 = 8 * 1024;
+const DEFAULT_MAX_FILE_BYTES: u64 = 64 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 500;
 const DEFAULT_MAX_DEPTH: usize = 8;
 
@@ -60,7 +60,7 @@ pub struct FindReport {
 /// Directory or file names that should never be descended into. These
 /// are excluded at the `walkdir` iterator level so the search stays
 /// fast and the output stays focused on source.
-pub(crate) const SKIP_NAMES: &[&str] = &[
+pub const SKIP_NAMES: &[&str] = &[
     ".git",
     "node_modules",
     "target",
@@ -75,17 +75,17 @@ pub(crate) const SKIP_NAMES: &[&str] = &[
 ];
 
 /// File suffixes that are always skipped even outside the above dirs.
-pub(crate) const SKIP_SUFFIXES: &[&str] = &[
+pub const SKIP_SUFFIXES: &[&str] = &[
     ".min.js", ".min.css", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
     ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".mp3", ".mp4", ".mov", ".woff", ".woff2", ".ttf",
     ".otf", ".eot",
 ];
 
-pub(crate) fn should_skip_dir(name: &str) -> bool {
+pub fn should_skip_dir(name: &str) -> bool {
     SKIP_NAMES.contains(&name)
 }
 
-pub(crate) fn should_skip_file(name: &str) -> bool {
+pub fn should_skip_file(name: &str) -> bool {
     let lower_bytes = name.as_bytes();
     let len = lower_bytes.len();
     // Fast path: check common minified extensions using byte comparison

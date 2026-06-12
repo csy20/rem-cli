@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::LazyLock;
@@ -8,8 +8,6 @@ use std::sync::LazyLock;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use regex::Regex;
-use reqwest::Client;
-use rustyline::DefaultEditor;
 use serde::{Deserialize, Serialize};
 
 use cli::{AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs};
@@ -17,7 +15,10 @@ use cli::{AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, Pa
 use walkdir::WalkDir;
 
 mod agentic;
+mod chat;
 mod cli;
+mod commands;
+mod config;
 mod feedback;
 mod find;
 mod highlight;
@@ -26,20 +27,29 @@ mod intent;
 mod memory;
 mod parsing;
 mod provider;
+mod search;
 mod templates;
 mod ui;
 
-use agentic::{build_agentic_prompt, build_tool_context, extract_goal_signal, run_lint, run_test};
-use feedback::FeedbackTracker;
-use find::{find_matches, FindOptions};
-use indexer::{
-    build_retrieved_context, generate_codebase_index, load_codebase_index,
-    retrieve_relevant_chunks, write_codebase_index,
+use crate::chat::build_prompt;
+use crate::chat::{
+    check_system_resources, detect_project_type, language_specific_guidance, print_welcome,
+    validate_chat_response, ChatSession, RunMode,
 };
+use crate::commands::{
+    auto_write_files, handle_compact, handle_config, handle_config_set, handle_copy, handle_diff,
+    handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint,
+    handle_list_files, handle_memory, handle_memory_set, handle_refactor, handle_resume_session,
+    handle_review, handle_save_session, handle_search, handle_test, handle_tokens, handle_undo,
+    handle_write, print_chat_help, print_last_files, prompt_for_path,
+};
+use crate::config::{
+    build_provider, first_run_setup, load_config, load_system_prompt, save_config,
+};
+use indexer::{generate_codebase_index, load_codebase_index, write_codebase_index};
 use intent::{classify_intent, has_creation_intent, has_file_path, intent_instruction, TaskIntent};
-use memory::ProjectMemory;
-use parsing::{current_name_from_bold, extract_code_block, guess_filename, strip_code_blocks};
-use provider::{Provider, ProviderKind};
+use parsing::{current_name_from_bold, extract_code_block, guess_filename};
+use provider::Provider;
 use ui::output::SpinnerGuard;
 
 static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
@@ -67,16 +77,6 @@ fn reset_ctrlc_count() {
 
 static RE_AT_REF: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"@([^\s]+)").expect("invalid regex literal"));
-
-static RE_SEARCH_TITLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#)
-        .expect("invalid regex literal")
-});
-static RE_SEARCH_SNIPPET: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"class="result__snippet"[^>]*>([^<]*(?:<[^/>][^>]*>[^<]*</[^>]+>)*[^<]*)</a>"#)
-        .expect("invalid regex literal")
-});
-
 
 // ── Config & Prompts ───────────────────────────────────────────────────────
 
@@ -157,96 +157,8 @@ const BLOCKED_COMMAND_PATTERNS: [&str; 6] = [
     "reboot",
 ];
 
-// ── Config & Prompts ───────────────────────────────────────────────────────
-
-fn save_config(cfg: &cli::AppConfig) -> Result<()> {
-    if let Some(home) = dirs::home_dir() {
-        let dir = home.join(".config/rem-cli");
-        fs::create_dir_all(&dir)?;
-        let path = dir.join("config.toml");
-        let text = toml::to_string_pretty(cfg).context("failed to serialize config")?;
-        fs::write(&path, text).context("failed to write config")?;
-    }
-    Ok(())
-}
-
-fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
-    let t = ui::theme::active();
-    println!();
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "Welcome to REM!", true),
-        ui::theme::paint_dim(&t, "first-time setup")
-    );
-    println!();
-    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "Where should REM create your projects?"),
-    );
-    println!(
-        "{} e.g. {} or {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "~/projects"),
-        ui::theme::paint_bright(&t, "/home/you/code")
-    );
-    println!(
-        "{} type {} for current dir, or a full path",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, ".")
-    );
-    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-    print!("{}", ui::theme::paint(&t, "accent", "\u{258C}  rem> ", true));
-    let _ = io::stdout().flush();
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let trimmed = input.trim();
-
-    let dir = if trimmed.is_empty() || trimmed == "." {
-        std::env::current_dir().unwrap_or_default()
-    } else if trimmed.starts_with("~/") || trimmed == "~" {
-        if let Some(home) = dirs::home_dir() {
-            home.join(trimmed.trim_start_matches("~/"))
-        } else {
-            PathBuf::from(trimmed)
-        }
-    } else {
-        PathBuf::from(trimmed)
-    };
-
-    if !dir.exists() {
-        println!(
-            "{} creating {}...",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            dir.display()
-        );
-        fs::create_dir_all(&dir)?;
-    }
-
-    cfg.workspace_dir = Some(dir.to_string_lossy().to_string());
-    save_config(cfg)?;
-
-    println!(
-        "{} workspace saved to {}",
-        ui::theme::paint_success_label(&t, "\u{258C}  ✓"),
-        ui::theme::paint_bright(&t, &dir.display().to_string())
-    );
-    println!(
-        "{} change it anytime with {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "/dir <path>")
-    );
-    println!();
-
-    Ok(Some(dir))
-}
-
-// ── Model reply schema ─────────────────────────────────────────────────────
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct FileEntry {
+pub(crate) struct FileEntry {
     path: String,
     content: String,
 }
@@ -291,7 +203,7 @@ impl ModelReply {
     }
 }
 
-fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
+pub(crate) fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
     let mut files = Vec::new();
     let mut current_name = String::new();
     let mut in_fence = false;
@@ -354,7 +266,7 @@ fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
     files
 }
 
-fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
     let t = ui::theme::active();
     let expanded = if rel.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
@@ -399,360 +311,13 @@ fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
 
 // ── Model reply schema ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-struct SearchResult {
-    title: String,
-    snippet: String,
-    url: String,
-}
-
-async fn perform_web_search(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
-    let resp = client
-        .get("https://html.duckduckgo.com/html/")
-        .query(&[("q", query)])
-        .header("User-Agent", "rem-cli/0.2")
-        .send()
-        .await
-        .context("web search request failed")?;
-    let html = resp
-        .text()
-        .await
-        .context("failed to read search response")?;
-    Ok(parse_ddg_html(&html))
-}
-
-fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
-    let mut results = Vec::new();
-    let mut remaining = html;
-    while results.len() < 8 {
-        if let Some(cap) = RE_SEARCH_TITLE.captures(remaining) {
-            let url = cap
-                .get(1)
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default();
-            let title = cap
-                .get(2)
-                .map(|m| strip_html(m.as_str()))
-                .unwrap_or_default();
-            let snippet_pos = cap.get(0).map(|m| m.end()).unwrap_or(0);
-            let after_title = &remaining[snippet_pos..];
-            let snippet = RE_SEARCH_SNIPPET
-                .captures(after_title)
-                .and_then(|c| c.get(1))
-                .map(|m| strip_html(m.as_str()).trim().to_string())
-                .unwrap_or_default();
-            if !title.is_empty() {
-                results.push(SearchResult {
-                    title,
-                    snippet,
-                    url,
-                });
-            }
-            let advance = cap.get(0).map(|m| m.end()).unwrap_or(1);
-            if advance >= remaining.len() {
-                break;
-            }
-            remaining = &remaining[advance..];
-        } else {
-            break;
-        }
-    }
-    results
-}
-
-fn strip_html(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '<' => {
-                while let Some(&next) = chars.peek() {
-                    if next == '>' {
-                        chars.next();
-                        break;
-                    }
-                    chars.next();
-                }
-            }
-            '&' => {
-                let mut entity = String::with_capacity(8);
-                entity.push('&');
-                for ch in chars.by_ref() {
-                    entity.push(ch);
-                    if ch == ';' {
-                        break;
-                    }
-                }
-                match entity.as_str() {
-                    "&amp;" => out.push('&'),
-                    "&lt;" => out.push('<'),
-                    "&gt;" => out.push('>'),
-                    "&quot;" => out.push('"'),
-                    "&#x27;" => out.push('\''),
-                    _ => out.push_str(&entity),
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    let trimmed = out.trim().to_string();
-    trimmed
-}
-
-fn print_search_results(results: &[SearchResult]) {
-    let t = ui::theme::active();
-    if results.is_empty() {
-        println!("{}", ui::theme::paint_warning(&t, "  no results found"));
-        return;
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    for (i, r) in results.iter().enumerate() {
-        println!(
-            "{} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_bright(&t, &format!("{}. {}", i + 1, r.title))
-        );
-        println!("{}   {}", ui::theme::paint(&t, "accent", "\u{258C}", true), ui::theme::paint_dim(&t, &r.url));
-        if !r.snippet.is_empty() {
-            println!("{}   {}", ui::theme::paint(&t, "accent", "\u{258C}", true), r.snippet);
-        }
-        println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-    }
-}
-
-// ── Chat session state ─────────────────────────────────────────────────────
-
-struct ChatSession {
-    rl: DefaultEditor,
-    last_code: String,
-    last_files: Vec<FileEntry>,
-    last_files_written: Vec<PathBuf>,
-    last_search: Vec<SearchResult>,
-    last_intent: TaskIntent,
-    last_user_input: String,
-    project_dir: Option<PathBuf>,
-    workspace_dir: Option<PathBuf>,
-    history: Vec<(String, String)>,
-    feedback: FeedbackTracker,
-    mode: RunMode,
-    last_tokens: u32,
-    last_elapsed: std::time::Duration,
-    project_memory: ProjectMemory,
-}
-
-impl ChatSession {
-    fn new(model: &str, workspace: Option<PathBuf>) -> Result<Self> {
-        let rl = DefaultEditor::new().context("failed to start line editor")?;
-        let project_dir = workspace.clone();
-        let project_memory =
-            ProjectMemory::load(project_dir.as_deref().unwrap_or_else(|| Path::new(".")));
-        Ok(Self {
-            rl,
-            last_code: String::new(),
-            last_files: Vec::new(),
-            last_files_written: Vec::new(),
-            last_search: Vec::new(),
-            last_intent: TaskIntent::FastAnswer,
-            last_user_input: String::new(),
-            project_dir: workspace.clone(),
-            workspace_dir: workspace,
-            history: Vec::new(),
-            feedback: FeedbackTracker::new(model),
-            mode: RunMode::Chat,
-            last_tokens: 0,
-            last_elapsed: std::time::Duration::from_secs(0),
-            project_memory,
-        })
-    }
-
-    fn readline(&mut self, prompt: &str) -> io::Result<String> {
-        self.rl.readline(prompt).map_err(io::Error::other)
-    }
-
-    fn add_history(&mut self, line: &str) {
-        let _ = self.rl.add_history_entry(line);
-    }
-
-    fn build_search_context(&self) -> String {
-        if self.last_search.is_empty() {
-            return String::new();
-        }
-        let mut ctx = String::from("Web search results:\n");
-        for (i, r) in self.last_search.iter().enumerate().take(3) {
-            ctx.push_str(&format!("{}. {} — {}\n", i + 1, r.title, r.snippet));
-        }
-        ctx
-    }
-
-    #[allow(dead_code)]
-    fn build_project_context(&self) -> String {
-        if let Some(ref dir) = self.project_dir {
-            build_project_context(dir, 6000)
-        } else {
-            String::new()
-        }
-    }
-
-    /// Query-aware project context. When a codebase_index.json exists for the project,
-    /// performs keyword retrieval of relevant chunks (by content/name match against the
-    /// user task) and returns a targeted "Relevant code chunks" block. This is the key
-    /// mechanism for scaling rem to larger codebases without prompt explosion.
-    /// Falls back to the classic exhaustive (but capped) file listing when no index.
-    fn build_relevant_project_context(&self, query: &str) -> String {
-        if let Some(ref dir) = self.project_dir {
-            if let Some(index) = load_codebase_index(dir) {
-                // Pull more candidates, let the injector cap by chars
-                let hits = retrieve_relevant_chunks(&index, query, 8, 4500);
-                if !hits.is_empty() {
-                    return build_retrieved_context(&hits, 4800);
-                }
-                // Index existed but nothing matched the query — still better to give a small
-                // generic listing than nothing, or fall through.
-            }
-            // No index or no hits: classic behavior (names + sizes, depth-limited)
-            build_project_context(dir, 6000)
-        } else {
-            String::new()
-        }
-    }
-
-    fn build_chat_history(&self) -> String {
-        if self.history.is_empty() {
-            return String::new();
-        }
-        let mut out = String::from("[Previous conversation — keep context in mind]:\n\n");
-        for (user, assistant) in self.history.iter().rev().take(6).rev() {
-            let truncated_assistant = truncate_to_lines(assistant, 15);
-            out.push_str(&format!("User: {}\nREM: {}\n\n", user, truncated_assistant));
-        }
-        out
-    }
-
-    fn build_memory_context(&self) -> String {
-        self.project_memory.as_context()
-    }
-
-    fn resolve_at_references(&self, input: &str) -> (String, String) {
-        let mut extra_context = String::new();
-        let mut cleaned_input = input.to_string();
-
-        for cap in RE_AT_REF.captures_iter(input) {
-            let ref_path = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-            if ref_path.starts_with("http") {
-                continue;
-            }
-            let path = if ref_path.starts_with('/') || ref_path.starts_with("~/") {
-                let resolved = if ref_path.starts_with("~/") {
-                    if let Some(home) = dirs::home_dir() {
-                        home.join(ref_path.trim_start_matches("~/"))
-                    } else {
-                        PathBuf::from(ref_path)
-                    }
-                } else {
-                    PathBuf::from(ref_path)
-                };
-                resolved
-            } else {
-                let base = self
-                    .project_dir
-                    .as_deref()
-                    .unwrap_or_else(|| Path::new("."));
-                base.join(ref_path)
-            };
-
-            if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let truncated = truncate_bytes(&content, 8000);
-                    extra_context.push_str(&format!(
-                        "\n[File: {}]\n{}\n[/File: {}]\n",
-                        path.display(),
-                        truncated,
-                        path.display()
-                    ));
-                }
-            } else if path.is_dir() {
-                let mut listing = String::new();
-                for e in WalkDir::new(&path)
-                    .max_depth(2)
-                    .sort_by_file_name()
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Ok(rel) = e.path().strip_prefix(&path) {
-                        let rel_str = rel.display().to_string();
-                        if rel_str.is_empty() || rel_str.starts_with('.') {
-                            continue;
-                        }
-                        if rel_str.contains("node_modules")
-                            || rel_str.contains("target")
-                            || rel_str.contains("__pycache__")
-                            || rel_str.contains(".git")
-                        {
-                            continue;
-                        }
-                        let marker = if e.file_type().is_dir() { "/" } else { "" };
-                        listing.push_str(&format!("  {}{}\n", rel_str, marker));
-                    }
-                }
-                if !listing.is_empty() {
-                    let total = listing.lines().count();
-                    extra_context.push_str(&format!(
-                        "\n[Directory: {} ({} entries)]\n{}[/Directory: {}]\n",
-                        path.display(),
-                        total,
-                        listing,
-                        path.display()
-                    ));
-                }
-            }
-
-            cleaned_input = cleaned_input.replace(&format!("@{}", ref_path), ref_path);
-        }
-
-        (cleaned_input, extra_context)
-    }
-}
-
-fn truncate_to_lines(s: &str, max_lines: usize) -> String {
+pub(crate) fn truncate_to_lines(s: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = s.lines().take(max_lines).collect();
     let mut result = lines.join("\n");
     if s.lines().count() > max_lines {
         result.push_str("\n...[truncated]");
     }
     result
-}
-
-fn check_system_resources() {
-    let t = ui::theme::active();
-    let mem_gb = detect_system_ram_gb();
-    if mem_gb > 0 && mem_gb <= 16 {
-        eprintln!(
-            "{} {} GB RAM detected — Ollama may be slow on CPU.",
-            ui::theme::paint_warning(&t, "\u{258C} system:"),
-            mem_gb
-        );
-        eprintln!(
-            "{} Try:  OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 ollama serve",
-            ui::theme::paint_rail_empty(&t)
-        );
-        eprintln!();
-    }
-}
-
-fn detect_system_ram_gb() -> u64 {
-    if let Ok(content) = fs::read_to_string("/proc/meminfo") {
-        for line in content.lines() {
-            if line.starts_with("MemTotal:") {
-                let kb: u64 = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                return kb / 1024 / 1024;
-            }
-        }
-    }
-    0
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -792,10 +357,8 @@ async fn main() -> Result<()> {
     if !models.iter().any(|m| m == &cfg.model) {
         let fallback = models.first().cloned().unwrap_or_else(|| cfg.model.clone());
         eprintln!(
-            "{}: model '{}' not found; using '{}'",
-            "\x1b[33mwarning\x1b[0m",
-            cfg.model,
-            fallback
+            "\x1b[33mwarning\x1b[0m: model '{}' not found; using '{}'",
+            cfg.model, fallback
         );
         client.set_model(fallback);
     }
@@ -808,7 +371,7 @@ async fn main() -> Result<()> {
         Some(Commands::Patch(args)) => run_patch(&client, &cfg, args).await,
         Some(Commands::New(_)) => unreachable!(),
         None => {
-            let is_pipe = !atty::is(atty::Stream::Stdin);
+            let is_pipe = !std::io::stdin().is_terminal();
             if is_pipe {
                 let mut stdin_data = String::new();
                 if io::stdin().read_to_string(&mut stdin_data).is_ok()
@@ -824,137 +387,6 @@ async fn main() -> Result<()> {
             unreachable!("Index command should have been handled earlier")
         }
     }
-}
-
-fn load_config() -> Result<cli::AppConfig> {
-    let mut cfg = cli::AppConfig::default();
-    if let Some(home) = dirs::home_dir() {
-        let path = home.join(".config/rem-cli/config.toml");
-        if path.exists() {
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
-            let partial: cli::PartialConfig = toml::from_str(&text).context("invalid global config")?;
-            cfg.apply_partial(partial);
-        }
-    }
-    let local = PathBuf::from(".remcli.toml");
-    if local.exists() {
-        let text = fs::read_to_string(&local)
-            .with_context(|| format!("failed to read {}", local.display()))?;
-        let partial: cli::PartialConfig = toml::from_str(&text).context("invalid local config")?;
-        cfg.apply_partial(partial);
-    }
-    Ok(cfg)
-}
-
-fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<Provider> {
-    let kind = ProviderKind::from_str(&cfg.provider);
-    match kind {
-        ProviderKind::OpenAI => {
-            let base_url = cfg
-                .api_url
-                .clone()
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            let key = cfg
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
-            if key.is_empty() {
-                eprintln!(
-                    "{}: provider 'openai' requires --api-key or OPENAI_API_KEY",
-                    "\x1b[33mwarning\x1b[0m"
-                );
-            }
-            Ok(Provider::new_openai(
-                base_url,
-                cfg.model.clone(),
-                cfg.timeout_s,
-                system_prompt,
-                key,
-                cfg.model_ctx,
-            ))
-        }
-        ProviderKind::Gemini => {
-            let key = cfg
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("GEMINI_API_KEY").unwrap_or_default());
-            if key.is_empty() {
-                eprintln!(
-                    "{}: provider 'gemini' requires --api-key or GEMINI_API_KEY",
-                    "\x1b[33mwarning\x1b[0m"
-                );
-            }
-            let model = if cfg.model == "rem-coder:latest" || cfg.model == "rem-coder" {
-                "gemini-2.0-flash".to_string()
-            } else {
-                cfg.model.clone()
-            };
-            Ok(Provider::new_gemini(
-                key,
-                model,
-                cfg.timeout_s,
-                system_prompt,
-                cfg.model_ctx,
-            ))
-        }
-        ProviderKind::Anthropic => {
-            let key = cfg
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("ANTHROPIC_API_KEY").unwrap_or_default());
-            if key.is_empty() {
-                eprintln!(
-                    "{}: provider 'anthropic' requires --api-key or ANTHROPIC_API_KEY",
-                    "\x1b[33mwarning\x1b[0m"
-                );
-            }
-            let model = if cfg.model == "rem-coder:latest" || cfg.model == "rem-coder" {
-                "claude-sonnet-4-20250514".to_string()
-            } else {
-                cfg.model.clone()
-            };
-            Ok(Provider::new_anthropic(
-                key,
-                model,
-                cfg.timeout_s,
-                system_prompt,
-                cfg.model_ctx,
-            ))
-        }
-        _ => {
-            let base_url = cfg
-                .api_url
-                .clone()
-                .unwrap_or_else(|| cfg.ollama_url.clone());
-            Ok(Provider::new_ollama(
-                base_url,
-                cfg.model.clone(),
-                cfg.timeout_s,
-                system_prompt,
-                cfg.model_ctx,
-            ))
-        }
-    }
-}
-
-fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
-    let mut candidates = Vec::new();
-    if let Some(dir) = custom_prompts_dir {
-        candidates.push(PathBuf::from(dir).join("system_prompt.txt"));
-    }
-    candidates.push(PathBuf::from("prompts/system_prompt.txt"));
-    for path in candidates {
-        if path.exists() {
-            if let Ok(text) = fs::read_to_string(path) {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
-                }
-            }
-        }
-    }
-    DEFAULT_SYSTEM_PROMPT.to_string()
 }
 
 async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, verbose: bool) -> Result<()> {
@@ -979,7 +411,11 @@ async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, verbose: boo
     match result {
         Ok(text) => {
             if verbose {
-                eprintln!("\n  {} raw:\n{}\n", ui::theme::paint_dim(&t, "verbose:"), text);
+                eprintln!(
+                    "\n  {} raw:\n{}\n",
+                    ui::theme::paint_dim(&t, "verbose:"),
+                    text
+                );
             }
             println!();
             println!("{}", text.trim());
@@ -1012,7 +448,9 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
                 TaskIntent::WebNeeded => CHAT_SYSTEM_PROMPT_CONVERSATIONAL,
                 TaskIntent::CodeAction => unreachable!(),
             };
-            let text = client.complete_chat_stream(&composed, system_prompt, "").await?;
+            let text = client
+                .complete_chat_stream(&composed, system_prompt, "")
+                .await?;
             Ok(ModelReply {
                 explanation: text.trim().to_string(),
                 code: String::new(),
@@ -1031,7 +469,11 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
             ui::theme::paint_dim(&t, "verbose:"),
             reply.explanation
         );
-        eprintln!("{} raw files: {:?}", ui::theme::paint_dim(&t, "verbose:"), reply.files);
+        eprintln!(
+            "{} raw files: {:?}",
+            ui::theme::paint_dim(&t, "verbose:"),
+            reply.files
+        );
     }
     print_reply(&reply, true);
     Ok(())
@@ -1065,157 +507,15 @@ async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArgs) -> Resul
     let reply = client.complete_json(&prompt).await?;
     println!(
         "{}",
-        ui::theme::paint(&t, "accent", &format!("Patch preview for {}", args.file.display()), true)
+        ui::theme::paint(
+            &t,
+            "accent",
+            &format!("Patch preview for {}", args.file.display()),
+            true
+        )
     );
     print_reply(&reply, true);
     Ok(())
-}
-
-// ── Interactive chat ───────────────────────────────────────────────────────
-
-fn print_welcome(client: &Provider) {
-    println!();
-    ui::header::render(&client.provider_label(), "CHAT");
-    println!();
-}
-
-fn build_project_context(dir: &Path, max_bytes: usize) -> String {
-    let mut out = String::from("Project files:\n");
-    let mut count = 0u32;
-    let max_depth = 4;
-
-    let mut entries: Vec<String> = Vec::new();
-    for entry in WalkDir::new(dir)
-        .max_depth(max_depth as usize)
-        .sort_by_file_name()
-    {
-        let Ok(entry) = entry else { continue };
-        let p = entry.path();
-        let Ok(rel) = p.strip_prefix(dir) else {
-            continue;
-        };
-        let rel_str = rel.display().to_string();
-        if rel_str.is_empty() {
-            continue;
-        }
-        if rel_str.starts_with('.') && rel_str != "." {
-            continue;
-        }
-        if rel_str.contains("node_modules")
-            || rel_str.contains("target")
-            || rel_str.contains("__pycache__")
-            || rel_str.contains(".git")
-            || rel_str.contains("venv")
-            || rel_str.contains("dist")
-            || rel_str.contains(".pytest_cache")
-        {
-            continue;
-        }
-
-        if p.is_dir() {
-            if rel.components().count() >= 3 {
-                continue;
-            }
-            entries.push(format!("{}/", rel_str));
-        } else {
-            let size = p.metadata().map(|m| m.len()).unwrap_or(0);
-            entries.push(format!("{}  ({} bytes)", rel_str, size));
-        }
-        count += 1;
-        if out.len() > max_bytes {
-            break;
-        }
-    }
-
-    if count > 0 {
-        out.push_str(&entries.join("\n"));
-        out.push_str("\n\n");
-        out
-    } else {
-        String::new()
-    }
-}
-
-fn detect_project_type(dir: &Path) -> &'static str {
-    if !dir.exists() {
-        return "";
-    }
-    let entries: Vec<String> = WalkDir::new(dir)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.file_name().to_string_lossy().to_lowercase())
-        .collect();
-
-    let has_file = |name: &str| entries.iter().any(|f| f == name);
-
-    if has_file("Cargo.toml") {
-        return "rust";
-    }
-    if has_file("go.mod") {
-        return "go";
-    }
-    if has_file("pyproject.toml") || has_file("setup.py") || has_file("requirements.txt") {
-        return "python";
-    }
-    if has_file("package.json") {
-        return "javascript";
-    }
-    if has_file("index.html") && has_file("style.css") {
-        return "html_css";
-    }
-    if has_file("dart.yaml") || has_file("pubspec.yaml") {
-        return "dart";
-    }
-    if has_file("Makefile") {
-        return "cpp";
-    }
-    ""
-}
-
-fn language_specific_guidance(project_type: &str) -> &'static str {
-    match project_type {
-        "rust" => "\nLanguage context: Rust project. Use cargo build/run. Prefer &str over String where possible. Include Cargo.toml deps.",
-        "go" => "\nLanguage context: Go project. Use go mod tidy. Follow standard library patterns.",
-        "python" => "\nLanguage context: Python project. Use pip install for deps. Follow PEP 8. Use type hints.",
-        "javascript" => "\nLanguage context: JavaScript/Node.js project. Use npm/yarn. Prefer ES modules. Include package.json deps.",
-        "html_css" => "\nLanguage context: HTML/CSS project. Use semantic HTML. Responsive CSS with modern layout (flexbox/grid).",
-        "dart" => "\nLanguage context: Dart/Flutter project. Use pub get for deps. Follow effective Dart guidelines.",
-        "cpp" => "\nLanguage context: C/C++ project. Use make/gcc. Show compilation commands.",
-        _ => "",
-    }
-}
-
-fn build_prompt(session: &ChatSession, client: &Provider) -> String {
-    let t = ui::theme::active();
-    let model_short = client.model.split(':').next().unwrap_or(&client.model);
-    let mode_key = ui::theme::accent_for_mode(session.mode.label());
-    let provider_prefix = match client.kind {
-        ProviderKind::Ollama => "",
-        _ => client.kind.as_str(),
-    };
-    let mut p = String::new();
-    p.push('\x01');
-    p.push_str(t.fg(mode_key));
-    p.push('\x02');
-    p.push('[');
-    p.push_str(session.mode.label());
-    p.push(']');
-    p.push_str("\x01\x1b[0m\x02");
-    p.push(' ');
-    p.push('\x01');
-    p.push_str(t.fg("accent"));
-    p.push('\x02');
-    if !provider_prefix.is_empty() {
-        p.push_str(provider_prefix);
-        p.push('/');
-    }
-    p.push_str(model_short);
-    p.push('>');
-    p.push_str("\x01\x1b[0m\x02");
-    p.push(' ');
-    p
 }
 
 async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> Result<()> {
@@ -1258,7 +558,11 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
             match line {
                 Ok(s) => break s,
                 Err(e) => {
-                    eprintln!("  {} input error: {}", ui::theme::paint_error_label(&t, "err:"), e);
+                    eprintln!(
+                        "  {} input error: {}",
+                        ui::theme::paint_error_label(&t, "err:"),
+                        e
+                    );
                     if e.kind() == io::ErrorKind::Interrupted
                         || e.kind() == io::ErrorKind::UnexpectedEof
                     {
@@ -1266,7 +570,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                     }
                     error_count += 1;
                     if error_count >= 3 {
-                        eprintln!("  {} too many errors, exiting", ui::theme::paint_error_label(&t, "err:"));
+                        eprintln!(
+                            "  {} too many errors, exiting",
+                            ui::theme::paint_error_label(&t, "err:")
+                        );
                         return Ok(());
                     }
                     continue;
@@ -1291,7 +598,11 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
         if trimmed.eq_ignore_ascii_case("/theme") {
             let themes = ui::theme::list_names();
             println!("{}", ui::theme::paint_rail_empty(&t));
-            println!("{} {}", ui::theme::paint_rail_empty(&t), ui::theme::paint_bright(&t, "themes"));
+            println!(
+                "{} {}",
+                ui::theme::paint_rail_empty(&t),
+                ui::theme::paint_bright(&t, "themes")
+            );
             println!("{}", ui::theme::paint_rail_empty(&t));
             for name in &themes {
                 let preview = ui::theme::by_name(name);
@@ -1307,7 +618,11 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                 println!("{accent} {label}  {swatch}");
             }
             println!("{}", ui::theme::paint_rail_empty(&t));
-            println!("{} {}", ui::theme::paint_rail_empty(&t), ui::theme::paint_dim(&t, "use /theme <name> to switch"));
+            println!(
+                "{} {}",
+                ui::theme::paint_rail_empty(&t),
+                ui::theme::paint_dim(&t, "use /theme <name> to switch")
+            );
             println!("{}", ui::theme::paint_rail_empty(&t));
             continue;
         }
@@ -1318,7 +633,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                 cfg.theme = active_theme.name.clone();
                 let _ = save_config(cfg);
                 let rail = ui::theme::paint_rail_empty(&t);
-                let msg = ui::theme::paint_success_label(&t, &format!("theme \u{2192} {}", active_theme.name));
+                let msg = ui::theme::paint_success_label(
+                    &t,
+                    &format!("theme \u{2192} {}", active_theme.name),
+                );
                 println!("{rail}");
                 println!("{rail} {msg}");
                 println!("{rail}");
@@ -1326,7 +644,13 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                 let rail = ui::theme::paint_rail_empty(&t);
                 let msg = ui::theme::paint_warning(&t, &format!("unknown theme '{}'", name));
                 println!("{rail} {msg}");
-                println!("{rail} {}", ui::theme::paint_dim(&t, "available: GHOST, PHOSPHOR, MIST, EMBER, SAKURA, PAPER"));
+                println!(
+                    "{rail} {}",
+                    ui::theme::paint_dim(
+                        &t,
+                        "available: GHOST, PHOSPHOR, MIST, EMBER, SAKURA, PAPER"
+                    )
+                );
                 println!("{rail}");
             }
             continue;
@@ -1335,13 +659,18 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
         if let Some(tail) = trimmed.strip_prefix("/model ") {
             let new_model = tail.trim().to_string();
             if new_model.is_empty() {
-                println!("{} model: {}", ui::theme::paint_rail_empty(&t), client.model);
+                println!(
+                    "{} model: {}",
+                    ui::theme::paint_rail_empty(&t),
+                    client.model
+                );
             } else {
                 client.set_model(new_model.clone());
                 cfg.model = new_model;
                 let _ = save_config(cfg);
                 let rail = ui::theme::paint_rail_empty(&t);
-                let msg = ui::theme::paint_success_label(&t, &format!("model \u{2192} {}", client.model));
+                let msg =
+                    ui::theme::paint_success_label(&t, &format!("model \u{2192} {}", client.model));
                 println!("{rail}");
                 println!("{rail} {msg}");
                 println!("{rail}");
@@ -1354,7 +683,7 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
             if new_provider.is_empty() {
                 let rail = ui::theme::paint_rail_empty(&t);
                 let label = ui::theme::paint_bright(&t, "current provider:");
-                let val = ui::theme::paint_dim(&t, &client.kind.as_str());
+                let val = ui::theme::paint_dim(&t, client.kind.as_str());
                 println!("{rail}");
                 println!("{rail} {label} {val}");
                 println!("{rail}");
@@ -1368,7 +697,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                 Ok(new_client) => {
                     *client = new_client;
                     let rail = ui::theme::paint_rail_empty(&t);
-                    let msg = ui::theme::paint_success_label(&t, &format!("provider \u{2192} {}", client.kind.as_str()));
+                    let msg = ui::theme::paint_success_label(
+                        &t,
+                        &format!("provider \u{2192} {}", client.kind.as_str()),
+                    );
                     println!("{rail}");
                     println!("{rail} {msg}");
                     let model_msg = ui::theme::paint_dim(&t, &format!("model: {}", client.model));
@@ -1377,7 +709,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                 }
                 Err(e) => {
                     let rail = ui::theme::paint_rail_empty(&t);
-                    let msg = ui::theme::paint_error_label(&t, &format!("failed to switch provider: {}", e));
+                    let msg = ui::theme::paint_error_label(
+                        &t,
+                        &format!("failed to switch provider: {}", e),
+                    );
                     println!("{rail} {msg}");
                     println!("{rail}");
                 }
@@ -1446,7 +781,12 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                 RunMode::Plan => "explore & plan \u{2014} analyze, propose approach, no code",
             };
             let rail = ui::theme::paint_rail_empty(&t);
-            let status = ui::theme::paint(&t, mode_key, &format!("switched to {mode_label} mode"), true);
+            let status = ui::theme::paint(
+                &t,
+                mode_key,
+                &format!("switched to {mode_label} mode"),
+                true,
+            );
             let sub = ui::theme::paint_dim(&t, hint);
             println!("{rail}");
             println!("{rail} {status}");
@@ -1461,7 +801,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
             let _ = save_config(cfg);
             let rail = ui::theme::paint_rail_empty(&t);
             let status = ui::theme::paint(&t, "accent_info", "switched to PLAN mode", true);
-            let sub = ui::theme::paint_dim(&t, "explore & plan \u{2014} analyze, propose approach, no code");
+            let sub = ui::theme::paint_dim(
+                &t,
+                "explore & plan \u{2014} analyze, propose approach, no code",
+            );
             println!("{rail}");
             println!("{rail} {status}");
             println!("{rail}  {sub}");
@@ -1527,8 +870,14 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
             session.last_files.clear();
             session.last_files_written.clear();
             let rail = ui::theme::paint_rail_empty(&t);
-            let msg = ui::theme::paint_success_label(&t, "full reset \u{2014} history, code cache, and results cleared");
-            let sub = ui::theme::paint_dim(&t, "(memory preserved \u{2014} use /memory to clear project memory)");
+            let msg = ui::theme::paint_success_label(
+                &t,
+                "full reset \u{2014} history, code cache, and results cleared",
+            );
+            let sub = ui::theme::paint_dim(
+                &t,
+                "(memory preserved \u{2014} use /memory to clear project memory)",
+            );
             println!("{rail}");
             println!("{rail} {msg}");
             println!("{rail}   {sub}");
@@ -1549,7 +898,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
             if let Ok(n) = tail.trim().parse::<usize>() {
                 handle_copy(&session, n);
             } else {
-                println!("{} usage: /copy [N] — N is a number", ui::theme::paint_warning(&t, "│"));
+                println!(
+                    "{} usage: /copy [N] — N is a number",
+                    ui::theme::paint_warning(&t, "│")
+                );
             }
             continue;
         }
@@ -1595,7 +947,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
         if trimmed.eq_ignore_ascii_case("/find") {
             let rail = ui::theme::paint_rail_empty(&t);
             let usage = ui::theme::paint_bright(&t, "usage: /find <query>");
-            let detail = ui::theme::paint_dim(&t, "search text inside the project (skips node_modules, target, .git, ...)");
+            let detail = ui::theme::paint_dim(
+                &t,
+                "search text inside the project (skips node_modules, target, .git, ...)",
+            );
             println!("{rail}");
             println!("{rail} {usage}");
             println!("{rail}  {detail}");
@@ -1643,8 +998,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                 || lower_db.starts_with("how ")
                 || lower_db.starts_with("why ")
                 || lower_db.starts_with("explain ");
-            let debug_intent = ui::theme::paint_dim(&t, &format!("  has_creation_intent={create_hit}"));
-            let debug_fix = ui::theme::paint_dim(&t, &format!("  fix_window={fix_hit}  is_question={is_q}"));
+            let debug_intent =
+                ui::theme::paint_dim(&t, &format!("  has_creation_intent={create_hit}"));
+            let debug_fix =
+                ui::theme::paint_dim(&t, &format!("  fix_window={fix_hit}  is_question={is_q}"));
             println!("{rail}");
             println!("{rail} {intent_label} {intent_val}");
             println!("{rail} {input_label} {input_val}");
@@ -1755,7 +1112,12 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
         if session.mode == RunMode::Chat && intent == TaskIntent::CodeAction {
             let rail = ui::theme::paint_rail_empty(&t);
             let hint_label = ui::theme::paint_warning(&t, "hint:");
-            let hint_msg = ui::theme::paint(&t, "accent", "this looks like a code request \u{2014} type /mode to switch to CODE", false);
+            let hint_msg = ui::theme::paint(
+                &t,
+                "accent",
+                "this looks like a code request \u{2014} type /mode to switch to CODE",
+                false,
+            );
             println!("{rail}");
             println!("{rail}  {hint_label} {hint_msg}");
             println!("{rail}");
@@ -1763,7 +1125,12 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
         if session.mode == RunMode::Plan && intent == TaskIntent::CodeAction {
             let rail = ui::theme::paint_rail_empty(&t);
             let hint_label = ui::theme::paint_warning(&t, "hint:");
-            let hint_msg = ui::theme::paint(&t, "accent_info", "in PLAN mode \u{2014} I'll analyze first, then you can switch to CODE", false);
+            let hint_msg = ui::theme::paint(
+                &t,
+                "accent_info",
+                "in PLAN mode \u{2014} I'll analyze first, then you can switch to CODE",
+                false,
+            );
             println!("{rail}");
             println!("{rail}  {hint_label} {hint_msg}");
             println!("{rail}");
@@ -1788,7 +1155,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                     validate_chat_response(&text, &intent, &session.mode);
                 let cleaned = if was_validated && session.mode != RunMode::Code {
                     let warn = ui::theme::paint_warning(&t, "\u{258C}");
-                    let note = ui::theme::paint_dim(&t, "(response contained unexpected code \u{2014} showing text only)");
+                    let note = ui::theme::paint_dim(
+                        &t,
+                        "(response contained unexpected code \u{2014} showing text only)",
+                    );
                     println!("{warn} {note}");
                     validated_text
                 } else {
@@ -1810,16 +1180,28 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                         session.last_files = files.clone();
                         session.last_code = if code.is_empty() { String::new() } else { code };
                         let gen_label = ui::theme::paint_success_label(&t, "generated:");
-                        let gen_count = ui::theme::paint_bright(&t, &format!("{} file(s)", files.len()));
+                        let gen_count =
+                            ui::theme::paint_bright(&t, &format!("{} file(s)", files.len()));
                         println!("{}", rail_chr());
                         println!("{} {} {}", rail_chr(), gen_label, gen_count);
                         for f in &files {
                             let icon = file_icon(&f.path);
                             if f.path.is_empty() {
-                                println!("{}   {} unnamed ({} bytes)", rail_chr(), icon, f.content.len());
+                                println!(
+                                    "{}   {} unnamed ({} bytes)",
+                                    rail_chr(),
+                                    icon,
+                                    f.content.len()
+                                );
                             } else {
                                 let path = ui::theme::paint_bright(&t, &f.path);
-                                println!("{}   {} {} ({} bytes)", rail_chr(), icon, path, f.content.len());
+                                println!(
+                                    "{}   {} {} ({} bytes)",
+                                    rail_chr(),
+                                    icon,
+                                    path,
+                                    f.content.len()
+                                );
                             }
                         }
                         println!("{}", rail_chr());
@@ -1827,7 +1209,10 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                     } else if !code.is_empty() {
                         session.last_code = code;
                         session.last_files.clear();
-                        let msg = ui::theme::paint_success_label(&t, "detected code block \u{2014} use /write <path> to save");
+                        let msg = ui::theme::paint_success_label(
+                            &t,
+                            "detected code block \u{2014} use /write <path> to save",
+                        );
                         println!("{}", rail_chr());
                         println!("{} {}", rail_chr(), msg);
                         println!("{}", rail_chr());
@@ -1837,7 +1222,11 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                         }
                     }
                 } else if cleaned.is_empty() {
-                    println!("{} {}", ui::theme::paint_warning(&t, "\u{258C}"), ui::theme::paint_dim(&t, "(empty response)"));
+                    println!(
+                        "{} {}",
+                        ui::theme::paint_warning(&t, "\u{258C}"),
+                        ui::theme::paint_dim(&t, "(empty response)")
+                    );
                 } else {
                     for line in cleaned.lines() {
                         println!("{} {}", rail_chr(), line);
@@ -1852,7 +1241,8 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
 
                 let rail = ui::theme::paint_rail_empty(&t);
                 let provider_tag = ui::theme::paint_chip(&t, client.kind.as_str());
-                let dur = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                let dur =
+                    ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
                 let speed = ui::theme::paint_dim(&t, &format!("{:.0} tok/s", tps));
                 let dot = ui::theme::paint_dim(&t, "\u{00B7}");
                 println!("{rail}");
@@ -1870,7 +1260,8 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
                 let rail = ui::theme::paint_rail_empty(&t);
                 let err_label = ui::theme::paint_error_label(&t, "\u{2717}");
                 let err_msg = ui::theme::paint(&t, "error", &e.to_string(), false);
-                let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                let timer =
+                    ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
                 println!("{rail}");
                 println!("{rail} {err_label} {err_msg}");
                 println!("{rail} {timer}");
@@ -1882,1644 +1273,7 @@ async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> 
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Clone)]
-enum RunMode {
-    Chat,
-    Code,
-    Plan,
-}
-
-impl RunMode {
-    fn toggle(&self) -> RunMode {
-        match self {
-            RunMode::Chat => RunMode::Code,
-            RunMode::Code => RunMode::Plan,
-            RunMode::Plan => RunMode::Chat,
-        }
-    }
-
-    fn label(&self) -> &str {
-        match self {
-            RunMode::Chat => "CHAT",
-            RunMode::Code => "CODE",
-            RunMode::Plan => "PLAN",
-        }
-    }
-}
-
-fn validate_chat_response(response: &str, intent: &TaskIntent, mode: &RunMode) -> (bool, String) {
-    if *intent != TaskIntent::CodeAction && *mode != RunMode::Code {
-        let has_code_fences = response.contains("```");
-        let has_multi_file = response.contains("### ") && has_code_fences;
-        let has_json = response.trim().starts_with('{')
-            && (response.contains("\"code\"") || response.contains("\"files\""));
-
-        if has_multi_file || has_json {
-            let code_stripped = strip_code_blocks(response);
-            if !code_stripped.trim().is_empty() {
-                return (true, code_stripped);
-            }
-            return (
-                true,
-                "I understood your question. Let me answer directly: ".to_string(),
-            );
-        }
-    }
-
-    if response.trim().is_empty() {
-        return (
-            true,
-            "(No response generated — please try again or rephrase)".to_string(),
-        );
-    }
-
-    (false, String::new())
-}
-
-fn prompt_for_path(session: &mut ChatSession) -> io::Result<String> {
-    let t = ui::theme::active();
-    let workspace_display = session
-        .project_dir
-        .as_ref()
-        .map(|d| d.display().to_string())
-        .unwrap_or_else(|| "current dir".to_string());
-    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent_info", "│  ?", true),
-        ui::theme::paint_bright(
-            &t,
-            "Where should I create this? (e.g. ./my-site/index.html or ./project/)"
-        )
-    );
-    println!(
-        "{} workspace: {}",
-        ui::theme::paint(&t, "accent_info", "│", true),
-        ui::theme::paint_bright(&t, &format!("{}", workspace_display))
-    );
-    println!(
-        "{} type '.' for workspace root, or /dir <path> to change",
-        ui::theme::paint(&t, "accent_info", "│", true),
-    );
-    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-
-    loop {
-        let line = session.readline("rem> path: ");
-        let line = match line {
-            Ok(s) => s,
-            Err(_) => return Ok(".".to_string()),
-        };
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        session.add_history(trimmed);
-
-        if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/dir ") {
-            handle_dir(session, tail);
-            continue;
-        }
-
-        return Ok(trimmed.to_string());
-    }
-}
-
-fn handle_write(session: &mut ChatSession, path: &str) {
-    let t = ui::theme::active();
-    let trimmed = path.trim();
-    let base_dir = session
-        .project_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let abs_path = match resolve_safe_path(&base_dir, trimmed) {
-        Some(p) => p,
-        None => return,
-    };
-
-    if session.last_code.is_empty() {
-        println!(
-            "  {} No code from last response. Use `/code` to view it.",
-            ui::theme::paint_warning(&t, "!")
-        );
-        return;
-    }
-
-    if abs_path.exists() {
-        let existing_size = fs::metadata(&abs_path).map(|m| m.len()).unwrap_or(0);
-        println!(
-            "  {} {} exists ({} bytes) — {} [y/N]",
-            ui::theme::paint_warning(&t, "\u{26a0}"),
-            ui::theme::paint_bright(&t, trimmed),
-            existing_size,
-            ui::theme::paint_dim(&t, "overwrite?")
-        );
-        let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
-        if !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
-            println!("  {} skipped", ui::theme::paint_rail_empty(&t));
-            return;
-        }
-    }
-
-    if let Some(parent) = abs_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = fs::create_dir_all(parent) {
-                eprintln!(
-                    "  {} cannot create directory {}: {}",
-                    ui::theme::paint_error_label(&t, "\u{2717}"),
-                    parent.display(),
-                    e
-                );
-                return;
-            }
-        }
-    }
-
-    let tmp = abs_path.with_extension("tmp");
-    match fs::write(&tmp, &session.last_code) {
-        Ok(()) => {
-            if let Err(e) = fs::rename(&tmp, &abs_path) {
-                eprintln!("  {} atomic write failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
-                let _ = fs::remove_file(&tmp);
-                return;
-            }
-            println!(
-                "  {} wrote {} ({} bytes)",
-                ui::theme::paint_success_label(&t, "\u{2713}"),
-                ui::theme::paint_bright(&t, &format!("{}", abs_path.display())),
-                session.last_code.len()
-            );
-            session.last_files_written.push(abs_path);
-        }
-        Err(e) => {
-            println!("  {} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
-            let _ = fs::remove_file(&tmp);
-        }
-    }
-}
-
-fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
-    let t = ui::theme::active();
-    if files.is_empty() || files.iter().all(|f| f.path.is_empty()) {
-        println!(
-            "{}  Type /write <path> to save.",
-            ui::theme::paint_warning(&t, "\u{2502}  !"),
-        );
-        return;
-    }
-
-    let base_dir = session
-        .project_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let mut safe_entries: Vec<(&FileEntry, PathBuf)> = Vec::new();
-    for f in files {
-        if f.path.is_empty() {
-            continue;
-        }
-        match resolve_safe_path(&base_dir, &f.path) {
-            Some(abs) => safe_entries.push((f, abs)),
-            None => {
-                eprintln!(
-                    "{}   {} {} {}",
-                    ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
-                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                    ui::theme::paint_dim(&t, "—"),
-                    ui::theme::paint_error_label(&t, "path traversal blocked")
-                );
-            }
-        }
-    }
-
-    if safe_entries.is_empty() {
-        return;
-    }
-
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {}",
-        ui::theme::paint_rail_empty(&t),
-        ui::theme::paint_bright(&t, &format!("Plan: creating {} file(s)", safe_entries.len())),
-    );
-    for (f, abs_path) in &safe_entries {
-        let icon = file_icon(&f.path);
-        let lines = f.content.lines().count();
-        let marker = if abs_path.exists() {
-            ui::theme::paint_warning(&t, " [EXISTS]")
-        } else {
-            String::new()
-        };
-        println!(
-            "{}   {} {} ({}, {} lines){}",
-            ui::theme::paint_rail_empty(&t),
-            icon,
-            ui::theme::paint_bright(&t, &format!("{}", f.path)),
-            ui::theme::paint_dim(&t, &format!("{} bytes", f.content.len())),
-            ui::theme::paint_dim(&t, &format!("{}", lines)),
-            marker
-        );
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {} {}",
-        ui::theme::paint(&t, "accent_info", "\u{2502}  ?", true),
-        ui::theme::paint_bright(&t, &format!("Write all {} files? [Y/n]", safe_entries.len())),
-        ui::theme::paint_dim(&t, "(press Enter to confirm)")
-    );
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent_info", "\u{2502}", true),
-        ui::theme::paint_dim(&t, "  Type /code to preview, 'n' to cancel")
-    );
-    println!("{}", ui::theme::paint_rail_empty(&t));
-
-    let input = session
-        .readline("rem> ")
-        .unwrap_or_else(|_| String::from("y"));
-    let input = input.trim();
-    if !input.is_empty() && !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
-        println!(
-            "{} skipped. Use /write <path> to save individually.",
-            ui::theme::paint_warning(&t, "\u{2502}  !")
-        );
-        println!("{}", ui::theme::paint_rail_empty(&t));
-        return;
-    }
-
-    let mut written: Vec<PathBuf> = Vec::new();
-    for (f, abs_path) in &safe_entries {
-        let will_overwrite = abs_path.exists();
-        if will_overwrite {
-            println!(
-                "{}   {} {}",
-                ui::theme::paint_warning(&t, "\u{2502} \u{26a0}"),
-                ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                ui::theme::paint_dim(&t, "exists \u{2014} overwriting"),
-            );
-        }
-
-        if let Some(parent) = abs_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    eprintln!(
-                        "{}   {} cannot create dir {}: {}",
-                        ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
-                        ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                        parent.display(),
-                        e
-                    );
-                    continue;
-                }
-            }
-        }
-
-        let tmp = abs_path.with_extension("tmp");
-        match fs::write(&tmp, &f.content) {
-            Ok(()) => {
-                if let Err(e) = fs::rename(&tmp, abs_path) {
-                    eprintln!(
-                        "{}   {} atomic write failed: {}",
-                        ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
-                        ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                        e
-                    );
-                    let _ = fs::remove_file(&tmp);
-                    continue;
-                }
-                let overwrite_note = if will_overwrite { " (overwritten)" } else { "" };
-                println!(
-                    "{}   {} {} {}",
-                    ui::theme::paint_success_label(&t, "\u{2502} \u{2713}"),
-                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                    ui::theme::paint_dim(&t, &format!("{} bytes", f.content.len())),
-                    ui::theme::paint_dim(&t, &format!("{}", overwrite_note)),
-                );
-                written.push(abs_path.clone());
-            }
-            Err(e) => {
-                println!(
-                    "{}   {} : {}",
-                    ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
-                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                    e
-                );
-                let _ = fs::remove_file(&tmp);
-            }
-        }
-    }
-
-    if !written.is_empty() {
-        session.last_files_written = written;
-        println!(
-            "{} {} files written.",
-            ui::theme::paint_success_label(&t, "\u{2502} \u{2713}"),
-            ui::theme::paint_bright(&t, &format!("{}", session.last_files_written.len())),
-        );
-    }
-}
-
-fn handle_undo(session: &mut ChatSession) {
-    let t = ui::theme::active();
-    if session.last_files_written.is_empty() {
-        println!("  {} Nothing to undo.", ui::theme::paint_warning(&t, "!"));
-        return;
-    }
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent_info", "\u{258C}  ?", true),
-        ui::theme::paint_bright(&t, &format!("Delete the last {} written file(s)? [y/N]", session.last_files_written.len()))
-    );
-
-    let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
-    let input = input.trim();
-    if !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
-        println!("  {} cancelled", ui::theme::paint_rail_empty(&t));
-        return;
-    }
-
-    let mut removed = 0;
-    let mut dirs_to_clean: Vec<PathBuf> = Vec::new();
-    for path in session.last_files_written.drain(..) {
-        if path.exists() {
-            if let Some(parent) = path.parent() {
-                dirs_to_clean.push(parent.to_path_buf());
-            }
-            match fs::remove_file(&path) {
-                Ok(()) => {
-                    println!(
-                        "  {} removed {}",
-                        ui::theme::paint_warning(&t, "\u{258C}"),
-                        ui::theme::paint_dim(&t, &format!("{}", path.display()))
-                    );
-                    removed += 1;
-                }
-                Err(e) => {
-                    println!(
-                        "  {} failed to remove {}: {}",
-                        ui::theme::paint_error_label(&t, "\u{258C}"),
-                        path.display(),
-                        e
-                    );
-                }
-            }
-        }
-    }
-
-    dirs_to_clean.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
-    for dir in &dirs_to_clean {
-        if dir.exists() {
-            let _ = fs::remove_dir(dir);
-        }
-    }
-
-    if removed > 0 {
-        let input = session.last_user_input.clone();
-        let intent = session.last_intent.clone();
-        if intent == TaskIntent::CodeAction {
-            session
-                .feedback
-                .record_correction(&input, &intent, &TaskIntent::FastAnswer);
-        }
-        println!(
-            "  {} {} {} file(s) removed.",
-            ui::theme::paint_success_label(&t, "\u{258C} \u{2713}"),
-            removed,
-            ""
-        );
-    }
-}
-
-fn handle_list_files(session: &ChatSession) {
-    let dir = session
-        .project_dir
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let t = ui::theme::active();
-
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {}",
-        ui::theme::paint_rail_empty(&t),
-        ui::theme::paint_bright(&t, &format!("\u{1f4c2} project ({})", dir.display()))
-    );
-    println!("{}", ui::theme::paint_rail_empty(&t));
-
-    let mut entries: Vec<(String, bool, u64)> = Vec::new();
-    for entry in WalkDir::new(&dir)
-        .max_depth(4)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let p = entry.path();
-        if p == dir {
-            continue;
-        }
-        if let Ok(rel) = p.strip_prefix(&dir) {
-            let size = if p.is_file() {
-                fs::metadata(p).map(|m| m.len()).unwrap_or(0)
-            } else {
-                0
-            };
-            entries.push((rel.display().to_string(), p.is_dir(), size));
-        }
-    }
-    entries.sort();
-
-    if entries.is_empty() {
-        println!(
-            "{}   {}",
-            ui::theme::paint_rail_empty(&t),
-            ui::theme::paint_warning(&t, "(empty)")
-        );
-    } else {
-        for (path, is_dir, size) in &entries {
-            let depth = path.chars().filter(|&c| c == '/').count();
-            let indent = "  ".repeat(depth);
-            let name = if let Some(pos) = path.rfind('/') {
-                &path[pos + 1..]
-            } else {
-                path
-            };
-            if *is_dir {
-                println!(
-                    "{} {} {} {} {}",
-                    ui::theme::paint_rail_empty(&t),
-                    indent,
-                    ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
-                    ui::theme::paint(&t, "accent_info", &format!("\u{1f4c1} {}/", name), true),
-                    ""
-                );
-            } else {
-                let icon = file_icon(name);
-                let hs = human_size(*size);
-                println!(
-                    "{} {} {} {} {} {}",
-                    ui::theme::paint_rail_empty(&t),
-                    indent,
-                    ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
-                    icon,
-                    ui::theme::paint_bright(&t, name),
-                    ui::theme::paint_dim(&t, &format!("({})", hs))
-                );
-            }
-        }
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-}
-
-fn print_last_files(session: &ChatSession) {
-    let t = ui::theme::active();
-    if !session.last_files.is_empty() {
-        for f in &session.last_files {
-            let label = if f.path.is_empty() {
-                "(unnamed)".to_string()
-            } else {
-                f.path.clone()
-            };
-            let lang = highlight::detect_language_from_content(&f.content);
-            let lang_display = if lang.is_empty() {
-                String::new()
-            } else {
-                format!(" [{}]", lang)
-            };
-            println!(
-                "{}",
-                ui::theme::paint_bright(&t, &format!(
-                    "\u{2500}\u{2500} {}{} \u{2500}\u{2500}",
-                    label,
-                    ui::theme::paint_dim(&t, &lang_display)
-                ))
-            );
-            let highlighted = highlight::highlight_code(&f.content, lang);
-            for code_line in highlighted.lines() {
-                println!("{}", code_line);
-            }
-            println!("{}", ui::theme::paint_dim(&t, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
-        }
-    } else if !session.last_code.is_empty() {
-        let lang = highlight::detect_language_from_content(&session.last_code);
-        let lang_display = if lang.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", lang)
-        };
-        println!(
-            "{}",
-            ui::theme::paint_bright(&t, &format!(
-                "\u{2500}\u{2500} last code{} \u{2500}\u{2500}",
-                ui::theme::paint_dim(&t, &lang_display)
-            ))
-        );
-        let highlighted = highlight::highlight_code(&session.last_code, lang);
-        println!("{}", highlighted);
-        println!("{}", ui::theme::paint_dim(&t, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
-    } else {
-        println!("  {} No code from last response.", ui::theme::paint_warning(&t, "!"));
-    }
-}
-
-fn handle_dir(session: &mut ChatSession, path: &str) {
-    let t = ui::theme::active();
-    let dir = PathBuf::from(path.trim());
-    let resolved = if path.trim() == "." {
-        std::env::current_dir().unwrap_or_default()
-    } else {
-        dir
-    };
-    if resolved.exists() || path.trim() == "." {
-        session.project_dir = Some(resolved.clone());
-        session.workspace_dir = Some(resolved.clone());
-        persist_workspace(&resolved);
-        println!(
-            "  {} workspace set to {}",
-            ui::theme::paint_success_label(&t, "✓"),
-            ui::theme::paint_bright(&t, &session.project_dir.as_ref().unwrap().display().to_string())
-        );
-    } else {
-        println!(
-            "  {} directory does not exist — creating it",
-            ui::theme::paint_warning(&t, "!")
-        );
-        if let Err(e) = fs::create_dir_all(&resolved) {
-            println!("  {} failed: {}", ui::theme::paint_error_label(&t, "✗"), e);
-            return;
-        }
-        session.project_dir = Some(resolved.clone());
-        session.workspace_dir = Some(resolved.clone());
-        persist_workspace(&resolved);
-        println!(
-            "  {} workspace set to {}",
-            ui::theme::paint_success_label(&t, "✓"),
-            ui::theme::paint_bright(&t, &session.project_dir.as_ref().unwrap().display().to_string())
-        );
-    }
-}
-
-fn persist_workspace(dir: &Path) {
-    let t = ui::theme::active();
-    let mut cfg = load_config().unwrap_or_default();
-    cfg.workspace_dir = Some(dir.to_string_lossy().to_string());
-    if let Err(e) = save_config(&cfg) {
-        eprintln!(
-            "  {} failed to save workspace config: {}",
-            ui::theme::paint_error_label(&t, "✗"),
-            e
-        );
-    }
-}
-
-async fn handle_search(client: &Provider, session: &mut ChatSession, query: &str) {
-    let t = ui::theme::active();
-    println!(
-        "{} {} searching the web...",
-        ui::theme::paint_rail_empty(&t),
-        ui::theme::paint(&t, "accent", "🔍", true)
-    );
-    match perform_web_search(&client.client, query).await {
-        Ok(results) => {
-            if results.is_empty() {
-                println!("{} no results found for: {}", ui::theme::paint_warning(&t, "│"), query);
-            } else {
-                println!(
-                    "{} {} results for: {}",
-                    ui::theme::paint_rail_empty(&t),
-                    results.len(),
-                    ui::theme::paint_bright(&t, query)
-                );
-                print_search_results(&results);
-                session.last_search = results;
-            }
-        }
-        Err(e) => {
-            println!("{} {}", ui::theme::paint_error_label(&t, "│  search failed:"), e);
-        }
-    }
-}
-
-async fn handle_explain(client: &Provider, session: &mut ChatSession, text: &str) {
-    let t = ui::theme::active();
-    if text.trim().is_empty() {
-        println!("{} usage: /explain <code snippet>", ui::theme::paint_warning(&t, "│"));
-        return;
-    }
-    println!("{} explaining...", ui::theme::paint(&t, "accent", "\u{258C}", true));
-    let prompt = format!(
-        "Explain what the following code does in clear, plain language. \
-         Be concise but thorough. Cover: purpose, key components, control flow. \
-         Do NOT generate new code. Just explain.\n\nCode:\n```\n{}\n```",
-        text
-    );
-    match client.complete_chat_stream(
-        &prompt,
-        "[MODE: CHAT] You are a code explainer. Respond with plain text only — no code generation, no file format, no JSON.",
-        "",
-    ).await {
-        Ok(response) => {
-            println!("\n{}", response);
-            session.add_history(&format!("/explain {}", text));
-            session.history.push((format!("/explain {}", text), response));
-        }
-        Err(e) => {
-            println!("\n{} explain failed: {}", ui::theme::paint_error_label(&t, "│"), e);
-        }
-    }
-}
-
-async fn handle_test(client: &Provider, session: &mut ChatSession, path: &str) {
-    let t = ui::theme::active();
-    let file_path = Path::new(path.trim());
-    if !file_path.exists() {
-        println!("{} file not found: {}", ui::theme::paint_warning(&t, "│"), path);
-        return;
-    }
-    let content = match fs::read_to_string(file_path) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("{} cannot read file: {}", ui::theme::paint_error_label(&t, "│"), e);
-            return;
-        }
-    };
-    println!(
-        "{} generating tests for {}...",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        path
-    );
-    let prompt = format!(
-        "Generate comprehensive tests for the following code. \
-         Include unit tests for all public functions/methods, edge cases, \
-         and error handling. Write tests in the same language and testing \
-         framework conventions.\n\nSource code:\n```\n{}\n```",
-        truncate_to_lines(&content, 200)
-    );
-    match client.complete_chat_stream(
-        &prompt,
-        "[MODE: CODE] Generate test code for the given source file. Respond with the test code in a fenced code block.",
-        "",
-    ).await {
-        Ok(response) => {
-            println!();
-            println!("{}", response);
-            session.last_code = extract_code_block(&response);
-            session.add_history(&format!("/test {}", path));
-            session.history.push((format!("/test {}", path), response));
-            if !session.last_code.is_empty() {
-                println!("{} tests ready — use {} to save",
-                    ui::theme::paint_success_label(&t, "│"),
-                    ui::theme::paint_bright(&t, "/write <path>"));
-            }
-        }
-        Err(e) => {
-            println!("\n{} test generation failed: {}", ui::theme::paint_error_label(&t, "│"), e);
-        }
-    }
-}
-
-async fn handle_refactor(client: &Provider, session: &mut ChatSession, path: &str) {
-    let t = ui::theme::active();
-    let file_path = Path::new(path.trim());
-    if !file_path.exists() {
-        println!("{} file not found: {}", ui::theme::paint_warning(&t, "│"), path);
-        return;
-    }
-    let content = match fs::read_to_string(file_path) {
-        Ok(c) => c,
-        Err(e) => {
-            println!("{} cannot read file: {}", ui::theme::paint_error_label(&t, "│"), e);
-            return;
-        }
-    };
-    println!(
-        "{} analyzing {} for refactoring...",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        path
-    );
-    let prompt = format!(
-        "Review the following code and suggest refactoring improvements. \
-         Consider: code clarity, DRY principle, performance, error handling, \
-         naming, structure. Give specific recommendations with before/after \
-         code examples where helpful.\n\nSource code:\n```\n{}\n```",
-        truncate_to_lines(&content, 200)
-    );
-    match client.complete_chat_stream(
-        &prompt,
-        "[MODE: CHAT] You are a code reviewer. Analyze the code and provide refactoring suggestions. Use clear markdown formatting.",
-        "",
-    ).await {
-        Ok(response) => {
-            println!();
-            println!("{}", response);
-            session.add_history(&format!("/refactor {}", path));
-            session.history.push((format!("/refactor {}", path), response));
-        }
-        Err(e) => {
-            println!("\n{} refactor analysis failed: {}", ui::theme::paint_error_label(&t, "│"), e);
-        }
-    }
-}
-
-fn handle_config(session: &ChatSession, client: &Provider) {
-    let t = ui::theme::active();
-    println!("{}", ui::theme::paint_rail_header(&t, "CONFIG"));
-    println!(
-        "{}   {:<18} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "provider:"),
-        ui::theme::paint_dim(&t, client.kind.as_str())
-    );
-    println!(
-        "{}   {:<18} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "model:"),
-        ui::theme::paint_dim(&t, &client.model)
-    );
-    println!(
-        "{}   {:<18} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "base url:"),
-        ui::theme::paint_dim(&t, &client.base_url)
-    );
-    println!(
-        "{}   {:<18} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "mode:"),
-        ui::theme::paint_dim(&t, &session.mode.label())
-    );
-    println!(
-        "{}   {:<18} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "workspace:"),
-        ui::theme::paint_dim(
-            &t,
-            &session
-                .project_dir
-                .as_ref()
-                .map(|d| d.display().to_string())
-                .unwrap_or_else(|| "none".to_string())
-        )
-    );
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_dim(&t, "/model <name>  /provider <name>  /config workspace <path>")
-    );
-    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-}
-
-fn handle_config_set(session: &mut ChatSession, client: &Provider, args: &str) {
-    let t = ui::theme::active();
-    let parts: Vec<&str> = args.splitn(2, ' ').collect();
-    if parts.is_empty() {
-        handle_config(session, client);
-        return;
-    }
-    match parts[0] {
-        "workspace" | "dir" => {
-            if parts.len() > 1 {
-                handle_dir(session, parts[1]);
-            } else {
-                println!("{} usage: /config workspace <path>", ui::theme::paint_warning(&t, "\u{258C}"));
-            }
-        }
-        other => {
-            println!("{} unknown config key: {}", ui::theme::paint_warning(&t, "\u{258C}"), other);
-            println!("{} available: model, workspace", ui::theme::paint_rail_empty(&t));
-        }
-    }
-}
-
-fn handle_diff(session: &ChatSession) {
-    let t = ui::theme::active();
-    if session.last_files.is_empty() {
-        println!(
-            "{} No generated files to compare.",
-            ui::theme::paint_warning(&t, "\u{2502}")
-        );
-        return;
-    }
-
-    let base_dir = session
-        .project_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    println!("{}", ui::theme::paint_dim(&t, "\u{2502}"));
-    println!(
-        "{} {}",
-        ui::theme::paint_rail_empty(&t),
-        ui::theme::paint_bright(&t, "--- DIFF ---"),
-    );
-    println!("{}", ui::theme::paint_dim(&t, "\u{2502}"));
-
-    for f in &session.last_files {
-        if f.path.is_empty() {
-            continue;
-        }
-        let rel_path = PathBuf::from(&f.path);
-        let abs_path = if rel_path.is_relative() {
-            base_dir.join(&rel_path)
-        } else {
-            rel_path
-        };
-
-        let icon = file_icon(&f.path);
-        if abs_path.exists() {
-            let existing = fs::read_to_string(&abs_path).unwrap_or_default();
-            if existing == f.content {
-                println!(
-                    "{} {} {} {}",
-                    ui::theme::paint_rail_empty(&t),
-                    icon,
-                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                    ui::theme::paint_dim(&t, "(unchanged)")
-                );
-            } else {
-                let added = f
-                    .content
-                    .lines()
-                    .count()
-                    .saturating_sub(existing.lines().count());
-                let removed = existing
-                    .lines()
-                    .count()
-                    .saturating_sub(f.content.lines().count());
-                println!(
-                    "{} {} {}",
-                    ui::theme::paint_rail_empty(&t),
-                    icon,
-                    ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                );
-                if added > 0 {
-                    println!(
-                        "{}   {}",
-                        ui::theme::paint_rail_empty(&t),
-                        ui::theme::paint_success_label(&t, &format!("+{} lines", added)),
-                    );
-                }
-                if removed > 0 {
-                    println!(
-                        "{}   {}",
-                        ui::theme::paint_rail_empty(&t),
-                        ui::theme::paint_error_label(&t, &format!("-{} lines", removed)),
-                    );
-                }
-                let old_lines: Vec<&str> = existing.lines().collect();
-                let new_lines: Vec<&str> = f.content.lines().collect();
-                let max_lines = old_lines.len().max(new_lines.len());
-                let mut diff_printed = 0;
-                for i in 0..max_lines {
-                    let old = old_lines.get(i).copied().unwrap_or("");
-                    let new = new_lines.get(i).copied().unwrap_or("");
-                    if old != new && diff_printed < 8 {
-                        if i < old_lines.len() && !old.is_empty() {
-                            println!(
-                                "{}     {} {}",
-                                ui::theme::paint_dim(&t, "\u{2502}"),
-                                ui::theme::paint_error_label(&t, "-"),
-                                ui::theme::paint_error_label(&t, &format!("{}", old))
-                            );
-                        }
-                        if i < new_lines.len() && !new.is_empty() {
-                            println!(
-                                "{}     {} {}",
-                                ui::theme::paint_dim(&t, "\u{2502}"),
-                                ui::theme::paint_success_label(&t, "+"),
-                                ui::theme::paint_success_label(&t, &format!("{}", new))
-                            );
-                        }
-                        diff_printed += 1;
-                    }
-                }
-                if max_lines > 8 && diff_printed > 0 {
-                    println!("{}     {}", ui::theme::paint_dim(&t, "\u{2502}"), ui::theme::paint_dim(&t, "..."));
-                }
-            }
-        } else {
-            println!(
-                "{} {} {} {}",
-                ui::theme::paint_rail_empty(&t),
-                icon,
-                ui::theme::paint_bright(&t, &format!("{}", f.path)),
-                ui::theme::paint_success_label(&t, &format!("(new file) {} bytes", f.content.len()))
-            );
-        }
-    }
-
-    let cmd = std::process::Command::new("git")
-        .args(["diff", "--stat", "--"])
-        .current_dir(&base_dir)
-        .output();
-
-    if let Ok(output) = cmd {
-        if !output.stdout.is_empty() {
-            println!("{}", ui::theme::paint_rail_empty(&t));
-            println!(
-                "{} {}",
-                ui::theme::paint_rail_empty(&t),
-                ui::theme::paint_dim(&t, "git diff --stat:")
-            );
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                println!(
-                    "{}   {}",
-                    ui::theme::paint_rail_empty(&t),
-                    ui::theme::paint_dim(&t, &format!("{}", line))
-                );
-            }
-        }
-    }
-
-    println!("{}", ui::theme::paint_rail_empty(&t));
-}
-
-fn handle_tokens(session: &ChatSession) {
-    let tokens = session.last_tokens;
-    let elapsed = session.last_elapsed.as_secs_f64();
-    let history_tokens: usize = session
-        .history
-        .iter()
-        .map(|(u, a)| (u.len() + a.len()) / 4)
-        .sum();
-    let t = ui::theme::active();
-
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{}  {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "\u{2500}\u{2500} TOKENS \u{2500}\u{2500}"),
-    );
-    println!(
-        "{}   {:<18} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, "last response:"),
-        ui::theme::paint_dim(&t, &format!("~{} tokens", tokens))
-    );
-
-    if elapsed > 0.0 && tokens > 0 {
-        let tps = tokens as f64 / elapsed;
-        println!(
-            "{}   {:<18} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_bright(&t, "speed:"),
-            ui::theme::paint_dim(&t, &format!("~{:.0} tok/s", tps))
-        );
-    }
-
-    if session.last_elapsed.as_secs() > 0 {
-        println!(
-            "{}   {:<18} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_bright(&t, "elapsed:"),
-            ui::theme::paint_dim(&t, &format!("{:.1}s", elapsed))
-        );
-    }
-
-    if history_tokens > 0 {
-        println!(
-            "{}   {:<18} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_bright(&t, "context history:"),
-            ui::theme::paint_dim(
-                &t,
-                &format!("~{} tokens ({} turns)", history_tokens, session.history.len())
-            )
-        );
-
-        // Display uses the new scaled default (was hardcoded 2048). In future this should come from
-        // the active Provider or ChatSession (after we store model_ctx + actual prompt budget).
-        let pct = (history_tokens as f64 / 4096.0 * 100.0).min(100.0);
-        println!(
-            "{}   {:<18} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_bright(&t, "context window:"),
-            ui::theme::paint_dim(&t, &format!("{:.0}% used (4096 limit)", pct))
-        );
-    } else {
-        println!(
-            "{}   {:<18} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_bright(&t, "context:"),
-            ui::theme::paint_dim(&t, "empty (no history)")
-        );
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-}
-
-fn handle_memory(session: &ChatSession) {
-    let t = ui::theme::active();
-    println!("{}", ui::theme::paint_rail_header(&t, "MEMORY"));
-    if session.project_memory.loaded && !session.project_memory.content.is_empty() {
-        for line in session.project_memory.content.lines() {
-            println!(
-                "{} {}",
-                ui::theme::paint(&t, "accent", "\u{258C}", true),
-                ui::theme::paint_dim(&t, line)
-            );
-        }
-    } else {
-        println!(
-            "{} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_dim(&t, "no project memory yet.")
-        );
-        println!(
-            "{} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_dim(&t, "use /init to generate, or /memory add <text>")
-        );
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_dim(&t, "/memory add <text>  /init  /memory clear")
-    );
-    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-}
-
-fn handle_memory_set(session: &mut ChatSession, args: &str) {
-    let t = ui::theme::active();
-    if args.eq_ignore_ascii_case("clear") {
-        session.project_memory.content.clear();
-        session.project_memory.loaded = false;
-        let _ = session.project_memory.save();
-        println!("{} memory cleared", ui::theme::paint_success_label(&t, "\u{2713}"));
-        return;
-    }
-    if let Some(text) = args.strip_prefix("add ") {
-        if let Err(e) = session.project_memory.append(text) {
-            println!("{} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
-        } else {
-            println!(
-                "{} appended to memory ({} bytes)",
-                ui::theme::paint_success_label(&t, "\u{2713}"),
-                text.len()
-            );
-        }
-        return;
-    }
-    if let Err(e) = session.project_memory.set(args) {
-        println!("{} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
-    } else {
-        println!(
-            "{} memory saved ({} bytes)",
-            ui::theme::paint_success_label(&t, "\u{2713}"),
-            args.len()
-        );
-    }
-}
-
-fn handle_init(session: &mut ChatSession) {
-    let dir = session
-        .project_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let ptype = detect_project_type(&dir);
-    let ptype_label = if ptype.is_empty() { "unknown" } else { ptype };
-    let t = ui::theme::active();
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, &format!("detected project type: {}", ptype_label))
-    );
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_dim(&t, "generating .rem/memory.md...")
-    );
-    let starter = ProjectMemory::generate_starter(&dir, ptype);
-    if let Err(e) = session.project_memory.set(&starter) {
-        println!(
-            "{} {} failed: {}",
-            ui::theme::paint_error_label(&t, "\u{258C}"),
-            ui::theme::paint_error_label(&t, "✗"),
-            e
-        );
-    } else {
-        println!(
-            "{} {} {} ({} bytes)",
-            ui::theme::paint_success_label(&t, "\u{258C}"),
-            ui::theme::paint_success_label(&t, "✓"),
-            ui::theme::paint_bright(&t, ".rem/memory.md created"),
-            starter.len()
-        );
-        println!(
-            "{} {} use {} to view",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            "",
-            ui::theme::paint_bright(&t, "/memory")
-        );
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-}
-
-async fn handle_compact(client: &Provider, session: &mut ChatSession) {
-    let t = ui::theme::active();
-    if session.history.is_empty() {
-        println!(
-            "{} nothing to compact — history is empty",
-            ui::theme::paint_warning(&t, "│")
-        );
-        return;
-    }
-    let history_text = session.build_chat_history();
-    let compact_prompt = format!(
-        "[SYSTEM] Summarize this conversation in 3-5 bullet points covering key decisions, code generated, and next actions. Be concise.\n\n{}",
-        history_text
-    );
-    println!(
-        "{} compacting {} turns...",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        session.history.len()
-    );
-    match client
-        .complete_chat_stream(
-            &compact_prompt,
-            "You are a summarizer. Output only bullet-point summary. No preamble, no code.",
-            "",
-        )
-        .await
-    {
-        Ok(summary) => {
-            let old_count = session.history.len();
-            session.history.clear();
-            session.history.push((
-                "[compacted summary]".to_string(),
-                summary.trim().to_string(),
-            ));
-            println!(
-                "{} {} {} → {} turns",
-                ui::theme::paint(&t, "accent", "\u{258C}", true),
-                ui::theme::paint_success_label(&t, "✓ compacted:"),
-                old_count,
-                session.history.len()
-            );
-        }
-        Err(e) => {
-            println!(
-                "{} {} compact failed: {}",
-                ui::theme::paint(&t, "accent", "\u{258C}", true),
-                ui::theme::paint_error_label(&t, "✗"),
-                e
-            );
-        }
-    }
-}
-
-async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &str) {
-    let t = ui::theme::active();
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, &format!("GOAL: {}", condition)),
-    );
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_dim(&t, "REM will work until goal is met. Ctrl+C to stop."),
-    );
-    println!("{}", ui::theme::paint_rail_empty(&t));
-
-    let goal_prompt_text = format!(
-        "GOAL: {}\n\nYour task is to achieve this goal. You may need to:\n\
-         1. Plan your approach\n\
-         2. Write code/files using ### path/file headings\n\
-         3. We will run tests/linters and report back\n\
-         4. Fix any issues based on tool output\n\n\
-         When you believe the goal is achieved, say GOAL_ACHIEVED: <summary>.\n\
-         If you are stuck, say GOAL_FAILED: <reason>.",
-        condition
-    );
-
-    let max_iter = 10;
-    let mut last_tool_output = String::new();
-    let mut last_written_files: Vec<String> = Vec::new();
-
-    for i in 0..max_iter {
-        if i > 0 {
-            println!("{}", ui::theme::paint_rail_empty(&t));
-        }
-        println!(
-            "{} {} {}/{}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint(&t, "accent", "iteration", true),
-            i + 1,
-            max_iter
-        );
-
-        let prompt = if last_tool_output.is_empty() {
-            goal_prompt_text.clone()
-        } else {
-            build_agentic_prompt(&goal_prompt_text, &last_tool_output, i, max_iter)
-        };
-
-        match client
-            .complete_chat_stream(&prompt, CHAT_SYSTEM_PROMPT_CODE, "")
-            .await
-        {
-            Ok(text) => {
-                let cleaned = text.trim().to_string();
-                session
-                    .history
-                    .push((format!("/goal {}", condition), cleaned.clone()));
-
-                let files = extract_code_blocks_with_names(&cleaned);
-                let code = extract_code_block(&cleaned);
-                if !files.is_empty() {
-                    session.last_files = files.clone();
-                    session.last_code = if code.is_empty() { String::new() } else { code };
-                    auto_write_files(session, &files);
-                    last_written_files = files.iter().map(|f| f.path.clone()).collect();
-                } else if !code.is_empty() {
-                    session.last_code = code;
-                    session.last_files.clear();
-                    println!(
-                        "{} {} use /write <path> to save",
-                        ui::theme::paint(&t, "accent", "\u{258C}", true),
-                        ui::theme::paint_dim(&t, "code detected \u{2014}")
-                    );
-                }
-
-                if let Some((achieved, msg)) = extract_goal_signal(&cleaned) {
-                    if achieved {
-                        println!(
-                            "{} {} goal achieved! {}",
-                            ui::theme::paint_success_label(&t, "\u{258C}"),
-                            ui::theme::paint_success_label(&t, "\u{2713}"),
-                            msg
-                        );
-                    } else {
-                        println!(
-                            "{} {} {}",
-                            ui::theme::paint_warning(&t, "\u{258C}"),
-                            ui::theme::paint_warning(&t, "!"),
-                            msg
-                        );
-                    }
-                    break;
-                }
-
-                if cleaned.contains("GOAL_ACHIEVED") {
-                    println!(
-                        "{} {} goal achieved!",
-                        ui::theme::paint_success_label(&t, "\u{258C}"),
-                        ui::theme::paint_success_label(&t, "\u{2713}")
-                    );
-                    break;
-                }
-                if cleaned.contains("GOAL_FAILED") {
-                    println!(
-                        "{} {} goal could not be achieved.",
-                        ui::theme::paint_warning(&t, "\u{258C}"),
-                        ui::theme::paint_warning(&t, "!")
-                    );
-                    break;
-                }
-
-                if !last_written_files.is_empty() {
-                    let mut tool_results = String::new();
-                    for file_path in &last_written_files {
-                        let lint_result = run_lint(file_path);
-                        println!("{}", agentic::format_tool_output(&lint_result));
-
-                        let test_result = run_test(file_path);
-                        if !test_result.stderr.is_empty() || !test_result.stdout.is_empty() {
-                            println!("{}", agentic::format_tool_output(&test_result));
-                        }
-
-                        tool_results.push_str(&build_tool_context(
-                            Some(&lint_result),
-                            Some(&test_result),
-                            None,
-                        ));
-                    }
-                    last_tool_output = tool_results;
-                }
-            }
-            Err(e) => {
-                println!(
-                    "{} {} error: {}",
-                    ui::theme::paint_error_label(&t, "\u{258C}"),
-                    ui::theme::paint_error_label(&t, "\u{2717}"),
-                    e
-                );
-                break;
-            }
-        }
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-}
-
-fn handle_copy(session: &ChatSession, n: usize) {
-    let t = ui::theme::active();
-    let response = if n == 1 || session.history.is_empty() {
-        session
-            .history
-            .last()
-            .map(|(_, a)| a.as_str())
-            .unwrap_or("")
-    } else {
-        let total = session.history.len();
-        if n > total {
-        println!(
-            "{} only {} responses in history",
-            ui::theme::paint_warning(&t, "\u{258C}"),
-            total
-        );
-        return;
-        }
-        session
-            .history
-            .get(total - n)
-            .map(|(_, a)| a.as_str())
-            .unwrap_or("")
-    };
-
-    if response.is_empty() {
-        println!("{} nothing to copy", ui::theme::paint_warning(&t, "\u{258C}"));
-        return;
-    }
-
-    let use_clipboard = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("printf '%s' {:?} | xclip -selection clipboard 2>/dev/null || printf '%s' {:?} | xsel --clipboard 2>/dev/null || printf '%s' {:?} | pbcopy 2>/dev/null || echo 'no-clipboard'", response, response, response))
-        .output();
-
-    match use_clipboard {
-        Ok(out) if String::from_utf8_lossy(&out.stdout).contains("no-clipboard") => {
-            println!("{} copied to console:", ui::theme::paint_success_label(&t, "│ ✓"));
-            println!("{}", ui::theme::paint_rail_empty(&t));
-            for line in response.lines().take(20) {
-                println!("{} {}", ui::theme::paint_rail_empty(&t), line);
-            }
-            if response.lines().count() > 20 {
-                println!(
-                    "{} ... ({} lines total)",
-                    ui::theme::paint_rail_empty(&t),
-                    response.lines().count()
-                );
-            }
-        }
-        Ok(_) => {
-            println!(
-                "{} copied to clipboard ({} chars)",
-                ui::theme::paint_success_label(&t, "│ ✓"),
-                response.len()
-            );
-        }
-        Err(_) => {
-            println!(
-                "{} copied to console ({}) — install xclip/xsel for clipboard",
-                ui::theme::paint_success_label(&t, "│ ✓"),
-                response.chars().count()
-            );
-            for line in response.lines().take(20) {
-                println!("{} {}", ui::theme::paint_rail_empty(&t), line);
-            }
-        }
-    }
-}
-
-fn handle_lint(_session: &mut ChatSession, path: &str) {
-    let t = ui::theme::active();
-    let file_path = Path::new(path);
-    if !file_path.exists() {
-        println!("{} file not found: {}", ui::theme::paint_warning(&t, "\u{258C}"), path);
-        return;
-    }
-
-    println!("{} linting {}...", ui::theme::paint(&t, "accent", "\u{258C}", true), path);
-    let result = run_lint(path);
-    println!("{}", agentic::format_tool_output(&result));
-}
-
-async fn handle_review(client: &Provider, session: &mut ChatSession) {
-    let t = ui::theme::active();
-    if session.last_files.is_empty() {
-        println!("{} no generated code to review", ui::theme::paint_warning(&t, "│"));
-        return;
-    }
-
-    let mut code_for_review = String::new();
-    for f in &session.last_files {
-        if f.path.is_empty() {
-            continue;
-        }
-        code_for_review.push_str(&format!(
-            "\n### {}\n```\n{}\n```\n",
-            f.path,
-            truncate_bytes(&f.content, 3000)
-        ));
-    }
-    if code_for_review.is_empty() && !session.last_code.is_empty() {
-        code_for_review = format!("```\n{}\n```", truncate_bytes(&session.last_code, 3000));
-    }
-    if code_for_review.is_empty() {
-        println!("{} no code to review", ui::theme::paint_warning(&t, "│"));
-        return;
-    }
-
-    let review_prompt = format!(
-        "Review the following code for:\n\
-         1. Bugs & correctness issues\n\
-         2. Code smells & anti-patterns\n\
-         3. Security vulnerabilities\n\
-         4. Missing error handling\n\
-         5. Style & naming improvements\n\n\
-         Be specific — reference line numbers where possible.\n\n{}",
-        code_for_review
-    );
-
-    println!(
-        "{} reviewing {} file(s)...",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        session.last_files.len()
-    );
-    match client.complete_chat_stream(
-        &review_prompt,
-        "[MODE: CHAT] You are a senior code reviewer. Review the code critically. Use clear markdown. Be specific.",
-        "",
-    ).await {
-        Ok(response) => {
-            println!();
-            println!("{}", response);
-            session.history.push(("/review".to_string(), response));
-        }
-        Err(e) => {
-            println!("\n{} review failed: {}", ui::theme::paint_error_label(&t, "│"), e);
-        }
-    }
-}
-
-fn handle_find(session: &ChatSession, query: &str) {
-    let t = ui::theme::active();
-    if query.is_empty() {
-        println!("{}", ui::theme::paint_rail_empty(&t));
-        println!(
-            "{} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_bright(&t, "usage: /find <query>")
-        );
-        println!("{}", ui::theme::paint_rail_empty(&t));
-        return;
-    }
-
-    let root = session
-        .project_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-
-    let report = find_matches(&root, query, &FindOptions::default());
-
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_bright(&t, &format!("\u{203a} FIND  {}", query)),
-    );
-    println!(
-        "{} {} {}",
-        ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_dim(&t, "in"),
-        ui::theme::paint_bright(&t, &format!("{}", root.display()))
-    );
-    println!("{}", ui::theme::paint_rail_empty(&t));
-
-    if report.matches.is_empty() {
-        println!(
-            "{} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_warning(&t, "(no matches)")
-        );
-        println!("{}", ui::theme::paint_rail_empty(&t));
-        return;
-    }
-
-    let show_limit = 50usize;
-    let shown = report.matches.len().min(show_limit);
-    let mut last_path: Option<String> = None;
-    for m in report.matches.iter().take(show_limit) {
-        let rel = m
-            .path
-            .strip_prefix(&root)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| m.path.display().to_string());
-        if last_path.as_deref() != Some(rel.as_str()) {
-            if last_path.is_some() {
-                println!("{}", ui::theme::paint_rail_empty(&t));
-            }
-            println!(
-                "{} {}",
-                ui::theme::paint(&t, "accent", "\u{258C}", true),
-                ui::theme::paint(&t, "accent_info", &format!("\u{2500}\u{2500} {} \u{2500}\u{2500}", rel), true),
-            );
-            last_path = Some(rel);
-        }
-        let line_no_w = 4usize;
-        let col_w = 3usize;
-        println!(
-            "{} {}   {:>lw$}:{:<cw$}  {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
-            m.line_no,
-            m.column,
-            ui::theme::paint_bright(&t, &trim_for_display(&m.line, 120)),
-            lw = line_no_w,
-            cw = col_w
-        );
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-
-    let unique_files: std::collections::BTreeSet<String> = report
-        .matches
-        .iter()
-        .map(|m| {
-            m.path
-                .strip_prefix(&root)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| m.path.display().to_string())
-        })
-        .collect();
-
-    let mut summary = format!(
-        "  {} match{} in {} file{} \u{00b7} scanned {} \u{00b7} skipped {} \u{00b7} {}ms",
-        report.matches.len(),
-        if report.matches.len() == 1 { "" } else { "es" },
-        unique_files.len(),
-        if unique_files.len() == 1 { "" } else { "s" },
-        report.files_scanned,
-        report.files_skipped,
-        report.elapsed_ms,
-    );
-    if report.truncated {
-        summary.push_str("  (truncated)");
-    }
-    if shown < report.matches.len() {
-        summary.push_str(&format!("  (showing first {})", shown));
-    }
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!("{}", ui::theme::paint_success_label(&t, &summary));
-    println!("{}", ui::theme::paint_rail_empty(&t));
-}
-
-fn trim_for_display(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('\u{2026}');
-        out
-    }
-}
-
-fn handle_save_session(session: &ChatSession) {
-    let t = ui::theme::active();
-    let dir = session
-        .project_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let rem_dir = dir.join(".rem");
-    let _ = fs::create_dir_all(&rem_dir);
-    let session_file = rem_dir.join("session.json");
-    let last_files_json: Vec<serde_json::Value> = session
-        .last_files
-        .iter()
-        .map(|f| serde_json::json!({"path": f.path, "content": f.content}))
-        .collect();
-    let data = serde_json::json!({
-        "history": session.history.iter().map(|(u, a)| serde_json::json!({"user": u, "assistant": a})).collect::<Vec<_>>(),
-        "mode": session.mode.label(),
-        "workspace": session.project_dir.as_ref().map(|d| d.display().to_string()),
-        "saved_at": chrono_now(),
-        "last_code": session.last_code,
-        "last_files": last_files_json,
-        "last_files_written": session.last_files_written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-    });
-    match fs::write(
-        &session_file,
-        serde_json::to_string_pretty(&data).unwrap_or_default(),
-    ) {
-        Ok(()) => println!(
-            "{} session saved to {}",
-            ui::theme::paint_success_label(&t, "\u{2713}"),
-            session_file.display()
-        ),
-        Err(e) => println!(
-            "{} failed to save session: {}",
-            ui::theme::paint_error_label(&t, "\u{2717}"),
-            e
-        ),
-    }
-}
-
-fn chrono_now() -> String {
+fn format_timestamp() -> String {
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -3534,197 +1288,50 @@ fn chrono_now() -> String {
     let mut y = 1970i64;
     let mut d = days as i64;
     loop {
-        let year_days = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
-        if d < year_days { break; }
+        let year_days = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if d < year_days {
+            break;
+        }
         d -= year_days;
         y += 1;
     }
     let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let month_days = [31u64, if is_leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31u64,
+        if is_leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1usize;
     let mut day = d as u64;
     for &md in &month_days {
-        if day < md { break; }
+        if day < md {
+            break;
+        }
         day -= md;
         month += 1;
     }
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, month, day + 1, hours, minutes, seconds)
-}
-
-fn handle_resume_session(session: &mut ChatSession) {
-    let t = ui::theme::active();
-    let dir = session
-        .project_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let session_file = dir.join(".rem/session.json");
-    if !session_file.exists() {
-        println!(
-            "{} no saved session found at {}",
-            ui::theme::paint_warning(&t, "\u{258C}"),
-            session_file.display()
-        );
-        return;
-    }
-    match fs::read_to_string(&session_file) {
-        Ok(content) => {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(history) = data["history"].as_array() {
-                    let mut restored = 0;
-                    for entry in history {
-                        if let (Some(u), Some(a)) =
-                            (entry["user"].as_str(), entry["assistant"].as_str())
-                        {
-                            session.history.push((u.to_string(), a.to_string()));
-                            restored += 1;
-                        }
-                    }
-                    println!(
-                        "{} restored {} turns from {}",
-                        ui::theme::paint_success_label(&t, "\u{2713}"),
-                        restored,
-                        session_file.display()
-                    );
-                    println!(
-                        "{} current conversation is now merged with saved session",
-                        ui::theme::paint_dim(&t, "\u{258C}")
-                    );
-                }
-                if let Some(m) = data["mode"].as_str() {
-                    println!(
-                        "{} {} {}",
-                        ui::theme::paint_dim(&t, "\u{258C}"),
-                        ui::theme::paint_dim(&t, "saved mode:"),
-                        ui::theme::paint_bright(&t, m)
-                    );
-                }
-                if let Some(code) = data["last_code"].as_str() {
-                    if !code.is_empty() {
-                        session.last_code = code.to_string();
-                        println!(
-                            "{} {} {}",
-                            ui::theme::paint_dim(&t, "\u{258C}"),
-                            ui::theme::paint_dim(&t, "last code:"),
-                            ui::theme::paint_success_label(&t, "restored")
-                        );
-                    }
-                }
-                if let Some(files) = data["last_files"].as_array() {
-                    let restored_files: Vec<FileEntry> = files
-                        .iter()
-                        .filter_map(|f| {
-                            Some(FileEntry {
-                                path: f["path"].as_str()?.to_string(),
-                                content: f["content"].as_str()?.to_string(),
-                            })
-                        })
-                        .collect();
-                    if !restored_files.is_empty() {
-                        println!(
-                            "{} {} {} file(s) restored",
-                            ui::theme::paint_dim(&t, "\u{258C}"),
-                            ui::theme::paint_dim(&t, "last files:"),
-                            restored_files.len()
-                        );
-                        session.last_files = restored_files;
-                    }
-                }
-                if let Some(paths) = data["last_files_written"].as_array() {
-                    let written: Vec<PathBuf> = paths
-                        .iter()
-                        .filter_map(|p| p.as_str().map(PathBuf::from))
-                        .collect();
-                    if !written.is_empty() {
-                        session.last_files_written = written;
-                    }
-                }
-            } else {
-                println!("{} invalid session file", ui::theme::paint_error_label(&t, "\u{258C}"));
-            }
-        }
-        Err(e) => println!(
-            "{} failed to read session: {}",
-            ui::theme::paint_error_label(&t, "\u{258C}"),
-            e
-        ),
-    }
-}
-
-fn print_chat_help() {
-    let t = ui::theme::active();
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!("{}", ui::theme::paint_rail_header(&t, "COMMANDS"));
-    println!("{}", ui::theme::paint_help_line(&t, "/help", "show this help"));
-    println!("{}", ui::theme::paint_help_line(&t, "/mode", "toggle CHAT \u{2192} CODE \u{2192} PLAN"));
-    println!("{}", ui::theme::paint_help_line(&t, "/plan", "switch to PLAN mode (explore & analyze)"));
-    println!("{}", ui::theme::paint_help_line(&t, "/model <name>", "switch model (e.g. gpt-4, claude-sonnet-4)"));
-    println!("{}", ui::theme::paint_help_line(&t, "/provider <name>", "switch provider: ollama, openai, gemini, anthropic"));
-    println!("{}", ui::theme::paint_help_line(&t, "/clear", "reset conversation history"));
-    println!("{}", ui::theme::paint_help_line(&t, "/explain <code>", "explain what code does"));
-    println!("{}", ui::theme::paint_help_line(&t, "/test <file>", "generate tests for a file"));
-    println!("{}", ui::theme::paint_help_line(&t, "/refactor <file>", "suggest refactoring for a file"));
-    println!("{}", ui::theme::paint_help_line(&t, "/write <path>", "save last code to file"));
-    println!("{}", ui::theme::paint_help_line(&t, "/save <path>", "same as /write"));
-    println!("{}", ui::theme::paint_help_line(&t, "/dir <path>", "set project root"));
-    println!("{}", ui::theme::paint_help_line(&t, "/search <q>", "search the web (DuckDuckGo)"));
-    println!("{}", ui::theme::paint_help_line(&t, "/code", "show last generated code"));
-    println!("{}", ui::theme::paint_help_line(&t, "/files", "list project files tree"));
-    println!("{}", ui::theme::paint_help_line(&t, "/undo", "delete last written files"));
-    println!("{}", ui::theme::paint_help_line(&t, "/diff", "compare generated vs existing files"));
-    println!("{}", ui::theme::paint_help_line(&t, "/tokens", "show token usage & context stats"));
-    println!("{}", ui::theme::paint_help_line(&t, "/config", "view current configuration"));
-    println!("{}", ui::theme::paint_help_line(&t, "/memory", "view/set project memory (.rem/memory.md)"));
-    println!("{}", ui::theme::paint_help_line(&t, "/theme [name]", "show or switch color theme"));
-    println!("{}", ui::theme::paint_help_line(&t, "/init", "auto-generate project memory file"));
-    println!("{}", ui::theme::paint_help_line(&t, "/compact", "summarize & free context window"));
-    println!("{}", ui::theme::paint_help_line(&t, "/goal <cond>", "autonomous loop until goal is met"));
-    println!("{}", ui::theme::paint_help_line(&t, "/copy [N]", "copy last response to clipboard"));
-    println!("{}", ui::theme::paint_help_line(&t, "/lint [file]", "run linter on generated files"));
-    println!("{}", ui::theme::paint_help_line(&t, "/review", "AI code review of generated code"));
-    println!("{}", ui::theme::paint_help_line(&t, "/find <q>", "search text inside the project"));
-    println!("{}", ui::theme::paint_help_line(&t, "/reset", "full reset \u{2014} clear history & code cache"));
-    println!("{}", ui::theme::paint_help_line(&t, "/save", "save current session to .rem/session.json"));
-    println!("{}", ui::theme::paint_help_line(&t, "/resume", "restore saved session history"));
-    println!("{}", ui::theme::paint_help_line(&t, "/why", "show why last intent was chosen"));
-    println!("{}", ui::theme::paint_help_line(&t, "exit / quit", "exit REM"));
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!("{}", ui::theme::paint_rail_header(&t, "TIPS"));
-    println!("{}", ui::theme::paint_bullet_line(&t, &[
-        ("text_faint", "use ", false),
-        ("accent", "@<path>", true),
-        ("text_faint", " to include file context: @src/main.rs", false),
-    ]));
-    println!("{}", ui::theme::paint_bullet_line(&t, &[
-        ("text_faint", "use ", false),
-        ("accent", "/mode", true),
-        ("text_faint", " to toggle between chat, code, and plan modes", false),
-    ]));
-    println!("{}", ui::theme::paint_bullet_line(&t, &[
-        ("accent", "/plan", true),
-        ("text_faint", " for analysis first \u{2014} REM explores codebase before coding", false),
-    ]));
-    println!("{}", ui::theme::paint_rail_bullet(&t, "describe what you want \u{2014} REM detects intent"));
-    println!("{}", ui::theme::paint_rail_bullet(&t, "multi-file intent and auto-writes after confirmation"));
-    println!("{}", ui::theme::paint_bullet_line(&t, &[
-        ("text_faint", "use ", false),
-        ("accent", "/explain", true),
-        ("text_faint", " ", false),
-        ("accent", "/test", true),
-        ("text_faint", " ", false),
-        ("accent", "/refactor", true),
-        ("text_faint", " for analysis, tests, and refactoring", false),
-    ]));
-    println!("{}", ui::theme::paint_bullet_line(&t, &[
-        ("text_faint", "run ", false),
-        ("accent", "/init", true),
-        ("text_faint", " for persistent project memory across sessions", false),
-    ]));
-    println!("{}", ui::theme::paint_bullet_line(&t, &[
-        ("text_faint", "run ", false),
-        ("accent", "rem new <name>", true),
-        ("text_faint", " to scaffold a new project instantly", false),
-    ]));
-    println!("{}", ui::theme::paint_rail_empty(&t));
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        y,
+        month,
+        day + 1,
+        hours,
+        minutes,
+        seconds
+    )
 }
 
 // ── Output formatting ──────────────────────────────────────────────────────
@@ -3766,7 +1373,12 @@ fn print_reply(reply: &ModelReply, newline: bool) {
                 ui::theme::println(&format!(
                     "    {}  {}",
                     icon,
-                    ui::theme::paint(&t, "accent_dim", &format!("(unnamed) {} bytes", f.content.len()), false)
+                    ui::theme::paint(
+                        &t,
+                        "accent_dim",
+                        &format!("(unnamed) {} bytes", f.content.len()),
+                        false
+                    )
                 ));
             } else {
                 ui::theme::println(&format!(
@@ -3781,10 +1393,7 @@ fn print_reply(reply: &ModelReply, newline: bool) {
             ui::theme::paint(&t, "text_faint", "/write <path> to save", false)
         ));
     } else if !reply.code.trim().is_empty() {
-        ui::theme::println(&format!(
-            "  {}",
-            ui::theme::paint_success(&t, "code:")
-        ));
+        ui::theme::println(&format!("  {}", ui::theme::paint_success(&t, "code:")));
         for code_line in reply.code.lines() {
             ui::theme::println(&format!(
                 "    {}",
@@ -3896,7 +1505,7 @@ fn build_context(target: &Path, max_bytes: usize) -> Result<String> {
     Ok(truncate_bytes(&out, max_bytes))
 }
 
-fn truncate_bytes(s: &str, max: usize) -> String {
+pub(crate) fn truncate_bytes(s: &str, max: usize) -> String {
     if max == 0 || s.is_empty() {
         return "[truncated]".to_string();
     }
@@ -3964,7 +1573,10 @@ fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
     println!(
         "{} {}",
         ui::theme::paint_success_label(&t, "✓"),
-        ui::theme::paint_bright(&t, &format!("created project '{}' ({})", args.name, args.project_type))
+        ui::theme::paint_bright(
+            &t,
+            &format!("created project '{}' ({})", args.name, args.project_type)
+        )
     );
     for f in &files {
         let icon = file_icon(&f.path);
@@ -4095,6 +1707,7 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::retrieve_relevant_chunks;
 
     #[test]
     fn blocks_dangerous_commands() {
@@ -4294,7 +1907,7 @@ mod tests {
         assert!(
             hit_paths
                 .iter()
-                .any(|p| p.contains("lib.rs") || p.contains("README")),
+                .any(|p: &&str| p.contains("lib.rs") || p.contains("README")),
             "expected project files in hits"
         );
 
