@@ -1,3 +1,7 @@
+//! Configuration loading, saving, and provider construction.
+//! Reads `~/.config/rem-cli/config.toml` and `.remcli.toml`, merges them into
+//! an [`AppConfig`], and builds the appropriate [`Provider`] from config values.
+
 use crate::cli::{AppConfig, PartialConfig};
 use crate::provider::{Provider, ProviderKind};
 use crate::ui;
@@ -6,6 +10,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Saves config to `~/.config/rem-cli/config.toml`.
 pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
     if let Some(home) = dirs::home_dir() {
         let dir = home.join(".config/rem-cli");
@@ -17,6 +22,7 @@ pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+/// Interactive first-time setup that prompts for a workspace directory.
 pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
     let t = ui::theme::active();
     println!();
@@ -93,6 +99,7 @@ pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
     Ok(Some(dir))
 }
 
+/// Loads and merges global (`~/.config/rem-cli/config.toml`) and local (`.remcli.toml`) config.
 pub(crate) fn load_config() -> Result<AppConfig> {
     let mut cfg = AppConfig::default();
     if let Some(home) = dirs::home_dir() {
@@ -114,6 +121,7 @@ pub(crate) fn load_config() -> Result<AppConfig> {
     Ok(cfg)
 }
 
+/// Builds a [`Provider`] from config, resolving API keys and model defaults.
 pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<Provider> {
     let kind = ProviderKind::from_str(&cfg.provider);
     match kind {
@@ -202,6 +210,7 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
     }
 }
 
+/// Loads the system prompt from file, falling back to the built-in default.
 pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
     let mut candidates = Vec::new();
     if let Some(dir) = custom_prompts_dir {
@@ -221,6 +230,7 @@ pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
     crate::DEFAULT_SYSTEM_PROMPT.to_string()
 }
 
+/// Persists the workspace directory to config.
 pub(crate) fn persist_workspace(dir: &Path) {
     let t = ui::theme::active();
     let mut cfg = load_config().unwrap_or_default();
@@ -231,5 +241,42 @@ pub(crate) fn persist_workspace(dir: &Path) {
             ui::theme::paint_error_label(&t, "✗"),
             e
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_system_prompt_falls_back_to_default() {
+        let prompt = load_system_prompt(None);
+        assert!(!prompt.is_empty());
+        assert!(prompt.contains("REM"));
+    }
+
+    #[test]
+    fn load_system_prompt_uses_custom_file() {
+        let dir = std::env::temp_dir().join(format!("rem-test-sp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("system_prompt.txt"), "custom prompt").unwrap();
+
+        let prompt = load_system_prompt(Some(dir.to_str().unwrap()));
+        assert_eq!(prompt, "custom prompt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_system_prompt_ignores_empty_file() {
+        let dir = std::env::temp_dir().join(format!("rem-test-sp2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(dir.join("system_prompt.txt"), "   ").unwrap();
+
+        let prompt = load_system_prompt(Some(dir.to_str().unwrap()));
+        assert!(!prompt.is_empty());
+        assert!(prompt.contains("REM"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

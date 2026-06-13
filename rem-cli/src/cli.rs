@@ -1,8 +1,13 @@
+//! CLI argument parsing and configuration types.
+//! Uses clap to define the command-line interface, subcommands,
+//! and serializable config structs ([`AppConfig`], [`PartialConfig`]).
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
+/// Top-level CLI argument parser.
 #[derive(Parser, Debug)]
 #[command(
     name = "rem",
@@ -30,6 +35,7 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+/// REM subcommands.
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     #[command(about = "Ask REM a coding question (single-shot)")]
@@ -46,6 +52,7 @@ pub enum Commands {
     Index(IndexArgs),
 }
 
+/// Arguments for `rem ask`.
 #[derive(Args, Debug)]
 pub struct AskArgs {
     #[arg(help = "Your coding question")]
@@ -54,12 +61,14 @@ pub struct AskArgs {
     pub file: Option<PathBuf>,
 }
 
+/// Arguments for `rem explain`.
 #[derive(Args, Debug)]
 pub struct ExplainArgs {
     #[arg(help = "Terminal command to explain")]
     pub command: String,
 }
 
+/// Arguments for `rem patch`.
 #[derive(Args, Debug)]
 pub struct PatchArgs {
     #[arg(long, help = "Target file to patch")]
@@ -68,6 +77,7 @@ pub struct PatchArgs {
     pub task: String,
 }
 
+/// Arguments for `rem new`.
 #[derive(Args, Debug)]
 pub struct NewArgs {
     #[arg(help = "Project name / directory path")]
@@ -80,12 +90,14 @@ pub struct NewArgs {
     pub project_type: String,
 }
 
+/// Arguments for `rem index`.
 #[derive(Args, Debug)]
 pub struct IndexArgs {
     #[arg(help = "Project directory to index (defaults to current workspace or .)")]
     pub dir: Option<PathBuf>,
 }
 
+/// Global and local merged configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub model: String,
@@ -137,6 +149,7 @@ impl Default for AppConfig {
     }
 }
 
+/// Partial config for incremental merging (from TOML files).
 #[derive(Debug, Default, Deserialize)]
 pub struct PartialConfig {
     pub model: Option<String>,
@@ -154,6 +167,7 @@ pub struct PartialConfig {
 }
 
 impl AppConfig {
+    /// Merges [`PartialConfig`] values into this config (non-`None` fields win).
     pub fn apply_partial(&mut self, part: PartialConfig) {
         if let Some(v) = part.model {
             self.model = v;

@@ -1,9 +1,13 @@
+//! Intent classification feedback loop.
+//! Tracks user corrections to intent classification so the system can learn
+//! from mistakes. Persisted to `~/.config/rem-cli/feedback.json`.
+
 use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::TaskIntent;
+use crate::intent::TaskIntent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeedbackEntry {
@@ -21,6 +25,7 @@ struct FeedbackStore {
     total_corrections: u32,
 }
 
+/// Tracks intent classification corrections for the feedback loop.
 pub struct FeedbackTracker {
     store: FeedbackStore,
     path: PathBuf,
@@ -28,6 +33,7 @@ pub struct FeedbackTracker {
 }
 
 impl FeedbackTracker {
+    /// Creates a new tracker, loading existing feedback from disk.
     pub fn new(model: &str) -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let path = home.join(".config/rem-cli/feedback.json");
@@ -50,6 +56,7 @@ impl FeedbackTracker {
         }
     }
 
+    /// Records a user correction to intent classification.
     pub fn record_correction(
         &mut self,
         input: &str,
@@ -94,6 +101,7 @@ impl FeedbackTracker {
         self.dirty = true;
     }
 
+    /// Writes feedback to disk if there are unsaved changes.
     pub fn flush(&mut self) {
         if self.dirty {
             if let Some(parent) = self.path.parent() {

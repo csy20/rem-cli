@@ -1,11 +1,17 @@
+//! Project memory persistence.
+//! Manages a `.rem/memory.md` file per project for long-term context that
+//! persists across chat sessions. Includes starter generation per language.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
+/// Filename for project memory (`.rem/memory.md`).
 pub const MEMORY_FILENAME: &str = ".rem/memory.md";
 
+/// Per-project memory stored in `.rem/memory.md`.
 pub struct ProjectMemory {
     pub path: PathBuf,
     pub content: String,
@@ -13,6 +19,7 @@ pub struct ProjectMemory {
 }
 
 impl ProjectMemory {
+    /// Loads project memory from `.rem/memory.md` in the project directory.
     pub fn load(project_dir: &Path) -> Self {
         let path = project_dir.join(MEMORY_FILENAME);
         if path.exists() {
@@ -34,6 +41,7 @@ impl ProjectMemory {
         }
     }
 
+    /// Writes the memory content to disk.
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("failed to create .rem directory")?;
@@ -42,12 +50,14 @@ impl ProjectMemory {
         Ok(())
     }
 
+    /// Replaces the memory content with new text.
     pub fn set(&mut self, content: &str) -> Result<()> {
         self.content = content.to_string();
         self.loaded = true;
         self.save()
     }
 
+    /// Appends text to the memory content.
     pub fn append(&mut self, text: &str) -> Result<()> {
         if !self.content.is_empty() {
             self.content.push('\n');
@@ -57,6 +67,7 @@ impl ProjectMemory {
         self.save()
     }
 
+    /// Returns the memory formatted as context for the LLM prompt.
     pub fn as_context(&self) -> String {
         if self.content.is_empty() {
             return String::new();
@@ -67,6 +78,7 @@ impl ProjectMemory {
         )
     }
 
+    /// Generates a starter memory file with project overview and language conventions.
     pub fn generate_starter(project_dir: &Path, project_type: &str) -> String {
         let project_name = project_dir
             .file_name()
@@ -159,5 +171,97 @@ impl ProjectMemory {
 
         memory.push_str("\n## Notes\n- Add project notes here\n");
         memory
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn load_returns_empty_for_nonexistent_dir() {
+        let mem = ProjectMemory::load(Path::new("/nonexistent/path"));
+        assert!(!mem.loaded);
+        assert!(mem.content.is_empty());
+    }
+
+    #[test]
+    fn load_reads_existing_memory_file() {
+        let dir = std::env::temp_dir().join(format!("rem-test-mem-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mem_dir = dir.join(".rem");
+        let _ = fs::create_dir_all(&mem_dir);
+        let mem_path = dir.join(MEMORY_FILENAME);
+        fs::write(&mem_path, "test content").unwrap();
+
+        let mem = ProjectMemory::load(&dir);
+        assert!(mem.loaded);
+        assert_eq!(mem.content, "test content");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_and_save_persists_content() {
+        let dir = std::env::temp_dir().join(format!("rem-test-mem-set-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mut mem = ProjectMemory::load(&dir);
+        assert!(!mem.loaded);
+
+        mem.set("new content").unwrap();
+        assert_eq!(mem.content, "new content");
+        assert!(mem.loaded);
+        assert!(mem.path.exists());
+
+        let readback = fs::read_to_string(&mem.path).unwrap();
+        assert_eq!(readback, "new content");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_adds_to_existing_content() {
+        let dir = std::env::temp_dir().join(format!("rem-test-mem-app-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mut mem = ProjectMemory::load(&dir);
+        mem.set("line1").unwrap();
+        mem.append("line2").unwrap();
+        assert_eq!(mem.content, "line1\nline2");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn as_context_formats_content() {
+        let dir = std::env::temp_dir().join(format!("rem-test-mem-ctx-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mut mem = ProjectMemory::load(&dir);
+        assert_eq!(mem.as_context(), "");
+        mem.set("hello").unwrap();
+        let ctx = mem.as_context();
+        assert!(ctx.contains("hello"));
+        assert!(ctx.contains(MEMORY_FILENAME));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_starter_contains_project_type() {
+        let dir = std::env::temp_dir().join(format!("rem-test-gen-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let starter = ProjectMemory::generate_starter(&dir, "rust");
+        assert!(starter.contains("## Project Overview"));
+        assert!(starter.contains("cargo build"));
+        assert!(starter.contains("cargo test"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn generate_starter_unknown_type_shows_placeholder() {
+        let dir = std::env::temp_dir().join(format!("rem-test-gen2-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let starter = ProjectMemory::generate_starter(&dir, "unknown");
+        assert!(starter.contains("Add project conventions here"));
+        assert!(starter.contains("Add build/test commands here"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

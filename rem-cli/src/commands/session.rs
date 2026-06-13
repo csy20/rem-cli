@@ -1,0 +1,614 @@
+//! Session and workspace commands (`/dir`, `/files`, `/config`, `/memory`, `/init`, etc.).
+//! Handlers for commands that manage the workspace directory, configuration,
+//! project memory, token stats, and session save/resume.
+
+use crate::chat::{detect_project_type, ChatSession};
+use crate::config::persist_workspace;
+use crate::memory::ProjectMemory;
+use crate::provider::Provider;
+use crate::ui;
+use crate::{file_icon, format_timestamp, human_size, FileEntry};
+use std::fs;
+use std::path::PathBuf;
+use walkdir::WalkDir;
+
+/// Sets the workspace directory (`/dir` command).
+pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
+    let t = ui::theme::active();
+    let dir = PathBuf::from(path.trim());
+    let resolved = if path.trim() == "." {
+        std::env::current_dir().unwrap_or_default()
+    } else {
+        dir
+    };
+    if resolved.exists() || path.trim() == "." {
+        session.project_dir = Some(resolved.clone());
+        session.workspace_dir = Some(resolved.clone());
+        persist_workspace(&resolved);
+        println!(
+            "  {} workspace set to {}",
+            ui::theme::paint_success_label(&t, "✓"),
+            ui::theme::paint_bright(&t, &resolved.display().to_string())
+        );
+    } else {
+        println!(
+            "  {} directory does not exist — creating it",
+            ui::theme::paint_warning(&t, "!")
+        );
+        if let Err(e) = fs::create_dir_all(&resolved) {
+            println!("  {} failed: {}", ui::theme::paint_error_label(&t, "✗"), e);
+            return;
+        }
+        session.project_dir = Some(resolved.clone());
+        session.workspace_dir = Some(resolved.clone());
+        persist_workspace(&resolved);
+        println!(
+            "  {} workspace set to {}",
+            ui::theme::paint_success_label(&t, "✓"),
+            ui::theme::paint_bright(&t, &resolved.display().to_string())
+        );
+    }
+}
+
+/// Lists project files in a tree view (`/files` command).
+pub(crate) fn handle_list_files(session: &ChatSession) {
+    let dir = session
+        .project_dir
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let t = ui::theme::active();
+
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint_bright(&t, &format!("\u{1f4c2} project ({})", dir.display()))
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+
+    let mut entries: Vec<(String, bool, u64)> = Vec::new();
+    for entry in WalkDir::new(&dir)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let p = entry.path();
+        if p == dir {
+            continue;
+        }
+        if let Ok(rel) = p.strip_prefix(&dir) {
+            let size = if p.is_file() {
+                fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+            entries.push((rel.display().to_string(), p.is_dir(), size));
+        }
+    }
+    entries.sort();
+
+    if entries.is_empty() {
+        println!(
+            "{}   {}",
+            ui::theme::paint_rail_empty(&t),
+            ui::theme::paint_warning(&t, "(empty)")
+        );
+    } else {
+        for (path, is_dir, size) in &entries {
+            let depth = path.chars().filter(|&c| c == '/').count();
+            let indent = "  ".repeat(depth);
+            let name = if let Some(pos) = path.rfind('/') {
+                &path[pos + 1..]
+            } else {
+                path
+            };
+            if *is_dir {
+                println!(
+                    "{} {} {} {} ",
+                    ui::theme::paint_rail_empty(&t),
+                    indent,
+                    ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
+                    ui::theme::paint(&t, "accent_info", &format!("\u{1f4c1} {}/", name), true)
+                );
+            } else {
+                let icon = file_icon(name);
+                let hs = human_size(*size);
+                println!(
+                    "{} {} {} {} {} {}",
+                    ui::theme::paint_rail_empty(&t),
+                    indent,
+                    ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
+                    icon,
+                    ui::theme::paint_bright(&t, name),
+                    ui::theme::paint_dim(&t, &format!("({})", hs))
+                );
+            }
+        }
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
+/// Displays current configuration (`/config` command).
+pub(crate) fn handle_config(session: &ChatSession, client: &Provider) {
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_header(&t, "CONFIG"));
+    println!(
+        "{}   {:<18} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "provider:"),
+        ui::theme::paint_dim(&t, client.kind.as_str())
+    );
+    println!(
+        "{}   {:<18} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "model:"),
+        ui::theme::paint_dim(&t, &client.model)
+    );
+    println!(
+        "{}   {:<18} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "base url:"),
+        ui::theme::paint_dim(&t, &client.base_url)
+    );
+    println!(
+        "{}   {:<18} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "mode:"),
+        ui::theme::paint_dim(&t, session.mode.label())
+    );
+    println!(
+        "{}   {:<18} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "workspace:"),
+        ui::theme::paint_dim(
+            &t,
+            &session
+                .project_dir
+                .as_ref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "none".to_string())
+        )
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(
+            &t,
+            "/model <name>  /provider <name>  /config workspace <path>"
+        )
+    );
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+}
+
+/// Sets a configuration value (`/config workspace <path>`).
+pub(crate) fn handle_config_set(session: &mut ChatSession, client: &Provider, args: &str) {
+    let t = ui::theme::active();
+    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    if parts.is_empty() {
+        handle_config(session, client);
+        return;
+    }
+    match parts[0] {
+        "workspace" | "dir" => {
+            if parts.len() > 1 {
+                crate::commands::handle_dir(session, parts[1]);
+            } else {
+                println!(
+                    "{} usage: /config workspace <path>",
+                    ui::theme::paint_warning(&t, "\u{258C}")
+                );
+            }
+        }
+        other => {
+            println!(
+                "{} unknown config key: {}",
+                ui::theme::paint_warning(&t, "\u{258C}"),
+                other
+            );
+            println!(
+                "{} available: model, workspace",
+                ui::theme::paint_rail_empty(&t)
+            );
+        }
+    }
+}
+
+/// Shows token usage and speed stats (`/tokens` command).
+pub(crate) fn handle_tokens(session: &ChatSession) {
+    let tokens = session.last_tokens;
+    let elapsed = session.last_elapsed.as_secs_f64();
+    let history_tokens: usize = session
+        .history
+        .iter()
+        .map(|(u, a)| (u.len() + a.len()) / 4)
+        .sum();
+    let t = ui::theme::active();
+
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{}  {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "\u{2500}\u{2500} TOKENS \u{2500}\u{2500}"),
+    );
+    println!(
+        "{}   {:<18} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "last response:"),
+        ui::theme::paint_dim(&t, &format!("~{} tokens", tokens))
+    );
+
+    if elapsed > 0.0 && tokens > 0 {
+        let tps = tokens as f64 / elapsed;
+        println!(
+            "{}   {:<18} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "speed:"),
+            ui::theme::paint_dim(&t, &format!("~{:.0} tok/s", tps))
+        );
+    }
+
+    if session.last_elapsed.as_secs() > 0 {
+        println!(
+            "{}   {:<18} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "elapsed:"),
+            ui::theme::paint_dim(&t, &format!("{:.1}s", elapsed))
+        );
+    }
+
+    if history_tokens > 0 {
+        println!(
+            "{}   {:<18} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "context history:"),
+            ui::theme::paint_dim(
+                &t,
+                &format!(
+                    "~{} tokens ({} turns)",
+                    history_tokens,
+                    session.history.len()
+                )
+            )
+        );
+
+        let pct = (history_tokens as f64 / 4096.0 * 100.0).min(100.0);
+        println!(
+            "{}   {:<18} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "context window:"),
+            ui::theme::paint_dim(&t, &format!("{:.0}% used (4096 limit)", pct))
+        );
+    } else {
+        println!(
+            "{}   {:<18} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "context:"),
+            ui::theme::paint_dim(&t, "empty (no history)")
+        );
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
+/// Displays the project memory (`/memory` command).
+pub(crate) fn handle_memory(session: &ChatSession) {
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_header(&t, "MEMORY"));
+    if session.project_memory.loaded && !session.project_memory.content.is_empty() {
+        for line in session.project_memory.content.lines() {
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, line)
+            );
+        }
+    } else {
+        println!(
+            "{} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "no project memory yet.")
+        );
+        println!(
+            "{} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "use /init to generate, or /memory add <text>")
+        );
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "/memory add <text>  /init  /memory clear")
+    );
+    println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+}
+
+/// Sets or appends to project memory (`/memory set ...`).
+pub(crate) fn handle_memory_set(session: &mut ChatSession, args: &str) {
+    let t = ui::theme::active();
+    if args.eq_ignore_ascii_case("clear") {
+        session.project_memory.content.clear();
+        session.project_memory.loaded = false;
+        let _ = session.project_memory.save();
+        println!(
+            "{} memory cleared",
+            ui::theme::paint_success_label(&t, "\u{2713}")
+        );
+        return;
+    }
+    if let Some(text) = args.strip_prefix("add ") {
+        if let Err(e) = session.project_memory.append(text) {
+            println!(
+                "{} failed: {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                e
+            );
+        } else {
+            println!(
+                "{} appended to memory ({} bytes)",
+                ui::theme::paint_success_label(&t, "\u{2713}"),
+                text.len()
+            );
+        }
+        return;
+    }
+    if let Err(e) = session.project_memory.set(args) {
+        println!(
+            "{} failed: {}",
+            ui::theme::paint_error_label(&t, "\u{2717}"),
+            e
+        );
+    } else {
+        println!(
+            "{} memory saved ({} bytes)",
+            ui::theme::paint_success_label(&t, "\u{2713}"),
+            args.len()
+        );
+    }
+}
+
+/// Generates starter project memory (`/init` command).
+pub(crate) fn handle_init(session: &mut ChatSession) {
+    let dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let ptype = detect_project_type(&dir);
+    let ptype_label = if ptype.is_empty() { "unknown" } else { ptype };
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &format!("detected project type: {}", ptype_label))
+    );
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "generating .rem/memory.md...")
+    );
+    let starter = ProjectMemory::generate_starter(&dir, ptype);
+    if let Err(e) = session.project_memory.set(&starter) {
+        println!(
+            "{} {} failed: {}",
+            ui::theme::paint_error_label(&t, "\u{258C}"),
+            ui::theme::paint_error_label(&t, "✗"),
+            e
+        );
+    } else {
+        println!(
+            "{} {} {} ({} bytes)",
+            ui::theme::paint_success_label(&t, "\u{258C}"),
+            ui::theme::paint_success_label(&t, "✓"),
+            ui::theme::paint_bright(&t, ".rem/memory.md created"),
+            starter.len()
+        );
+        println!(
+            "{}  use {} to view",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "/memory")
+        );
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
+/// Compacts conversation history via LLM summarization (`/compact`).
+pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession) {
+    let t = ui::theme::active();
+    if session.history.is_empty() {
+        println!(
+            "{} nothing to compact — history is empty",
+            ui::theme::paint_warning(&t, "│")
+        );
+        return;
+    }
+    let history_text = session.build_chat_history();
+    let compact_prompt = format!(
+        "[SYSTEM] Summarize this conversation in 3-5 bullet points covering key decisions, code generated, and next actions. Be concise.\n\n{}",
+        history_text
+    );
+    println!(
+        "{} compacting {} turns...",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        session.history.len()
+    );
+    let saved_history = session.history.clone();
+    match client
+        .complete_chat_stream(
+            &compact_prompt,
+            "You are a summarizer. Output only bullet-point summary. No preamble, no code.",
+            "",
+        )
+        .await
+    {
+        Ok(summary) => {
+            let old_count = session.history.len();
+            session.history.clear();
+            session.history.push((
+                "[compacted summary]".to_string(),
+                summary.trim().to_string(),
+            ));
+            println!(
+                "{} {} {} → {} turns",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_success_label(&t, "✓ compacted:"),
+                old_count,
+                session.history.len()
+            );
+        }
+        Err(e) => {
+            session.history = saved_history;
+            println!(
+                "{} {} compact failed: {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_error_label(&t, "✗"),
+                e
+            );
+        }
+    }
+}
+
+/// Saves the current session to `.rem/session.json` (`/save`).
+pub(crate) fn handle_save_session(session: &ChatSession) {
+    let t = ui::theme::active();
+    let dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let rem_dir = dir.join(".rem");
+    let _ = fs::create_dir_all(&rem_dir);
+    let session_file = rem_dir.join("session.json");
+    let last_files_json: Vec<serde_json::Value> = session
+        .last_files
+        .iter()
+        .map(|f| serde_json::json!({"path": f.path, "content": f.content}))
+        .collect();
+    let data = serde_json::json!({
+        "history": session.history.iter().map(|(u, a)| serde_json::json!({"user": u, "assistant": a})).collect::<Vec<_>>(),
+        "mode": session.mode.label(),
+        "workspace": session.project_dir.as_ref().map(|d| d.display().to_string()),
+        "saved_at": format_timestamp(),
+        "last_code": session.last_code,
+        "last_files": last_files_json,
+        "last_files_written": session.last_files_written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+    });
+    match fs::write(
+        &session_file,
+        serde_json::to_string_pretty(&data).unwrap_or_default(),
+    ) {
+        Ok(()) => println!(
+            "{} session saved to {}",
+            ui::theme::paint_success_label(&t, "\u{2713}"),
+            session_file.display()
+        ),
+        Err(e) => println!(
+            "{} failed to save session: {}",
+            ui::theme::paint_error_label(&t, "\u{2717}"),
+            e
+        ),
+    }
+}
+
+/// Restores a saved session from `.rem/session.json` (`/resume`).
+pub(crate) fn handle_resume_session(session: &mut ChatSession) {
+    let t = ui::theme::active();
+    let dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let session_file = dir.join(".rem/session.json");
+    if !session_file.exists() {
+        println!(
+            "{} no saved session found at {}",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            session_file.display()
+        );
+        return;
+    }
+    match fs::read_to_string(&session_file) {
+        Ok(content) => {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(history) = data["history"].as_array() {
+                    let mut restored = 0;
+                    for entry in history {
+                        if let (Some(u), Some(a)) =
+                            (entry["user"].as_str(), entry["assistant"].as_str())
+                        {
+                            session.history.push((u.to_string(), a.to_string()));
+                            restored += 1;
+                        }
+                    }
+                    println!(
+                        "{} restored {} turns from {}",
+                        ui::theme::paint_success_label(&t, "\u{2713}"),
+                        restored,
+                        session_file.display()
+                    );
+                    println!(
+                        "{} current conversation is now merged with saved session",
+                        ui::theme::paint_dim(&t, "\u{258C}")
+                    );
+                }
+                if let Some(m) = data["mode"].as_str() {
+                    println!(
+                        "{} {} {}",
+                        ui::theme::paint_dim(&t, "\u{258C}"),
+                        ui::theme::paint_dim(&t, "saved mode:"),
+                        ui::theme::paint_bright(&t, m)
+                    );
+                }
+                if let Some(code) = data["last_code"].as_str() {
+                    if !code.is_empty() {
+                        session.last_code = code.to_string();
+                        println!(
+                            "{} {} {}",
+                            ui::theme::paint_dim(&t, "\u{258C}"),
+                            ui::theme::paint_dim(&t, "last code:"),
+                            ui::theme::paint_success_label(&t, "restored")
+                        );
+                    }
+                }
+                if let Some(files) = data["last_files"].as_array() {
+                    let restored_files: Vec<FileEntry> = files
+                        .iter()
+                        .filter_map(|f| {
+                            Some(FileEntry {
+                                path: f["path"].as_str()?.to_string(),
+                                content: f["content"].as_str()?.to_string(),
+                            })
+                        })
+                        .collect();
+                    if !restored_files.is_empty() {
+                        println!(
+                            "{} {} {} file(s) restored",
+                            ui::theme::paint_dim(&t, "\u{258C}"),
+                            ui::theme::paint_dim(&t, "last files:"),
+                            restored_files.len()
+                        );
+                        session.last_files = restored_files;
+                    }
+                }
+                if let Some(paths) = data["last_files_written"].as_array() {
+                    let written: Vec<PathBuf> = paths
+                        .iter()
+                        .filter_map(|p| p.as_str().map(PathBuf::from))
+                        .collect();
+                    if !written.is_empty() {
+                        session.last_files_written = written;
+                    }
+                }
+            } else {
+                println!(
+                    "{} invalid session file",
+                    ui::theme::paint_error_label(&t, "\u{258C}")
+                );
+            }
+        }
+        Err(e) => println!(
+            "{} failed to read session: {}",
+            ui::theme::paint_error_label(&t, "\u{258C}"),
+            e
+        ),
+    }
+}

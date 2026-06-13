@@ -1,5 +1,10 @@
+//! Project scaffolding templates.
+//! Provides template generators for `rem new` subcommand, producing
+//! starter files for various project types (bare, portfolio, blog, etc.).
+
 use crate::FileEntry;
 
+/// Generates a bare-bones HTML/CSS/JS project scaffold.
 pub fn template_bare(name: &str) -> Vec<FileEntry> {
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
@@ -87,6 +92,7 @@ document.querySelectorAll('nav a').forEach(link => {
     ]
 }
 
+/// Generates a Rust project scaffold with Cargo.toml and src/main.rs.
 pub fn template_rust(name: &str) -> Vec<FileEntry> {
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
@@ -124,6 +130,7 @@ mod tests {
     ]
 }
 
+/// Generates a Python project scaffold with main.py and requirements.txt.
 pub fn template_python(_name: &str) -> Vec<FileEntry> {
     vec![
         FileEntry {
@@ -144,6 +151,7 @@ if __name__ == "__main__":
     ]
 }
 
+/// Generates a Go project scaffold with go.mod and main.go.
 pub fn template_go(name: &str) -> Vec<FileEntry> {
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
@@ -172,6 +180,7 @@ func main() {
     ]
 }
 
+/// Generates a JavaScript/Node.js scaffold with package.json and index.js.
 pub fn template_javascript(name: &str) -> Vec<FileEntry> {
     vec![
         FileEntry {
@@ -198,6 +207,7 @@ pub fn template_javascript(name: &str) -> Vec<FileEntry> {
     ]
 }
 
+/// Generates a portfolio website scaffold with about, projects, and contact sections.
 pub fn template_portfolio(name: &str) -> Vec<FileEntry> {
     let title = name.rsplit('/').next().unwrap_or(name);
     let mut files = template_bare(name);
@@ -334,6 +344,7 @@ footer { background: #f5f5f5; text-align: center; padding: 1rem; color: #888; fo
     files
 }
 
+/// Generates a marketing landing page scaffold with hero, features, and CTA.
 pub fn template_landing(name: &str) -> Vec<FileEntry> {
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
@@ -438,6 +449,7 @@ document.querySelectorAll('a[href^="#"]').forEach(anchor => {
     ]
 }
 
+/// Generates a blog scaffold with post listing and individual post pages.
 pub fn template_blog(name: &str) -> Vec<FileEntry> {
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![

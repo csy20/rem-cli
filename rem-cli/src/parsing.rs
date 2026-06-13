@@ -1,9 +1,14 @@
+//! Text parsing utilities.
+//! Extracts code blocks from markdown, guesses filenames from content,
+//! strips HTML entities, and detects bold-marked file paths.
+
 use regex::Regex;
 use std::sync::LazyLock;
 
 static RE_BOLD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").expect("invalid regex literal"));
 
+/// Extracts the first fenced code block from markdown text.
 pub fn extract_code_block(text: &str) -> String {
     let mut in_fence = false;
     let mut code_lines: Vec<&str> = Vec::new();
@@ -27,6 +32,7 @@ pub fn extract_code_block(text: &str) -> String {
     }
 }
 
+/// Extracts a filename from a bold markdown segment (e.g., `**file.rs**`).
 pub fn current_name_from_bold(line: &str) -> Option<String> {
     if let Some(cap) = RE_BOLD.captures(line) {
         let name = cap.get(1)?.as_str().trim().to_lowercase();
@@ -37,6 +43,7 @@ pub fn current_name_from_bold(line: &str) -> Option<String> {
     None
 }
 
+/// Guesses a filename from the first few lines of code content.
 pub fn guess_filename(lines: &[&str]) -> String {
     for line in lines.iter().take(3) {
         let trimmed = line.trim();
@@ -104,6 +111,7 @@ pub fn guess_filename(lines: &[&str]) -> String {
     String::new()
 }
 
+/// Removes fenced code blocks from text, returning only the non-code parts.
 pub fn strip_code_blocks(text: &str) -> String {
     let mut result = String::new();
     let mut in_fence = false;

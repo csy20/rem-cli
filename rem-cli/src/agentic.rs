@@ -1,3 +1,7 @@
+//! Autonomous agent loop utilities.
+//! Provides lint/test tool execution, result formatting, agentic prompt
+//! construction for iterative code generation, and goal signal extraction.
+
 use std::process::Command;
 use std::time::Instant;
 
@@ -5,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ui;
 
+/// Result of running an external tool (linter, test runner, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_name: String,
@@ -15,6 +20,7 @@ pub struct ToolResult {
     pub action: String,
 }
 
+/// Programming language target for linting/testing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LintTarget {
     Rust,
@@ -28,6 +34,7 @@ pub enum LintTarget {
 }
 
 impl LintTarget {
+    /// Detects the language target from a file path extension.
     pub fn detect(path: &str) -> Self {
         if path.ends_with(".rs") {
             LintTarget::Rust
@@ -49,6 +56,7 @@ impl LintTarget {
     }
 }
 
+/// Runs the appropriate linter for a file path.
 pub fn run_lint(path: &str) -> ToolResult {
     let target = LintTarget::detect(path);
     let start = Instant::now();
@@ -98,6 +106,7 @@ pub fn run_lint(path: &str) -> ToolResult {
     }
 }
 
+/// Runs the appropriate test runner for a file path (cargo test, pytest, etc.).
 pub fn run_test(path: &str) -> ToolResult {
     let target = LintTarget::detect(path);
     let start = Instant::now();
@@ -152,6 +161,7 @@ pub fn run_test(path: &str) -> ToolResult {
     }
 }
 
+/// Formats tool execution output with styled status and truncated stdout/stderr.
 pub fn format_tool_output(result: &ToolResult) -> String {
     let t = ui::theme::active();
     let status = if result.success {
@@ -188,6 +198,7 @@ pub fn format_tool_output(result: &ToolResult) -> String {
     output
 }
 
+/// Builds a combined tool output context string from optional lint/test/build results.
 pub fn build_tool_context(
     lint_result: Option<&ToolResult>,
     test_result: Option<&ToolResult>,
@@ -220,6 +231,7 @@ pub fn build_tool_context(
     ctx
 }
 
+/// Builds the agentic loop prompt with iteration tracking and tool output.
 pub fn build_agentic_prompt(
     task: &str,
     tool_output: &str,
@@ -246,6 +258,7 @@ Generate corrected code now:"##,
     )
 }
 
+/// Extracts `GOAL_ACHIEVED`/`GOAL_FAILED` signal from an LLM response.
 pub fn extract_goal_signal(response: &str) -> Option<(bool, String)> {
     for line in response.lines() {
         if let Some(summary) = line.strip_prefix("GOAL_ACHIEVED:") {
@@ -256,4 +269,111 @@ pub fn extract_goal_signal(response: &str) -> Option<(bool, String)> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_rust_from_rs_extension() {
+        assert_eq!(LintTarget::detect("src/main.rs"), LintTarget::Rust);
+    }
+
+    #[test]
+    fn detect_python_from_py_extension() {
+        assert_eq!(LintTarget::detect("script.py"), LintTarget::Python);
+    }
+
+    #[test]
+    fn detect_go_from_go_extension() {
+        assert_eq!(LintTarget::detect("main.go"), LintTarget::Go);
+    }
+
+    #[test]
+    fn detect_javascript_from_js_extension() {
+        assert_eq!(LintTarget::detect("app.js"), LintTarget::JavaScript);
+    }
+
+    #[test]
+    fn detect_typescript_from_ts_extension() {
+        assert_eq!(LintTarget::detect("app.ts"), LintTarget::TypeScript);
+        assert_eq!(LintTarget::detect("app.tsx"), LintTarget::TypeScript);
+    }
+
+    #[test]
+    fn detect_css_from_css_extension() {
+        assert_eq!(LintTarget::detect("style.css"), LintTarget::Css);
+    }
+
+    #[test]
+    fn detect_html_from_html_extension() {
+        assert_eq!(LintTarget::detect("index.html"), LintTarget::Html);
+        assert_eq!(LintTarget::detect("page.htm"), LintTarget::Html);
+    }
+
+    #[test]
+    fn detect_unknown_for_unrecognized_extension() {
+        assert_eq!(LintTarget::detect("Makefile"), LintTarget::Unknown);
+        assert_eq!(LintTarget::detect("data.txt"), LintTarget::Unknown);
+    }
+
+    #[test]
+    fn extract_goal_achieved_signal() {
+        let resp = "Some work\nGOAL_ACHIEVED: All tests pass\nDone";
+        let result = extract_goal_signal(resp);
+        assert_eq!(result, Some((true, "All tests pass".to_string())));
+    }
+
+    #[test]
+    fn extract_goal_failed_signal() {
+        let resp = "Tried approach A\nGOAL_FAILED: Compilation error persists";
+        let result = extract_goal_signal(resp);
+        assert_eq!(
+            result,
+            Some((false, "Compilation error persists".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_no_signal_when_absent() {
+        let resp = "Just a regular response without signals";
+        assert_eq!(extract_goal_signal(resp), None);
+    }
+
+    #[test]
+    fn format_tool_output_includes_status() {
+        let result = ToolResult {
+            tool_name: "rustfmt".into(),
+            success: true,
+            stdout: "formatted OK".into(),
+            stderr: String::new(),
+            duration_ms: 150,
+            action: "lint".into(),
+        };
+        let output = format_tool_output(&result);
+        assert!(output.contains("PASS"));
+        assert!(output.contains("rustfmt"));
+    }
+
+    #[test]
+    fn format_tool_output_shows_stderr() {
+        let result = ToolResult {
+            tool_name: "ruff".into(),
+            success: false,
+            stdout: String::new(),
+            stderr: "syntax error".into(),
+            duration_ms: 200,
+            action: "lint".into(),
+        };
+        let output = format_tool_output(&result);
+        assert!(output.contains("FAIL"));
+        assert!(output.contains("syntax error"));
+    }
+
+    #[test]
+    fn build_tool_context_returns_empty_when_all_none() {
+        let ctx = build_tool_context(None, None, None);
+        assert!(ctx.contains("No tool results available"));
+    }
 }

@@ -1,5 +1,10 @@
+//! User intent classification.
+//! Analyzes user input to determine intent (FastAnswer, Planning, WebNeeded,
+//! CodeAction) using keyword heuristics and phrase matching.
+
 use std::sync::LazyLock;
 
+/// Classified intent of a user's input message.
 #[derive(Debug, PartialEq, Clone)]
 pub enum TaskIntent {
     FastAnswer,
@@ -133,40 +138,27 @@ static QUESTION_PREFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     ]
 });
 
-static PHRASE_COMBINATIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+static PHRASE_COMBINATIONS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut out = Vec::new();
     for verb in VERB_ROOTS.iter() {
         for suffix in SUFFIX_PHRASES.iter() {
-            // Leak the Box to get &'static str
-            let s: &'static str = Box::leak(format!("{} {}", verb, suffix).into_boxed_str());
-            out.push(s);
+            out.push(format!("{} {}", verb, suffix));
         }
     }
     out
 });
 
-static VERB_PHRASES_SPACE: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    VERB_PHRASES
-        .iter()
-        .map(|p| {
-            let leaked: &'static mut str = Box::leak(format!(" {}", p).into_boxed_str());
-            let static_ref: &'static str = leaked;
-            static_ref
-        })
-        .collect()
-});
+static VERB_PHRASES_SPACE: LazyLock<Vec<String>> =
+    LazyLock::new(|| VERB_PHRASES.iter().map(|p| format!(" {}", p)).collect());
 
-static PHRASE_COMBINATIONS_SPACE: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+static PHRASE_COMBINATIONS_SPACE: LazyLock<Vec<String>> = LazyLock::new(|| {
     PHRASE_COMBINATIONS
         .iter()
-        .map(|p| {
-            let leaked: &'static mut str = Box::leak(format!(" {}", p).into_boxed_str());
-            let static_ref: &'static str = leaked;
-            static_ref
-        })
+        .map(|p| format!(" {}", p))
         .collect()
 });
 
+/// Classifies user input into a [`TaskIntent`] using keyword heuristics.
 pub fn classify_intent(input: &str) -> TaskIntent {
     let lower = input.to_lowercase();
 
@@ -250,6 +242,7 @@ pub fn classify_intent(input: &str) -> TaskIntent {
     TaskIntent::FastAnswer
 }
 
+/// Returns a system prompt suffix based on the classified intent.
 pub fn intent_instruction(intent: &TaskIntent) -> &'static str {
     match intent {
         TaskIntent::FastAnswer => "\n\n[ANSWER CONCISELY — no code generation, no file format. Just a clear text response. If uncertain whether user wants code, ask first.]",
@@ -285,6 +278,7 @@ fn has_creation_intent_lower(lower: &str) -> bool {
     false
 }
 
+/// Checks whether input has creation/build/generation intent.
 pub fn has_creation_intent(input: &str) -> bool {
     has_creation_intent_lower(&input.to_lowercase())
 }
@@ -301,10 +295,12 @@ fn is_question_about_lower(lower: &str, action_phrase: &str) -> bool {
 }
 
 #[allow(dead_code)]
+/// Checks if input is asking a question about a specific action phrase.
 pub(crate) fn is_question_about(input: &str, action_phrase: &str) -> bool {
     is_question_about_lower(&input.to_lowercase(), action_phrase)
 }
 
+/// Detects whether input contains file path references (extensions, `/`, etc.).
 pub fn has_file_path(input: &str) -> bool {
     let lower = input.to_lowercase();
     lower.contains(".html")

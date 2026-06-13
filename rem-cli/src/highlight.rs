@@ -1,3 +1,7 @@
+//! Terminal syntax highlighting.
+//! Applies ANSI color highlighting to HTML, CSS, and JavaScript code
+//! for prettier display in the terminal during code reviews and diffs.
+
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -24,6 +28,7 @@ static RE_JS_STR: LazyLock<Regex> =
 static RE_JS_COMMENT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(//.*)").expect("invalid regex literal"));
 
+/// Applies ANSI syntax highlighting to code based on language hint.
 pub fn highlight_code(content: &str, lang_hint: &str) -> String {
     let lang = lang_hint.to_lowercase();
     if lang.contains("html") {
@@ -118,6 +123,7 @@ fn highlight_generic(code: &str) -> String {
     code.to_string()
 }
 
+/// Heuristically detects language (html/css/js) from code content.
 pub fn detect_language_from_content(code: &str) -> &str {
     let first_line = code.trim().lines().next().unwrap_or("");
     if first_line.starts_with("<!") || first_line.starts_with("<") {

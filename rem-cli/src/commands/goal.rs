@@ -1,0 +1,158 @@
+//! Goal-driven autonomous loop (`/goal`).
+//! Iteratively generates code, runs lint/tests, and feeds results back to
+//! the LLM until the goal is achieved or max iterations are reached.
+
+use crate::agentic::{
+    build_agentic_prompt, build_tool_context, extract_goal_signal, format_tool_output, run_lint,
+    run_test,
+};
+use crate::chat::ChatSession;
+use crate::parsing::extract_code_block;
+use crate::provider::Provider;
+use crate::ui;
+use crate::{extract_code_blocks_with_names, CHAT_SYSTEM_PROMPT_CODE};
+
+pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &str) {
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &format!("GOAL: {}", condition)),
+    );
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "REM will work until goal is met. Ctrl+C to stop."),
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+
+    let goal_prompt_text = format!(
+        "GOAL: {}\n\nYour task is to achieve this goal. You may need to:\n\
+         1. Plan your approach\n\
+         2. Write code/files using ### path/file headings\n\
+         3. We will run tests/linters and report back\n\
+         4. Fix any issues based on tool output\n\n\
+         When you believe the goal is achieved, say GOAL_ACHIEVED: <summary>.\n\
+         If you are stuck, say GOAL_FAILED: <reason>.",
+        condition
+    );
+
+    let max_iter = 10;
+    let mut last_tool_output = String::new();
+    let mut last_written_files: Vec<String> = Vec::new();
+
+    for i in 0..max_iter {
+        if i > 0 {
+            println!("{}", ui::theme::paint_rail_empty(&t));
+        }
+        println!(
+            "{} {} {}/{}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint(&t, "accent", "iteration", true),
+            i + 1,
+            max_iter
+        );
+
+        let prompt = if last_tool_output.is_empty() {
+            goal_prompt_text.clone()
+        } else {
+            build_agentic_prompt(&goal_prompt_text, &last_tool_output, i, max_iter)
+        };
+
+        match client
+            .complete_chat_stream(&prompt, CHAT_SYSTEM_PROMPT_CODE, "")
+            .await
+        {
+            Ok(text) => {
+                let cleaned = text.trim().to_string();
+                session
+                    .history
+                    .push((format!("/goal {}", condition), cleaned.clone()));
+
+                let files = extract_code_blocks_with_names(&cleaned);
+                let code = extract_code_block(&cleaned);
+                if !files.is_empty() {
+                    session.last_files = files.clone();
+                    session.last_code = if code.is_empty() { String::new() } else { code };
+                    crate::commands::auto_write_files(session, &files);
+                    last_written_files = files.iter().map(|f| f.path.clone()).collect();
+                } else if !code.is_empty() {
+                    session.last_code = code;
+                    session.last_files.clear();
+                    println!(
+                        "{} {} use /write <path> to save",
+                        ui::theme::paint(&t, "accent", "\u{258C}", true),
+                        ui::theme::paint_dim(&t, "code detected —")
+                    );
+                }
+
+                if let Some((achieved, msg)) = extract_goal_signal(&cleaned) {
+                    if achieved {
+                        println!(
+                            "{} {} goal achieved! {}",
+                            ui::theme::paint_success_label(&t, "\u{258C}"),
+                            ui::theme::paint_success_label(&t, "\u{2713}"),
+                            msg
+                        );
+                    } else {
+                        println!(
+                            "{} {} {}",
+                            ui::theme::paint_warning(&t, "\u{258C}"),
+                            ui::theme::paint_warning(&t, "!"),
+                            msg
+                        );
+                    }
+                    break;
+                }
+
+                if cleaned.contains("GOAL_ACHIEVED") {
+                    println!(
+                        "{} {} goal achieved!",
+                        ui::theme::paint_success_label(&t, "\u{258C}"),
+                        ui::theme::paint_success_label(&t, "\u{2713}")
+                    );
+                    break;
+                }
+                if cleaned.contains("GOAL_FAILED") {
+                    println!(
+                        "{} {} goal could not be achieved.",
+                        ui::theme::paint_warning(&t, "\u{258C}"),
+                        ui::theme::paint_warning(&t, "!")
+                    );
+                    break;
+                }
+
+                if !last_written_files.is_empty() {
+                    let mut tool_results = String::new();
+                    for file_path in &last_written_files {
+                        let lint_result = run_lint(file_path);
+                        println!("{}", format_tool_output(&lint_result));
+
+                        let test_result = run_test(file_path);
+                        if !test_result.stderr.is_empty() || !test_result.stdout.is_empty() {
+                            println!("{}", format_tool_output(&test_result));
+                        }
+
+                        tool_results.push_str(&build_tool_context(
+                            Some(&lint_result),
+                            Some(&test_result),
+                            None,
+                        ));
+                    }
+                    last_tool_output = tool_results;
+                }
+            }
+            Err(e) => {
+                println!(
+                    "{} {} error: {}",
+                    ui::theme::paint_error_label(&t, "\u{258C}"),
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
+                    e
+                );
+                break;
+            }
+        }
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}

@@ -1,3 +1,7 @@
+//! Chat session management, prompt building, and context assembly.
+//! Provides [`ChatSession`] which tracks conversation state, resolves `@` file
+//! references, builds system prompts with project context, and manages modes.
+
 use crate::feedback::FeedbackTracker;
 use crate::indexer::{build_retrieved_context, load_codebase_index, retrieve_relevant_chunks};
 use crate::intent::TaskIntent;
@@ -14,6 +18,7 @@ use std::io::{self};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+/// Holds all mutable state for an interactive chat session.
 pub(crate) struct ChatSession {
     pub(crate) rl: DefaultEditor,
     pub(crate) last_code: String,
@@ -33,6 +38,7 @@ pub(crate) struct ChatSession {
 }
 
 impl ChatSession {
+    /// Creates a new chat session with the given model and optional workspace.
     pub(crate) fn new(model: &str, workspace: Option<PathBuf>) -> Result<Self> {
         let rl = DefaultEditor::new().context("failed to start line editor")?;
         let project_dir = workspace.clone();
@@ -57,14 +63,17 @@ impl ChatSession {
         })
     }
 
+    /// Reads a line from the terminal with the given prompt.
     pub(crate) fn readline(&mut self, prompt: &str) -> io::Result<String> {
         self.rl.readline(prompt).map_err(io::Error::other)
     }
 
+    /// Adds a line to the readline history.
     pub(crate) fn add_history(&mut self, line: &str) {
         let _ = self.rl.add_history_entry(line);
     }
 
+    /// Builds a context string from the last web search results.
     pub(crate) fn build_search_context(&self) -> String {
         if self.last_search.is_empty() {
             return String::new();
@@ -81,6 +90,8 @@ impl ChatSession {
     /// user task) and returns a targeted "Relevant code chunks" block. This is the key
     /// mechanism for scaling rem to larger codebases without prompt explosion.
     /// Falls back to the classic exhaustive (but capped) file listing when no index.
+    /// Builds project context for the given query.
+    /// Uses codebase index for retrieval when available; falls back to file listing.
     pub(crate) fn build_relevant_project_context(&self, query: &str) -> String {
         if let Some(ref dir) = self.project_dir {
             if let Some(index) = load_codebase_index(dir) {
@@ -99,6 +110,7 @@ impl ChatSession {
         }
     }
 
+    /// Builds a truncated history string from recent conversation turns.
     pub(crate) fn build_chat_history(&self) -> String {
         if self.history.is_empty() {
             return String::new();
@@ -111,10 +123,13 @@ impl ChatSession {
         out
     }
 
+    /// Returns the project memory as context for the LLM prompt.
     pub(crate) fn build_memory_context(&self) -> String {
         self.project_memory.as_context()
     }
 
+    /// Resolves `@<path>` references in user input to file contents.
+    /// Returns (modified_input, extra_context).
     pub(crate) fn resolve_at_references(&self, input: &str) -> (String, String) {
         let mut extra_context = String::new();
         let mut cleaned_input = input.to_string();
@@ -196,6 +211,7 @@ impl ChatSession {
     }
 }
 
+/// Warns if system RAM is 16 GB or less (important for local LLM performance).
 pub(crate) fn check_system_resources() {
     let t = ui::theme::active();
     let mem_gb = detect_system_ram_gb();
@@ -229,12 +245,14 @@ fn detect_system_ram_gb() -> u64 {
     0
 }
 
+/// Prints the welcome banner with model and mode information.
 pub(crate) fn print_welcome(client: &Provider) {
     println!();
     ui::header::render(&client.provider_label(), "CHAT");
     println!();
 }
 
+/// Builds a file tree listing of the project directory (depth-limited, size-capped).
 pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
     let mut out = String::from("Project files:\n");
     let mut count = 0u32;
@@ -293,6 +311,7 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
     }
 }
 
+/// Detects project language type from files in directory (Cargo.toml → rust, etc.).
 pub(crate) fn detect_project_type(dir: &Path) -> &'static str {
     if !dir.exists() {
         return "";
@@ -331,6 +350,7 @@ pub(crate) fn detect_project_type(dir: &Path) -> &'static str {
     ""
 }
 
+/// Returns language-specific guidance text for the system prompt.
 pub(crate) fn language_specific_guidance(project_type: &str) -> &'static str {
     match project_type {
         "rust" => "\nLanguage context: Rust project. Use cargo build/run. Prefer &str over String where possible. Include Cargo.toml deps.",
@@ -344,6 +364,7 @@ pub(crate) fn language_specific_guidance(project_type: &str) -> &'static str {
     }
 }
 
+/// Builds the styled terminal prompt string (e.g., `[CODE] ollama/rem-coder>`).
 pub(crate) fn build_prompt(session: &ChatSession, client: &Provider) -> String {
     let t = ui::theme::active();
     let model_short = client.model.split(':').next().unwrap_or(&client.model);
@@ -375,6 +396,8 @@ pub(crate) fn build_prompt(session: &ChatSession, client: &Provider) -> String {
     p
 }
 
+/// Validates the LLM response, stripping code if in CHAT mode and inappropriate.
+/// Returns (was_validated, cleaned_response).
 pub(crate) fn validate_chat_response(
     response: &str,
     intent: &TaskIntent,
@@ -408,6 +431,7 @@ pub(crate) fn validate_chat_response(
     (false, String::new())
 }
 
+/// Chat interaction mode: Chat, Code, or Plan.
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum RunMode {
     Chat,
@@ -416,6 +440,7 @@ pub(crate) enum RunMode {
 }
 
 impl RunMode {
+    /// Cycles through Chat → Code → Plan → Chat.
     pub(crate) fn toggle(&self) -> RunMode {
         match self {
             RunMode::Chat => RunMode::Code,
@@ -424,11 +449,64 @@ impl RunMode {
         }
     }
 
+    /// Returns the display label for this mode.
     pub(crate) fn label(&self) -> &str {
         match self {
             RunMode::Chat => "CHAT",
             RunMode::Code => "CODE",
             RunMode::Plan => "PLAN",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intent::TaskIntent;
+
+    #[test]
+    fn validate_chat_response_passes_plain_text() {
+        let (was_validated, _) =
+            validate_chat_response("Hi there!", &TaskIntent::FastAnswer, &RunMode::Chat);
+        assert!(!was_validated);
+    }
+
+    #[test]
+    fn validate_chat_allows_code_in_code_mode() {
+        let (was_validated, _) = validate_chat_response(
+            "### app.js\n```js\nconst x = 1;\n```",
+            &TaskIntent::CodeAction,
+            &RunMode::Code,
+        );
+        assert!(!was_validated);
+    }
+
+    #[test]
+    fn validate_chat_strips_code_in_chat_mode() {
+        let (was_validated, cleaned) = validate_chat_response(
+            "Here's the code:\n### app.js\n```js\nconst x = 1;\n```\n done",
+            &TaskIntent::FastAnswer,
+            &RunMode::Chat,
+        );
+        assert!(was_validated);
+        assert!(!cleaned.contains("```"));
+    }
+
+    #[test]
+    fn validate_chat_strips_json_in_chat_mode() {
+        let (was_validated, _cleaned) = validate_chat_response(
+            "{\"code\": \"fn main() {}\"}",
+            &TaskIntent::FastAnswer,
+            &RunMode::Chat,
+        );
+        assert!(was_validated);
+    }
+
+    #[test]
+    fn validate_chat_handles_empty_response() {
+        let (was_validated, cleaned) =
+            validate_chat_response("", &TaskIntent::CodeAction, &RunMode::Chat);
+        assert!(was_validated);
+        assert!(cleaned.contains("No response generated"));
     }
 }

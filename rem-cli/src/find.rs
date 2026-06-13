@@ -1,10 +1,6 @@
-// ── find.rs ──
-//
-// Pure in-project text search used by the `/find <query>` slash command.
-// No LLM, no network, no async — walks the project tree with `walkdir`,
-// reads each file with a size cap, and returns every line that contains
-// the query as a substring. Hidden / build / lock directories are skipped
-// to keep results useful for a beginner audience.
+//! In-project text search (`/find` command).
+//! Walks the project tree with `walkdir`, reads each file with a size cap,
+//! and returns every line matching the query. Skips hidden/build/lock dirs.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -81,10 +77,12 @@ pub const SKIP_SUFFIXES: &[&str] = &[
     ".otf", ".eot",
 ];
 
+/// Checks whether a directory name should be skipped during traversal.
 pub fn should_skip_dir(name: &str) -> bool {
     SKIP_NAMES.contains(&name)
 }
 
+/// Checks whether a file name should be skipped (minified assets, binaries, etc.).
 pub fn should_skip_file(name: &str) -> bool {
     let lower_bytes = name.as_bytes();
     let len = lower_bytes.len();

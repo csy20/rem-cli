@@ -1,3 +1,7 @@
+//! Web search via DuckDuckGo HTML API.
+//! Performs searches by scraping DuckDuckGo's HTML results page and
+//! parsing titles, snippets, and URLs from the response.
+
 use crate::ui;
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -13,6 +17,7 @@ static RE_SEARCH_SNIPPET: LazyLock<Regex> = LazyLock::new(|| {
         .expect("invalid regex literal")
 });
 
+/// A single web search result with title, snippet, and URL.
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub title: String,
@@ -20,6 +25,7 @@ pub struct SearchResult {
     pub url: String,
 }
 
+/// Performs a web search via DuckDuckGo HTML API.
 pub(crate) async fn perform_web_search(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
     let resp = client
         .get("https://html.duckduckgo.com/html/")
@@ -113,6 +119,7 @@ fn strip_html(input: &str) -> String {
     trimmed
 }
 
+/// Prints styled search results to the terminal.
 pub fn print_search_results(results: &[SearchResult]) {
     let t = ui::theme::active();
     if results.is_empty() {
@@ -139,5 +146,38 @@ pub fn print_search_results(results: &[SearchResult]) {
             );
         }
         println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ddg_html_returns_empty_for_empty_input() {
+        let results = parse_ddg_html("");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn parse_ddg_html_returns_empty_for_no_matches() {
+        let html = "<html><body>no results here</body></html>";
+        let results = parse_ddg_html(html);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn strip_html_removes_tags() {
+        assert_eq!(strip_html("<b>hello</b> world"), "hello world");
+    }
+
+    #[test]
+    fn strip_html_decodes_entities() {
+        assert_eq!(strip_html("&amp;lt;test&amp;gt;"), "&lt;test&gt;");
+    }
+
+    #[test]
+    fn strip_html_handles_empty() {
+        assert_eq!(strip_html(""), "");
     }
 }

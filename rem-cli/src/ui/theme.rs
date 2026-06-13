@@ -1,3 +1,7 @@
+//! Color theme system.
+//! Defines built-in themes (GHOST, PHOSPHOR, MIST, PAPER, SAKURA, EMBER)
+//! and provides paint helper functions for ANSI-colored terminal output.
+
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -64,6 +68,7 @@ static ACTIVE_THEME: LazyLock<RwLock<Arc<Theme>>> = LazyLock::new(|| {
     RwLock::new(Arc::new(theme))
 });
 
+/// Converts a hex color string to an ANSI foreground escape code.
 fn hex_to_ansi_fg(hex: &str) -> String {
     debug_assert!(
         hex.as_bytes().first() == Some(&b'#') && hex.len() == 7,
@@ -79,6 +84,7 @@ fn hex_to_ansi_fg(hex: &str) -> String {
     buf
 }
 
+/// Converts a hex color string to an ANSI background escape code.
 fn hex_to_ansi_bg(hex: &str) -> String {
     debug_assert!(
         hex.as_bytes().first() == Some(&b'#') && hex.len() == 7,
@@ -94,6 +100,7 @@ fn hex_to_ansi_bg(hex: &str) -> String {
     buf
 }
 
+/// A color theme defining ANSI color codes for terminal UI elements.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct Theme {
@@ -124,6 +131,7 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Builds a new theme from 21 hex color values.
     #[allow(clippy::too_many_arguments)]
     fn build(
         name: &str,
@@ -229,15 +237,18 @@ impl Theme {
         }
     }
 
+    /// Returns the ANSI foreground escape code for a named color field.
     pub fn fg(&self, field: &str) -> &str {
         self.fg_cache.get(field).map(|s| s.as_str()).unwrap_or("")
     }
 
+    /// Returns the ANSI background escape code for a named color field.
     pub fn bg(&self, field: &str) -> &str {
         self.bg_cache.get(field).map(|s| s.as_str()).unwrap_or("")
     }
 }
 
+/// Looks up a theme by name (case-insensitive), falling back to default.
 pub fn by_name(name: &str) -> Theme {
     let upper = name.to_ascii_uppercase();
     THEMES.get(upper.as_str()).cloned().unwrap_or_else(|| {
@@ -248,10 +259,12 @@ pub fn by_name(name: &str) -> Theme {
     })
 }
 
+/// Returns the currently active theme.
 pub fn active() -> Arc<Theme> {
     ACTIVE_THEME.read().expect("theme lock").clone()
 }
 
+/// Sets the active theme by name. Returns false if the name is unknown.
 pub fn set_active(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     if !THEMES.contains_key(upper.as_str()) {
@@ -262,10 +275,12 @@ pub fn set_active(name: &str) -> bool {
     true
 }
 
+/// Returns a list of available theme names.
 pub fn list_names() -> Vec<String> {
     THEMES.keys().map(|s| s.to_string()).collect()
 }
 
+/// Returns the theme accent field name for a given chat mode.
 pub fn accent_for_mode(mode: &str) -> &'static str {
     match mode {
         "CODE" => "accent",
@@ -274,9 +289,12 @@ pub fn accent_for_mode(mode: &str) -> &'static str {
     }
 }
 
+/// ANSI escape code to reset formatting.
 pub const RESET: &str = "\x1b[0m";
+/// ANSI escape code for bold text.
 pub const BOLD: &str = "\x1b[1m";
 
+/// Paints text in a named theme color, optionally bold.
 pub fn paint(t: &Theme, field: &str, text: &str, bold: bool) -> String {
     let mut out = String::with_capacity(text.len() + 16);
     out.push_str(t.fg(field));
@@ -288,6 +306,7 @@ pub fn paint(t: &Theme, field: &str, text: &str, bold: bool) -> String {
     out
 }
 
+/// Paints text with foreground and background colors.
 pub fn paint_on(t: &Theme, fg_field: &str, bg_field: &str, text: &str, bold: bool) -> String {
     let mut out = String::with_capacity(text.len() + 32);
     out.push_str(t.fg(fg_field));
@@ -300,36 +319,43 @@ pub fn paint_on(t: &Theme, fg_field: &str, bg_field: &str, text: &str, bold: boo
     out
 }
 
+/// Paints a chip/badge with pill styling.
 pub fn paint_chip(t: &Theme, label: &str) -> String {
     paint_on(t, "pill_text", "pill_bg", &format!(" {} ", label), true)
 }
 
+/// Paints a success message with checkmark.
 pub fn paint_success(t: &Theme, msg: &str) -> String {
     let mark = paint(t, "success", "\u{2713}", true);
     let text = paint(t, "accent", msg, true);
     format!("  {mark} {text}")
 }
 
+/// Paints an error message with X mark.
 pub fn paint_error(t: &Theme, msg: &str) -> String {
     let mark = paint(t, "error", "\u{2717}", true);
     let text = paint(t, "text_muted", msg, false);
     format!("  {mark} {text}")
 }
 
+/// Paints text in the accent color with bold.
 pub fn paint_bright(t: &Theme, text: &str) -> String {
     paint(t, "accent", text, true)
 }
 
+/// Paints a rail-style line with accent bar and body text.
 pub fn paint_rail(t: &Theme, accent_field: &str, body_field: &str, body: &str) -> String {
     let rail = paint(t, accent_field, "\u{258C}", true);
     let text = paint(t, body_field, body, false);
     format!("{rail} {text}")
 }
 
+/// Paints an empty rail line (faint bar only).
 pub fn paint_rail_empty(t: &Theme) -> String {
     paint(t, "text_faint", "\u{258C}", true)
 }
 
+/// Paints a section header with rail styling.
 pub fn paint_rail_header(t: &Theme, title: &str) -> String {
     let rail = paint(t, "accent", "\u{258C}", true);
     let title_text = paint(
@@ -341,6 +367,7 @@ pub fn paint_rail_header(t: &Theme, title: &str) -> String {
     format!("{rail}  {title_text}")
 }
 
+/// Paints a help line with command and description.
 pub fn paint_help_line(t: &Theme, cmd: &str, desc: &str) -> String {
     let rail = paint(t, "accent", "\u{258C}", true);
     let cmd_text = paint(t, "accent", cmd, true);
@@ -348,6 +375,7 @@ pub fn paint_help_line(t: &Theme, cmd: &str, desc: &str) -> String {
     format!("{rail}   {cmd_text:<18} {desc_text}")
 }
 
+/// Paints a bullet point with rail.
 pub fn paint_rail_bullet(t: &Theme, text: &str) -> String {
     let rail = paint(t, "accent", "\u{258C}", true);
     let dot = paint(t, "text_faint", "\u{2022}", false);
@@ -355,6 +383,7 @@ pub fn paint_rail_bullet(t: &Theme, text: &str) -> String {
     format!("{rail}   {dot} {body}")
 }
 
+/// Paints a bullet line with multiple styled segments.
 pub fn paint_bullet_line(t: &Theme, parts: &[(&str, &str, bool)]) -> String {
     let rail = paint(t, "accent", "\u{258C}", true);
     let dot = paint(t, "text_faint", "\u{2022}", false);
@@ -366,22 +395,27 @@ pub fn paint_bullet_line(t: &Theme, parts: &[(&str, &str, bool)]) -> String {
     out
 }
 
+/// Paints text in a dim/faint color.
 pub fn paint_dim(t: &Theme, text: &str) -> String {
     paint(t, "text_faint", text, false)
 }
 
+/// Paints text as a warning (system color).
 pub fn paint_warning(t: &Theme, text: &str) -> String {
     paint(t, "sys_color", text, false)
 }
 
+/// Paints an error label in the error color (bold).
 pub fn paint_error_label(t: &Theme, text: &str) -> String {
     paint(t, "error", text, true)
 }
 
+/// Paints a success label in the success color (bold).
 pub fn paint_success_label(t: &Theme, text: &str) -> String {
     paint(t, "success", text, true)
 }
 
+/// Prints a string to stdout with newline and flush.
 pub fn println(s: &str) {
     let stdout = io::stdout();
     let mut h = stdout.lock();

@@ -1,5 +1,10 @@
+//! Markdown-style welcome banner.
+//! Renders the ASCII-art welcome header with model info, mode chip,
+//! and command hints.
+
 use crate::ui::theme;
 
+/// Renders the ASCII-art welcome banner lines.
 pub fn render_welcome(model: &str, mode: &str, version: &str) -> Vec<String> {
     let t = theme::active();
     let mut lines = Vec::new();

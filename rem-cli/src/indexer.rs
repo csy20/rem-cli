@@ -431,6 +431,7 @@ fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
     }
 }
 
+/// Writes the codebase index to `.rem/codebase_index.json`.
 pub fn write_codebase_index(root: &Path, chunks: &[IndexChunk]) -> Result<()> {
     let rem_dir = root.join(".rem");
     fs::create_dir_all(&rem_dir).context("failed to create .rem directory for index")?;

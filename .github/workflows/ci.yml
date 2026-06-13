@@ -17,6 +17,17 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rem-cli/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rem-cli/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
       - name: fmt check
         working-directory: rem-cli
         run: cargo fmt --all -- --check
@@ -27,7 +38,7 @@ jobs:
 
       - name: test
         working-directory: rem-cli
-        run: cargo test --release
+        run: cargo test
 
       - name: build
         working-directory: rem-cli

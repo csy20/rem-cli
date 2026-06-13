@@ -1,3 +1,7 @@
+//! Spinner and output utilities.
+//! Provides [`SpinnerGuard`] for animated terminal spinners during
+//! long-running LLM requests.
+
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -6,12 +10,14 @@ use tokio::task::JoinHandle;
 
 use crate::ui::theme;
 
+/// An animated terminal spinner shown during long-running operations.
 pub struct SpinnerGuard {
     running: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl SpinnerGuard {
+    /// Creates a new spinner with a status message.
     pub fn new(msg: &'static str) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
@@ -37,6 +43,7 @@ impl SpinnerGuard {
         }
     }
 
+    /// Stops the spinner and clears the line.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
