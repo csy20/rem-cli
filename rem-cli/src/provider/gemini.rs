@@ -3,9 +3,9 @@
 //! (`chat_completion`, `chat_completion_stream`, `models`, `health`).
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
-use futures_util::StreamExt;
 use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Deserialize)]
@@ -99,7 +99,10 @@ impl super::Provider {
         Ok(())
     }
 
-    pub(super) async fn complete_json_gemini(&self, user_prompt: &str) -> Result<crate::ModelReply> {
+    pub(super) async fn complete_json_gemini(
+        &self,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
         let url = self.gemini_url(&format!("/models/{}:generateContent", self.model));
         let payload = json!({
             "contents": [{"parts": [{"text": format!("{}\n\nUser request:\n{}\n\nReturn JSON only.", self.system_prompt, user_prompt)}]}],
@@ -139,7 +142,10 @@ impl super::Provider {
         system_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = self.gemini_url(&format!("/models/{}:streamGenerateContent?alt=sse", self.model));
+        let url = self.gemini_url(&format!(
+            "/models/{}:streamGenerateContent?alt=sse",
+            self.model
+        ));
 
         let mut contents = vec![];
         if !history.is_empty() {

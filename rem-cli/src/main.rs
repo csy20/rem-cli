@@ -620,5 +620,3 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     println!("{} (keyword retrieval; raise model_ctx in ~/.config/rem-cli/config.toml for large projects)", ui::theme::paint(&t, "accent", "\u{258C}", true));
     Ok(())
 }
-
-

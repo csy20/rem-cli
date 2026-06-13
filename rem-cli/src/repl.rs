@@ -28,7 +28,7 @@ use crate::provider::Provider;
 use crate::ui;
 use crate::ui::output::SpinnerGuard;
 use crate::{
-    extract_code_blocks_with_names, exit_requested, file_icon, reset_ctrlc_count,
+    exit_requested, extract_code_blocks_with_names, file_icon, reset_ctrlc_count,
     CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN,
 };
 
@@ -68,7 +68,11 @@ fn initialize_session(client: &Provider, cfg: &mut AppConfig) -> Result<ChatSess
 
 /// Main interactive REPL loop: reads user input, dispatches slash commands,
 /// calls the LLM, and manages conversation history.
-pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> Result<()> {
+pub(crate) async fn run_chat(
+    client: &mut Provider,
+    cfg: &mut AppConfig,
+    verbose: bool,
+) -> Result<()> {
     reset_ctrlc_count();
     let mut session = initialize_session(client, cfg)?;
     let t = ui::theme::active();
@@ -755,7 +759,13 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
                 );
             } else {
                 let path = ui::theme::paint_bright(t, &f.path);
-                println!("{}   {} {} ({} bytes)", rail_chr(), icon, path, f.content.len());
+                println!(
+                    "{}   {} {} ({} bytes)",
+                    rail_chr(),
+                    icon,
+                    path,
+                    f.content.len()
+                );
             }
         }
         println!("{}", rail_chr());
@@ -784,7 +794,12 @@ fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
 }
 
 /// Prints provider, elapsed time, and tokens-per-second stats.
-fn display_performance_stats(client: &Provider, session: &ChatSession, elapsed: std::time::Duration, t: &crate::ui::theme::Theme) {
+fn display_performance_stats(
+    client: &Provider,
+    session: &ChatSession,
+    elapsed: std::time::Duration,
+    t: &crate::ui::theme::Theme,
+) {
     let tps = if elapsed.as_secs_f64() > 0.0 {
         session.last_tokens as f64 / elapsed.as_secs_f64()
     } else {

@@ -12,10 +12,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use tokio::time::{sleep, timeout, Duration};
 
+pub mod anthropic;
+pub mod gemini;
 pub mod ollama;
 pub mod openai;
-pub mod gemini;
-pub mod anthropic;
 
 #[cfg(test)]
 mod tests;
@@ -32,7 +32,10 @@ enum LlmErrorBody {
     #[default]
     Empty,
     String(String),
-    Object { message: Option<String>, r#type: Option<String> },
+    Object {
+        message: Option<String>,
+        r#type: Option<String>,
+    },
 }
 
 impl std::fmt::Display for LlmErrorBody {
@@ -298,16 +301,20 @@ impl Provider {
         Self::with_retry(|| async {
             match self.kind {
                 ProviderKind::Ollama => {
-                    self.complete_chat_stream_ollama(user_prompt, system_prompt, history).await
+                    self.complete_chat_stream_ollama(user_prompt, system_prompt, history)
+                        .await
                 }
                 ProviderKind::OpenAI => {
-                    self.complete_chat_stream_openai(user_prompt, system_prompt, history).await
+                    self.complete_chat_stream_openai(user_prompt, system_prompt, history)
+                        .await
                 }
                 ProviderKind::Gemini => {
-                    self.complete_chat_stream_gemini(user_prompt, system_prompt, history).await
+                    self.complete_chat_stream_gemini(user_prompt, system_prompt, history)
+                        .await
                 }
                 ProviderKind::Anthropic => {
-                    self.complete_chat_stream_anthropic(user_prompt, system_prompt, history).await
+                    self.complete_chat_stream_anthropic(user_prompt, system_prompt, history)
+                        .await
                 }
             }
         })
@@ -413,7 +420,9 @@ impl Provider {
                         }
 
                         if let Some(data) = trimmed.strip_prefix("data: ") {
-                            if let Ok(chunk) = serde_json::from_str::<anthropic::AnthropicStreamChunk>(data) {
+                            if let Ok(chunk) =
+                                serde_json::from_str::<anthropic::AnthropicStreamChunk>(data)
+                            {
                                 if chunk.chunk_type.as_deref() == Some("content_block_delta") {
                                     if let Some(text) = chunk.delta.and_then(|d| d.text) {
                                         full.push_str(&text);

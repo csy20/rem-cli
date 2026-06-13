@@ -48,7 +48,10 @@ impl super::Provider {
         Ok(())
     }
 
-    pub(super) async fn complete_json_ollama(&self, user_prompt: &str) -> Result<crate::ModelReply> {
+    pub(super) async fn complete_json_ollama(
+        &self,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
         let url = super::api_url(&self.base_url, "generate");
         let final_prompt = format!(
             "{}\n\nUser request:\n{}\n\nReturn JSON only.",

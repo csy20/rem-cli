@@ -81,7 +81,10 @@ impl super::Provider {
         Ok(())
     }
 
-    pub(super) async fn complete_json_anthropic(&self, user_prompt: &str) -> Result<crate::ModelReply> {
+    pub(super) async fn complete_json_anthropic(
+        &self,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
         let key = self.api_key.as_deref().unwrap_or("");
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/v1/messages", base);

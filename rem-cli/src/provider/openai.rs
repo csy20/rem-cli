@@ -53,8 +53,7 @@ impl super::Provider {
         if !self.api_key_str().is_empty() {
             req = req.header("Authorization", format!("Bearer {}", self.api_key_str()));
         }
-        let resp = req.send()
-            .await?;
+        let resp = req.send().await?;
         if !resp.status().is_success() {
             return Err(anyhow!("OpenAI API unreachable at {}", self.base_url));
         }
@@ -67,7 +66,10 @@ impl super::Provider {
         Ok(())
     }
 
-    pub(super) async fn complete_json_openai(&self, user_prompt: &str) -> Result<crate::ModelReply> {
+    pub(super) async fn complete_json_openai(
+        &self,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
         let url = self.base_url.trim_end_matches('/').to_string() + "/chat/completions";
         let resp = self
             .client

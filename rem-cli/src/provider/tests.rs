@@ -225,7 +225,10 @@ async fn test_ollama_chat_stream() {
         model_ctx: 4096,
     };
 
-    let result = provider.complete_chat_stream_ollama("hi", "", "").await.unwrap();
+    let result = provider
+        .complete_chat_stream_ollama("hi", "", "")
+        .await
+        .unwrap();
     assert_eq!(result, "Hello World");
 }
 
@@ -304,7 +307,10 @@ async fn test_openai_chat_stream() {
         model_ctx: 4096,
     };
 
-    let result = provider.complete_chat_stream_openai("hi", "", "").await.unwrap();
+    let result = provider
+        .complete_chat_stream_openai("hi", "", "")
+        .await
+        .unwrap();
     assert_eq!(result, "Hello World");
 }
 
@@ -382,7 +388,8 @@ async fn test_gemini_list_models() {
 #[tokio::test]
 async fn test_gemini_complete_json() {
     let mock_server = MockServer::start().await;
-    let response_str = r#"{"explanation":"test","code":"","files":[],"commands":[],"checks":[],"caution":""}"#;
+    let response_str =
+        r#"{"explanation":"test","code":"","files":[],"commands":[],"checks":[],"caution":""}"#;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "candidates": [{
@@ -428,7 +435,10 @@ async fn test_gemini_chat_stream() {
         model_ctx: 4096,
     };
 
-    let result = provider.complete_chat_stream_gemini("hi", "", "").await.unwrap();
+    let result = provider
+        .complete_chat_stream_gemini("hi", "", "")
+        .await
+        .unwrap();
     assert_eq!(result, "Hello World");
 }
 
@@ -479,7 +489,8 @@ async fn test_anthropic_list_models() {
 #[tokio::test]
 async fn test_anthropic_complete_json() {
     let mock_server = MockServer::start().await;
-    let response_str = r#"{"explanation":"test","code":"","files":[],"commands":[],"checks":[],"caution":""}"#;
+    let response_str =
+        r#"{"explanation":"test","code":"","files":[],"commands":[],"checks":[],"caution":""}"#;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "content": [{"text": response_str}]
@@ -521,7 +532,10 @@ async fn test_anthropic_chat_stream() {
         model_ctx: 4096,
     };
 
-    let result = provider.complete_chat_stream_anthropic("hi", "", "").await.unwrap();
+    let result = provider
+        .complete_chat_stream_anthropic("hi", "", "")
+        .await
+        .unwrap();
     assert_eq!(result, "Hello World");
 }
 

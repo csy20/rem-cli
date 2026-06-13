@@ -7,10 +7,10 @@ use crate::find::{find_matches, FindOptions};
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
 use crate::search::{perform_web_search, print_search_results};
+use crate::truncate_to_lines;
 use crate::ui;
-use crate::{truncate_to_lines};
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 /// Performs a web search (`/search` command).
 pub(crate) async fn handle_search(client: &Provider, session: &mut ChatSession, query: &str) {
