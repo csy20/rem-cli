@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
-use cli::{AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs};
+use cli::{
+    AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs,
+};
 use walkdir::WalkDir;
 
 mod agentic;
@@ -303,7 +305,10 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
             println!("{}", serde_json::to_string(&reply).unwrap_or_default());
         }
         "json-pretty" => {
-            println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply).unwrap_or_default()
+            );
         }
         _ => {
             if verbose {
@@ -540,7 +545,11 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
             ui::theme::paint(&t, "accent", "\u{258C}", true),
             ui::theme::paint_dim(&t, "DRY-RUN"),
             chunks.len(),
-            chunks.iter().map(|c| &c.path).collect::<std::collections::HashSet<_>>().len(),
+            chunks
+                .iter()
+                .map(|c| &c.path)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
         );
         return Ok(());
     }

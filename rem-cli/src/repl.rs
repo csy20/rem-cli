@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::chat::{
-    build_prompt, language_specific_guidance, print_welcome,
-    validate_chat_response, ChatSession, RunMode,
+    build_prompt, language_specific_guidance, print_welcome, validate_chat_response, ChatSession,
+    RunMode,
 };
 use crate::cli::AppConfig;
 use crate::commands::{
@@ -23,12 +23,12 @@ use crate::config::{build_provider, first_run_setup, load_system_prompt, save_co
 use crate::intent::{
     classify_intent, has_creation_intent, has_file_path, intent_instruction, TaskIntent,
 };
+use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
+use crate::token_count::estimate_tokens;
 use crate::ui;
 use crate::ui::output::SpinnerGuard;
-use crate::pager::maybe_page;
-use crate::token_count::estimate_tokens;
 use crate::{
     exit_requested, extract_code_blocks_with_names, file_icon, reset_ctrlc_count,
     CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN,
@@ -91,8 +91,12 @@ pub(crate) async fn run_chat(
                     if e.kind() == io::ErrorKind::Interrupted
                         || e.kind() == io::ErrorKind::UnexpectedEof
                     {
-                        let count = crate::CTRL_C_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                        if count >= 2 || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
+                        let count = crate::CTRL_C_COUNT
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                            + 1;
+                        if count >= 2
+                            || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst)
+                        {
                             println!(
                                 "  {} Ctrl+C pressed twice -- bye!",
                                 ui::theme::paint_dim(&t, "!")
@@ -102,7 +106,8 @@ pub(crate) async fn run_chat(
                             session.auto_save_session();
                             return Ok(());
                         }
-                        crate::provider::STREAM_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        crate::provider::STREAM_CANCELLED
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         println!(
                             "  {} press Ctrl+C again to exit",
                             ui::theme::paint_dim(&t, "!")
@@ -617,24 +622,43 @@ pub(crate) async fn run_chat(
         let mut last_code_ctx = String::new();
         if !session.last_code.is_empty() || !session.last_files.is_empty() {
             let mod_triggers = [
-                "add", "update", "change", "modify", "edit", "append", "improve", "enhance",
-                "refactor", "rewrite", "transform", "convert", "extend", "expand",
+                "add",
+                "update",
+                "change",
+                "modify",
+                "edit",
+                "append",
+                "improve",
+                "enhance",
+                "refactor",
+                "rewrite",
+                "transform",
+                "convert",
+                "extend",
+                "expand",
             ];
             let lower_in = trimmed.to_lowercase();
-            if mod_triggers.iter().any(|t| {
-                lower_in.starts_with(t) || lower_in.contains(&format!(" {} ", t))
-            }) || lower_in.contains("also") || lower_in.contains("and then") || lower_in.contains("more")
+            if mod_triggers
+                .iter()
+                .any(|t| lower_in.starts_with(t) || lower_in.contains(&format!(" {} ", t)))
+                || lower_in.contains("also")
+                || lower_in.contains("and then")
+                || lower_in.contains("more")
             {
                 if !session.last_code.is_empty() {
                     let truncated = crate::truncate_bytes(&session.last_code, 6000);
-                    last_code_ctx = format!("\n[Last generated code (for reference)]:\n```\n{}\n```\n", truncated);
+                    last_code_ctx = format!(
+                        "\n[Last generated code (for reference)]:\n```\n{}\n```\n",
+                        truncated
+                    );
                 }
                 if !session.last_files.is_empty() {
                     let mut files_ctx = String::from("\n[Last generated files]:\n");
                     for f in &session.last_files {
                         if !f.path.is_empty() {
                             let truncated = crate::truncate_bytes(&f.content, 3000);
-                            files_ctx.push_str(&format!("\n### {}\n```\n{}\n```\n", f.path, truncated));
+                            files_ctx
+                                .push_str(&format!("\n### {}\n```\n{}\n```\n", f.path, truncated));
                         }
                     }
                     last_code_ctx.push_str(&files_ctx);

@@ -221,7 +221,9 @@ impl super::Provider {
                                 {
                                     full.push_str(&text);
                                     if full.len() > MAX_GEMINI_BYTES {
-                                        return Err(anyhow!("response too large (>{MAX_GEMINI_BYTES} bytes)"));
+                                        return Err(anyhow!(
+                                            "response too large (>{MAX_GEMINI_BYTES} bytes)"
+                                        ));
                                     }
                                 }
                             }

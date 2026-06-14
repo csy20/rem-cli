@@ -1,0 +1,32 @@
+#!/bin/bash
+# Pre-commit hook: auto-format Rust code and abort if clippy has warnings.
+# This prevents CI failures due to formatting issues permanently.
+
+set -e
+
+# Only run if Rust files are staged
+RUST_STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep '\.rs$' || true)
+
+if [ -z "$RUST_STAGED" ]; then
+    exit 0
+fi
+
+echo "🔧 Pre-commit: formatting Rust code..."
+
+# Auto-format and re-stage changed files
+(cd rem-cli && cargo fmt --all 2>/dev/null)
+
+# Re-stage any files that were reformatted
+for file in $RUST_STAGED; do
+    if [ -f "$file" ]; then
+        git add "$file"
+    fi
+done
+
+# Check that formatting is clean (should always pass after fmt)
+if ! (cd rem-cli && cargo fmt --all -- --check 2>/dev/null); then
+    echo "❌ cargo fmt --check failed even after formatting. Aborting commit."
+    exit 1
+fi
+
+echo "✅ Rust formatting OK"

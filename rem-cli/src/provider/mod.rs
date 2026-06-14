@@ -375,7 +375,10 @@ impl Provider {
                         {
                             full.push_str(content);
                             if full.len() > Self::MAX_RESPONSE_BYTES {
-                                return Err(anyhow!("response too large ({} bytes)", Self::MAX_RESPONSE_BYTES));
+                                return Err(anyhow!(
+                                    "response too large ({} bytes)",
+                                    Self::MAX_RESPONSE_BYTES
+                                ));
                             }
                         }
                     }
@@ -427,7 +430,10 @@ impl Provider {
                                     if let Some(text) = chunk.delta.and_then(|d| d.text) {
                                         full.push_str(&text);
                                         if full.len() > Self::MAX_RESPONSE_BYTES {
-                                            return Err(anyhow!("response too large ({} bytes)", Self::MAX_RESPONSE_BYTES));
+                                            return Err(anyhow!(
+                                                "response too large ({} bytes)",
+                                                Self::MAX_RESPONSE_BYTES
+                                            ));
                                         }
                                     }
                                 }
