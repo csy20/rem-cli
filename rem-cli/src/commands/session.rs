@@ -6,8 +6,9 @@ use crate::chat::{detect_project_type, ChatSession};
 use crate::config::persist_workspace;
 use crate::memory::ProjectMemory;
 use crate::provider::Provider;
+use crate::token_count::{context_usage_percent, estimate_tokens_batch};
 use crate::ui;
-use crate::{file_icon, format_timestamp, human_size, FileEntry};
+use crate::{file_icon, human_size, FileEntry};
 use std::fs;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -222,8 +223,10 @@ pub(crate) fn handle_tokens(session: &ChatSession) {
     let history_tokens: usize = session
         .history
         .iter()
-        .map(|(u, a)| (u.len() + a.len()) / 4)
+        .map(|(u, a)| estimate_tokens_batch(&[u, a]))
         .sum();
+    let model_ctx = 4096;
+    let pct = context_usage_percent(history_tokens, model_ctx);
     let t = ui::theme::active();
 
     println!("{}", ui::theme::paint_rail_empty(&t));
@@ -273,12 +276,11 @@ pub(crate) fn handle_tokens(session: &ChatSession) {
             )
         );
 
-        let pct = (history_tokens as f64 / 4096.0 * 100.0).min(100.0);
         println!(
             "{}   {:<18} {}",
             ui::theme::paint(&t, "accent", "\u{258C}", true),
             ui::theme::paint_bright(&t, "context window:"),
-            ui::theme::paint_dim(&t, &format!("{:.0}% used (4096 limit)", pct))
+            ui::theme::paint_dim(&t, &format!("{:.0}% used ({} limit)", pct, model_ctx))
         );
     } else {
         println!(
@@ -476,27 +478,10 @@ pub(crate) fn handle_save_session(session: &ChatSession) {
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let rem_dir = dir.join(".rem");
-    let _ = fs::create_dir_all(&rem_dir);
-    let session_file = rem_dir.join("session.json");
-    let last_files_json: Vec<serde_json::Value> = session
-        .last_files
-        .iter()
-        .map(|f| serde_json::json!({"path": f.path, "content": f.content}))
-        .collect();
-    let data = serde_json::json!({
-        "history": session.history.iter().map(|(u, a)| serde_json::json!({"user": u, "assistant": a})).collect::<Vec<_>>(),
-        "mode": session.mode.label(),
-        "workspace": session.project_dir.as_ref().map(|d| d.display().to_string()),
-        "saved_at": format_timestamp(),
-        "last_code": session.last_code,
-        "last_files": last_files_json,
-        "last_files_written": session.last_files_written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-    });
-    match fs::write(
-        &session_file,
-        serde_json::to_string_pretty(&data).unwrap_or_default(),
-    ) {
+    let session_file = dir.join(".rem/session.json");
+    let _ = fs::create_dir_all(dir.join(".rem"));
+    let data = serde_json::to_string_pretty(&session.to_session_json()).unwrap_or_default();
+    match fs::write(&session_file, &data) {
         Ok(()) => println!(
             "{} session saved to {}",
             ui::theme::paint_success_label(&t, "\u{2713}"),

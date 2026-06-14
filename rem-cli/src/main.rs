@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
-use cli::{AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs};
+use cli::{AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs};
 use walkdir::WalkDir;
 
 mod agentic;
@@ -24,39 +24,45 @@ mod highlight;
 mod indexer;
 mod intent;
 mod memory;
+mod pager;
 mod parsing;
 mod provider;
 mod repl;
 mod search;
 mod templates;
+mod token_count;
 mod types;
 mod ui;
 
 use crate::chat::check_system_resources;
-use crate::config::{build_provider, load_config, load_system_prompt};
+use crate::config::{build_provider, load_config, load_system_prompt, validate_config};
 use crate::intent::{classify_intent, TaskIntent};
 use crate::types::*;
-use crate::ui::output::SpinnerGuard;
+use crate::ui::output::{print_banner, print_reply, SpinnerGuard};
 use indexer::{generate_codebase_index, load_codebase_index, write_codebase_index};
 
 use provider::Provider;
 
-static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
-static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
+pub(crate) static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
+pub(crate) static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
 
 /// Registers a global Ctrl+C handler that cancels streams on first press,
 /// and signals graceful exit on second press.
+/// Prints nothing — UI messages come from the REPL readline handler.
 fn setup_global_ctrlc_handler() {
     let _handle = tokio::spawn(async {
         loop {
-            let _ = tokio::signal::ctrl_c().await;
-            let count = CTRL_C_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
-            if count >= 2 {
-                SHOULD_EXIT.store(true, Ordering::SeqCst);
-                eprintln!("\n  \u{00d7} exiting (Ctrl+C pressed twice)");
-            } else {
-                provider::STREAM_CANCELLED.store(true, Ordering::SeqCst);
-                eprintln!("\n  \u{00d7} cancelling... (Ctrl+C again to exit)");
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => {
+                    let count = CTRL_C_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count >= 2 {
+                        SHOULD_EXIT.store(true, Ordering::SeqCst);
+                    }
+                    provider::STREAM_CANCELLED.store(true, Ordering::SeqCst);
+                }
+                Err(_) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
             }
         }
     });
@@ -166,11 +172,16 @@ async fn main() -> Result<()> {
         cfg.api_key = Some(k);
     }
 
+    validate_config(&cfg);
+
     if let Some(Commands::New(args)) = cli.command {
         return run_new(args, &cfg);
     }
     if let Some(Commands::Index(args)) = cli.command {
         return run_index(args, &cfg);
+    }
+    if let Some(Commands::Pull(args)) = cli.command {
+        return run_pull(args, &cfg);
     }
 
     let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
@@ -193,6 +204,7 @@ async fn main() -> Result<()> {
         Some(Commands::Explain(args)) => run_explain(&client, args).await,
         Some(Commands::Patch(args)) => run_patch(&client, &cfg, args).await,
         Some(Commands::New(_)) => unreachable!(),
+        Some(Commands::Pull(_)) => unreachable!(),
         None => {
             let is_pipe = !std::io::stdin().is_terminal();
             if is_pipe {
@@ -286,20 +298,57 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
     };
 
     let reply = result?;
-    if verbose {
-        eprintln!(
-            "{} raw explanation: {}",
-            ui::theme::paint_dim(&t, "verbose:"),
-            reply.explanation
-        );
-        eprintln!(
-            "{} raw files: {:?}",
-            ui::theme::paint_dim(&t, "verbose:"),
-            reply.files
-        );
+    match args.format.as_str() {
+        "json" => {
+            println!("{}", serde_json::to_string(&reply).unwrap_or_default());
+        }
+        "json-pretty" => {
+            println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
+        }
+        _ => {
+            if verbose {
+                eprintln!(
+                    "{} raw explanation: {}",
+                    ui::theme::paint_dim(&t, "verbose:"),
+                    reply.explanation
+                );
+                eprintln!(
+                    "{} raw files: {:?}",
+                    ui::theme::paint_dim(&t, "verbose:"),
+                    reply.files
+                );
+            }
+            print_reply(&reply, true);
+        }
     }
-    print_reply(&reply, true);
     Ok(())
+}
+
+fn run_pull(args: PullArgs, cfg: &AppConfig) -> Result<()> {
+    let model = args.model.unwrap_or_else(|| cfg.model.clone());
+    let t = ui::theme::active();
+    println!(
+        "{} pulling model '{}' via Ollama...",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        model
+    );
+    let status = std::process::Command::new("ollama")
+        .args(["pull", &model])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .context("failed to run ollama pull. Is Ollama installed?")?;
+    if status.success() {
+        println!(
+            "{} model '{}' pulled successfully",
+            ui::theme::paint_success_label(&t, "\u{2713}"),
+            model
+        );
+        Ok(())
+    } else {
+        Err(anyhow!("failed to pull model '{}'", model))
+    }
 }
 
 async fn run_explain(client: &Provider, args: ExplainArgs) -> Result<()> {
@@ -339,116 +388,6 @@ async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArgs) -> Resul
     );
     print_reply(&reply, true);
     Ok(())
-}
-
-// ── Output formatting ──────────────────────────────────────────────────────
-
-fn print_banner(client: &Provider) {
-    let t = ui::theme::active();
-    println!();
-    ui::theme::println(&ui::theme::paint_rail(&t, "accent", "text_muted", "REM"));
-    ui::theme::println(&format!(
-        "  {} {} {}  {}",
-        ui::theme::paint(&t, "accent_dim", "\u{258C}", true),
-        ui::theme::paint(&t, "text_faint", "provider", false),
-        ui::theme::paint(&t, "accent", &client.provider_label(), false),
-        ui::theme::paint(&t, "text_faint", "\u{00B7} type /help for commands", false)
-    ));
-}
-
-fn print_reply(reply: &ModelReply, newline: bool) {
-    let t = ui::theme::active();
-    if newline {
-        println!();
-    }
-    if !reply.explanation.trim().is_empty() {
-        ui::theme::println(&format!(
-            "  {} {}",
-            ui::theme::paint(&t, "accent", "\u{258C}", true),
-            reply.explanation
-        ));
-    }
-
-    if !reply.files.is_empty() {
-        ui::theme::println(&format!(
-            "  {}",
-            ui::theme::paint_success(&t, &format!("generated: {} file(s)", reply.files.len()))
-        ));
-        for f in &reply.files {
-            let icon = file_icon(&f.path);
-            if f.path.is_empty() {
-                ui::theme::println(&format!(
-                    "    {}  {}",
-                    icon,
-                    ui::theme::paint(
-                        &t,
-                        "accent_dim",
-                        &format!("(unnamed) {} bytes", f.content.len()),
-                        false
-                    )
-                ));
-            } else {
-                ui::theme::println(&format!(
-                    "    {}  {}",
-                    icon,
-                    ui::theme::paint(&t, "accent", &f.path, false)
-                ));
-            }
-        }
-        ui::theme::println(&format!(
-            "    {}",
-            ui::theme::paint(&t, "text_faint", "/write <path> to save", false)
-        ));
-    } else if !reply.code.trim().is_empty() {
-        ui::theme::println(&format!("  {}", ui::theme::paint_success(&t, "code:")));
-        for code_line in reply.code.lines() {
-            ui::theme::println(&format!(
-                "    {}",
-                ui::theme::paint(&t, "accent_dim", code_line, false)
-            ));
-        }
-        ui::theme::println(&format!(
-            "    {}",
-            ui::theme::paint(&t, "text_faint", "/write <path> to save", false)
-        ));
-    }
-    if !reply.commands.is_empty() {
-        ui::theme::println(&format!(
-            "  {}",
-            ui::theme::paint(&t, "accent", "commands:", true)
-        ));
-        for cmd in sanitize_commands(&reply.commands) {
-            if is_command_blocked(cmd) {
-                ui::theme::println(&format!(
-                    "    {}",
-                    ui::theme::paint_error(&t, &format!("[blocked] {}", cmd))
-                ));
-            } else {
-                ui::theme::println(&format!(
-                    "    $ {}",
-                    ui::theme::paint(&t, "accent_dim", cmd, false)
-                ));
-            }
-        }
-    }
-    if !reply.checks.is_empty() {
-        ui::theme::println(&format!(
-            "  {}",
-            ui::theme::paint(&t, "accent", "checks:", true)
-        ));
-        for item in &reply.checks {
-            ui::theme::println(&format!(
-                "    {}",
-                ui::theme::paint(&t, "text_muted", &format!("\u{2022} {}", item), false)
-            ));
-        }
-    }
-    if !reply.caution.trim().is_empty() {
-        ui::theme::println(&format!(
-            "  {}",
-            ui::theme::paint_error(&t, &format!("caution: {}", reply.caution))
-        ));
-    }
 }
 
 // ── Context builder ────────────────────────────────────────────────────────
@@ -590,6 +529,18 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
             "{} {} no indexable files found (after skips)",
             ui::theme::paint(&t, "accent", "\u{258C}", true),
             ui::theme::paint_warning(&t, "⚠")
+        );
+        return Ok(());
+    }
+
+    if args.dry_run {
+        println!(
+            "{} {} {} dry-run: would index {} chunk(s) across {} file(s)",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "DRY-RUN"),
+            chunks.len(),
+            chunks.iter().map(|c| &c.path).collect::<std::collections::HashSet<_>>().len(),
         );
         return Ok(());
     }

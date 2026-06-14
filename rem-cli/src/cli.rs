@@ -2,6 +2,7 @@
 //! Uses clap to define the command-line interface, subcommands,
 //! and serializable config structs ([`AppConfig`], [`PartialConfig`]).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -50,6 +51,8 @@ pub enum Commands {
         about = "Generate or refresh the codebase index (for retrieval in large projects). Pure Rust; writes .rem/codebase_index.json so chat/goal can inject only relevant chunks instead of full file listings."
     )]
     Index(IndexArgs),
+    #[command(about = "Pull a model via Ollama (e.g. `rem pull qwen2.5-coder:1.5b`)")]
+    Pull(PullArgs),
 }
 
 /// Arguments for `rem ask`.
@@ -59,6 +62,12 @@ pub struct AskArgs {
     pub prompt: String,
     #[arg(long, help = "Optional file for context")]
     pub file: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value = "text",
+        help = "Output format: text, json, json-pretty"
+    )]
+    pub format: String,
 }
 
 /// Arguments for `rem explain`.
@@ -95,6 +104,26 @@ pub struct NewArgs {
 pub struct IndexArgs {
     #[arg(help = "Project directory to index (defaults to current workspace or .)")]
     pub dir: Option<PathBuf>,
+    #[arg(long, help = "Preview what would be indexed without writing any files")]
+    pub dry_run: bool,
+}
+
+/// Arguments for `rem pull`.
+#[derive(Args, Debug)]
+pub struct PullArgs {
+    #[arg(help = "Model name to pull (e.g. qwen2.5-coder:1.5b)")]
+    pub model: Option<String>,
+}
+
+/// Per-provider configuration overrides.
+/// Values here override the top-level `AppConfig` fields when the matching provider is active.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProviderSettings {
+    pub model: Option<String>,
+    pub api_url: Option<String>,
+    pub api_key: Option<String>,
+    pub timeout_s: Option<u64>,
+    pub model_ctx: Option<usize>,
 }
 
 /// Global and local merged configuration.
@@ -118,6 +147,9 @@ pub struct AppConfig {
     pub theme: String,
     #[serde(default = "default_mode_name")]
     pub mode: String,
+    /// Per-provider overrides keyed by provider name (e.g. "ollama", "openai").
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderSettings>,
 }
 
 fn default_theme_name() -> String {
@@ -145,6 +177,7 @@ impl Default for AppConfig {
             api_key: None,
             theme: default_theme_name(),
             mode: default_mode_name(),
+            providers: HashMap::new(),
         }
     }
 }
@@ -164,6 +197,8 @@ pub struct PartialConfig {
     pub api_key: Option<String>,
     pub theme: Option<String>,
     pub mode: Option<String>,
+    #[serde(default)]
+    pub providers: Option<HashMap<String, ProviderSettings>>,
 }
 
 impl AppConfig {
@@ -204,6 +239,9 @@ impl AppConfig {
         }
         if let Some(v) = part.mode {
             self.mode = v;
+        }
+        if let Some(v) = part.providers {
+            self.providers = v;
         }
     }
 }

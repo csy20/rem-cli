@@ -29,6 +29,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -186,11 +187,18 @@ pub fn build_retrieved_context(chunks: &[&IndexChunk], max_chars: usize) -> Stri
 
 /// Walk + chunk a project into IndexChunk entries (matches the shape expected by
 /// load_codebase_index / retrieve_relevant_chunks / build_retrieved_context).
+struct FileEntryToProcess {
+    rel_str: String,
+    name: String,
+    content: String,
+    line_count: usize,
+}
+
 pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
-    let mut chunks: Vec<IndexChunk> = Vec::new();
     let max_file_bytes: u64 = 120 * 1024;
     let target_chunk = 2800usize;
 
+    let mut file_entries: Vec<FileEntryToProcess> = Vec::new();
     for entry in WalkDir::new(root)
         .max_depth(8)
         .follow_links(false)
@@ -226,7 +234,6 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
             continue;
         }
 
-        // Extra guard for obvious backup/generated files
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if name.ends_with(".rs.bk") || name.contains(".lock") || name.ends_with(".bin") {
             continue;
@@ -242,55 +249,61 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
 
         let text = match fs::read_to_string(p) {
             Ok(t) if !t.trim().is_empty() => t,
-            _ => continue, // non-utf8 or empty → skip
+            _ => continue,
         };
 
         let line_count = text.lines().count().max(1);
-
-        let ctype = guess_chunk_type(&rel_str, &text);
-
-        if text.len() <= target_chunk + 400 {
-            chunks.push(IndexChunk {
-                path: rel_str.clone(),
-                name: p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| rel_str.clone()),
-                chunk_type: ctype.to_string(),
-                content: text,
-                start_line: 1,
-                end_line: line_count,
-                embedding: None,
-            });
-        } else {
-            let parts = split_content_into_chunks(&text, target_chunk);
-            for (i, (start_l, end_l, piece)) in parts.into_iter().enumerate() {
-                if piece.trim().is_empty() {
-                    continue;
-                }
-                let piece_ctype = if i == 0 {
-                    ctype
-                } else {
-                    // For interior sections, try to detect a strong symbol at the start of this piece
-                    guess_chunk_type(&rel_str, &piece)
-                };
-                chunks.push(IndexChunk {
-                    path: rel_str.clone(),
-                    name: p
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| rel_str.clone()),
-                    chunk_type: piece_ctype.to_string(),
-                    content: piece,
-                    start_line: start_l,
-                    end_line: end_l,
-                    embedding: None,
-                });
-            }
-        }
+        file_entries.push(FileEntryToProcess {
+            rel_str,
+            name: name.to_string(),
+            content: text,
+            line_count,
+        });
     }
 
-    chunks.sort_by(|a, b| a.path.cmp(&b.path).then(a.start_line.cmp(&b.start_line)));
+    let mut chunks: Vec<IndexChunk> = file_entries
+        .par_iter()
+        .flat_map(|fe| {
+            let mut local_chunks = Vec::new();
+            let ctype = guess_chunk_type(&fe.rel_str, &fe.content);
+
+            if fe.content.len() <= target_chunk + 400 {
+                local_chunks.push(IndexChunk {
+                    path: fe.rel_str.clone(),
+                    name: fe.name.clone(),
+                    chunk_type: ctype.to_string(),
+                    content: fe.content.clone(),
+                    start_line: 1,
+                    end_line: fe.line_count,
+                    embedding: None,
+                });
+            } else {
+                let parts = split_content_into_chunks(&fe.content, target_chunk);
+                for (i, (start_l, end_l, piece)) in parts.into_iter().enumerate() {
+                    if piece.trim().is_empty() {
+                        continue;
+                    }
+                    let piece_ctype = if i == 0 {
+                        ctype
+                    } else {
+                        guess_chunk_type(&fe.rel_str, &piece)
+                    };
+                    local_chunks.push(IndexChunk {
+                        path: fe.rel_str.clone(),
+                        name: fe.name.clone(),
+                        chunk_type: piece_ctype.to_string(),
+                        content: piece,
+                        start_line: start_l,
+                        end_line: end_l,
+                        embedding: None,
+                    });
+                }
+            }
+            local_chunks
+        })
+        .collect();
+
+    chunks.par_sort_by(|a, b| a.path.cmp(&b.path).then(a.start_line.cmp(&b.start_line)));
     Ok(chunks)
 }
 
@@ -440,4 +453,169 @@ pub fn write_codebase_index(root: &Path, chunks: &[IndexChunk]) -> Result<()> {
     let text = serde_json::to_string_pretty(&payload).context("failed to serialize index")?;
     fs::write(&out_path, text).context("failed to write codebase_index.json")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_chunks() -> Vec<IndexChunk> {
+        vec![
+            IndexChunk {
+                path: "src/main.rs".into(),
+                name: "main.rs".into(),
+                chunk_type: "function".into(),
+                content: "fn main() {\n    println!(\"hello\");\n}".into(),
+                start_line: 1,
+                end_line: 3,
+                embedding: None,
+            },
+            IndexChunk {
+                path: "src/auth.rs".into(),
+                name: "auth.rs".into(),
+                chunk_type: "file".into(),
+                content: "pub fn login() {}\npub fn logout() {}".into(),
+                start_line: 1,
+                end_line: 2,
+                embedding: None,
+            },
+            IndexChunk {
+                path: "README.md".into(),
+                name: "README.md".into(),
+                chunk_type: "docs".into(),
+                content: "# Project\nThis is a project about authentication.".into(),
+                start_line: 1,
+                end_line: 2,
+                embedding: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn retrieve_relevant_empty_index() {
+        let result = retrieve_relevant_chunks(&[], "login", 5, 10000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn retrieve_relevant_empty_query() {
+        let chunks = sample_chunks();
+        let result = retrieve_relevant_chunks(&chunks, "", 5, 10000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn retrieve_relevant_matches_content() {
+        let chunks = sample_chunks();
+        let result = retrieve_relevant_chunks(&chunks, "login", 5, 10000);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn retrieve_relevant_respects_top_k() {
+        let chunks = sample_chunks();
+        let result = retrieve_relevant_chunks(&chunks, "login auth", 1, 10000);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn retrieve_relevant_respects_max_chars() {
+        let chunks = sample_chunks();
+        let result = retrieve_relevant_chunks(&chunks, "main auth login", 5, 10);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_retrieved_empty_chunks() {
+        let result = build_retrieved_context(&[], 1000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_retrieved_formats_chunks() {
+        let chunks = sample_chunks();
+        let refs: Vec<&IndexChunk> = chunks.iter().collect();
+        let result = build_retrieved_context(&refs, 10000);
+        assert!(result.contains("src/main.rs"));
+        assert!(result.contains("fn main()"));
+        assert!(result.contains("Relevant code chunks"));
+        assert!(result.contains("End of retrieved context"));
+    }
+
+    #[test]
+    fn build_retrieved_respects_max_chars() {
+        let chunks = sample_chunks();
+        let refs: Vec<&IndexChunk> = chunks.iter().collect();
+        let result = build_retrieved_context(&refs, 50);
+        assert!(result.len() <= 50 || result.contains("[End of retrieved context"));
+    }
+
+    #[test]
+    fn guess_chunk_type_rust_function() {
+        assert_eq!(guess_chunk_type("lib.rs", "pub fn foo() {}"), "function");
+    }
+
+    #[test]
+    fn guess_chunk_type_rust_type() {
+        assert_eq!(guess_chunk_type("lib.rs", "struct Foo { x: i32 }"), "type");
+    }
+
+    #[test]
+    fn guess_chunk_type_python_class() {
+        assert_eq!(guess_chunk_type("app.py", "class MyClass:"), "class");
+    }
+
+    #[test]
+    fn guess_chunk_type_python_function() {
+        assert_eq!(guess_chunk_type("app.py", "def my_func():"), "function");
+    }
+
+    #[test]
+    fn guess_chunk_type_js_function() {
+        assert_eq!(guess_chunk_type("app.js", "function foo() {}"), "function");
+    }
+
+    #[test]
+    fn guess_chunk_type_js_class() {
+        assert_eq!(guess_chunk_type("app.jsx", "class Foo {}"), "class");
+    }
+
+    #[test]
+    fn guess_chunk_type_html() {
+        assert_eq!(guess_chunk_type("index.html", "<html></html>"), "html");
+    }
+
+    #[test]
+    fn guess_chunk_type_config() {
+        assert_eq!(guess_chunk_type("Cargo.toml", "[package]"), "config");
+    }
+
+    #[test]
+    fn guess_chunk_type_fallback() {
+        assert_eq!(guess_chunk_type("data.csv", "a,b,c"), "file");
+    }
+
+    #[test]
+    fn split_content_small_stays_as_one() {
+        let result = split_content_into_chunks("hello\nworld\n", 2800);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].2, "hello\nworld\n");
+    }
+
+    #[test]
+    fn split_content_splits_large() {
+        let text = (0..100)
+            .map(|i| format!("line_{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = split_content_into_chunks(&text, 50);
+        assert!(result.len() > 1, "should produce multiple chunks");
+    }
+
+    #[test]
+    fn split_content_line_tracking() {
+        let text = "a\nb\nc\nd\ne\n";
+        let result = split_content_into_chunks(text, 4);
+        assert!(result.len() >= 2);
+    }
 }

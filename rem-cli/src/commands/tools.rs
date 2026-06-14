@@ -343,3 +343,51 @@ fn trim_for_display(s: &str, max: usize) -> String {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_for_display_short_string() {
+        assert_eq!(trim_for_display("hello", 10), "hello");
+    }
+
+    #[test]
+    fn trim_for_display_exact_fit() {
+        assert_eq!(trim_for_display("hello", 5), "hello");
+    }
+
+    #[test]
+    fn trim_for_display_truncates_with_ellipsis() {
+        let result = trim_for_display("hello world", 5);
+        assert_eq!(result.chars().count(), 5);
+        assert!(result.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn trim_for_display_empty_string() {
+        assert_eq!(trim_for_display("", 5), "");
+    }
+
+    #[test]
+    fn trim_for_display_max_zero() {
+        let result = trim_for_display("hello", 0);
+        assert_eq!(result, "\u{2026}");
+    }
+
+    #[test]
+    fn trim_for_display_unicode_preserved() {
+        let input = "héllo wörld";
+        let result = trim_for_display(input, 20);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn trim_for_display_unicode_truncated() {
+        let input = "héllo wörld 👍";
+        let result = trim_for_display(input, 6);
+        assert_eq!(result.chars().count(), 6);
+        assert!(result.ends_with('\u{2026}'));
+    }
+}

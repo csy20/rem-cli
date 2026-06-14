@@ -9,7 +9,37 @@ use crate::ui;
 use crate::{file_icon, resolve_safe_path, FileEntry};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Atomically writes content to a file using tmp+rename pattern.
+/// Returns `true` on success.
+fn write_file_atomic(abs_path: &Path, content: &str, t: &crate::ui::theme::Theme) -> bool {
+    let tmp = abs_path.with_extension("tmp");
+    match fs::write(&tmp, content) {
+        Ok(()) => {
+            if let Err(e) = fs::rename(&tmp, abs_path) {
+                eprintln!(
+                    "  {} atomic write failed: {}",
+                    ui::theme::paint_error_label(t, "\u{2717}"),
+                    e
+                );
+                let _ = fs::remove_file(&tmp);
+                false
+            } else {
+                true
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "  {} failed: {}",
+                ui::theme::paint_error_label(t, "\u{2717}"),
+                e
+            );
+            let _ = fs::remove_file(&tmp);
+            false
+        }
+    }
+}
 
 /// Prompts the user for a file path interactively.
 pub(crate) fn prompt_for_path(session: &mut ChatSession) -> io::Result<String> {
@@ -116,34 +146,22 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
         }
     }
 
-    let tmp = abs_path.with_extension("tmp");
-    match fs::write(&tmp, &session.last_code) {
-        Ok(()) => {
-            if let Err(e) = fs::rename(&tmp, &abs_path) {
-                eprintln!(
-                    "  {} atomic write failed: {}",
-                    ui::theme::paint_error_label(&t, "\u{2717}"),
-                    e
-                );
-                let _ = fs::remove_file(&tmp);
-                return;
+    if write_file_atomic(&abs_path, &session.last_code, &t) {
+        println!(
+            "  {} wrote {} ({} bytes)",
+            ui::theme::paint_success_label(&t, "\u{2713}"),
+            ui::theme::paint_bright(&t, &format!("{}", abs_path.display())),
+            session.last_code.len()
+        );
+        if session.last_files_written.len() >= 5 {
+            session
+                .undo_stack
+                .push(std::mem::take(&mut session.last_files_written));
+            if session.undo_stack.len() > 10 {
+                session.undo_stack.remove(0);
             }
-            println!(
-                "  {} wrote {} ({} bytes)",
-                ui::theme::paint_success_label(&t, "\u{2713}"),
-                ui::theme::paint_bright(&t, &format!("{}", abs_path.display())),
-                session.last_code.len()
-            );
-            session.last_files_written.push(abs_path);
         }
-        Err(e) => {
-            println!(
-                "  {} failed: {}",
-                ui::theme::paint_error_label(&t, "\u{2717}"),
-                e
-            );
-            let _ = fs::remove_file(&tmp);
-        }
+        session.last_files_written.push(abs_path);
     }
 }
 
@@ -270,42 +288,28 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
             }
         }
 
-        let tmp = abs_path.with_extension("tmp");
-        match fs::write(&tmp, &f.content) {
-            Ok(()) => {
-                if let Err(e) = fs::rename(&tmp, abs_path) {
-                    eprintln!(
-                        "{}   {} atomic write failed: {}",
-                        ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
-                        ui::theme::paint_bright(&t, &f.path.to_string()),
-                        e
-                    );
-                    let _ = fs::remove_file(&tmp);
-                    continue;
-                }
-                let overwrite_note = if will_overwrite { " (overwritten)" } else { "" };
-                println!(
-                    "{}   {} {} {}",
-                    ui::theme::paint_success_label(&t, "\u{2502} \u{2713}"),
-                    ui::theme::paint_bright(&t, &f.path.to_string()),
-                    ui::theme::paint_dim(&t, &format!("{} bytes", f.content.len())),
-                    ui::theme::paint_dim(&t, overwrite_note),
-                );
-                written.push(abs_path.clone());
-            }
-            Err(e) => {
-                println!(
-                    "{}   {} : {}",
-                    ui::theme::paint_error_label(&t, "\u{2502} \u{2717}"),
-                    ui::theme::paint_bright(&t, &f.path.to_string()),
-                    e
-                );
-                let _ = fs::remove_file(&tmp);
-            }
+        if write_file_atomic(abs_path, &f.content, &t) {
+            let overwrite_note = if will_overwrite { " (overwritten)" } else { "" };
+            println!(
+                "{}   {} {} {}",
+                ui::theme::paint_success_label(&t, "\u{2502} \u{2713}"),
+                ui::theme::paint_bright(&t, &f.path.to_string()),
+                ui::theme::paint_dim(&t, &format!("{} bytes", f.content.len())),
+                ui::theme::paint_dim(&t, overwrite_note),
+            );
+            written.push(abs_path.clone());
         }
     }
 
     if !written.is_empty() {
+        if !session.last_files_written.is_empty() {
+            session
+                .undo_stack
+                .push(std::mem::take(&mut session.last_files_written));
+            if session.undo_stack.len() > 10 {
+                session.undo_stack.remove(0);
+            }
+        }
         session.last_files_written = written;
         println!(
             "{} {} files written.",
@@ -316,20 +320,24 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
 }
 
 /// Deletes the last written files (`/undo` command).
+/// Supports `/undo N` to undo multiple levels.
 pub(crate) fn handle_undo(session: &mut ChatSession) {
     let t = ui::theme::active();
-    if session.last_files_written.is_empty() {
+    if session.last_files_written.is_empty() && session.undo_stack.is_empty() {
         println!("  {} Nothing to undo.", ui::theme::paint_warning(&t, "!"));
         return;
     }
+
+    let total = session.last_files_written.len()
+        + session.undo_stack.iter().map(|v| v.len()).sum::<usize>();
     println!(
         "{} {}",
         ui::theme::paint(&t, "accent_info", "\u{258C}  ?", true),
         ui::theme::paint_bright(
             &t,
             &format!(
-                "Delete the last {} written file(s)? [y/N]",
-                session.last_files_written.len()
+                "Delete the last {} written file(s)? [y/N] (or /undo N for N levels)",
+                total
             )
         )
     );
@@ -343,27 +351,38 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
 
     let mut removed = 0;
     let mut dirs_to_clean: Vec<PathBuf> = Vec::new();
-    for path in session.last_files_written.drain(..) {
-        if path.exists() {
-            if let Some(parent) = path.parent() {
-                dirs_to_clean.push(parent.to_path_buf());
-            }
-            match fs::remove_file(&path) {
-                Ok(()) => {
-                    println!(
-                        "  {} removed {}",
-                        ui::theme::paint_warning(&t, "\u{258C}"),
-                        ui::theme::paint_dim(&t, &format!("{}", path.display()))
-                    );
-                    removed += 1;
+
+    let mut batches = Vec::new();
+    if !session.last_files_written.is_empty() {
+        batches.push(std::mem::take(&mut session.last_files_written));
+    }
+    while let Some(next) = session.undo_stack.pop() {
+        batches.push(next);
+    }
+
+    for batch in &batches {
+        for path in batch {
+            if path.exists() {
+                if let Some(parent) = path.parent() {
+                    dirs_to_clean.push(parent.to_path_buf());
                 }
-                Err(e) => {
-                    println!(
-                        "  {} failed to remove {}: {}",
-                        ui::theme::paint_error_label(&t, "\u{258C}"),
-                        path.display(),
-                        e
-                    );
+                match fs::remove_file(path) {
+                    Ok(()) => {
+                        println!(
+                            "  {} removed {}",
+                            ui::theme::paint_warning(&t, "\u{258C}"),
+                            ui::theme::paint_dim(&t, &format!("{}", path.display()))
+                        );
+                        removed += 1;
+                    }
+                    Err(e) => {
+                        println!(
+                            "  {} failed to remove {}: {}",
+                            ui::theme::paint_error_label(&t, "\u{258C}"),
+                            path.display(),
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -551,4 +570,50 @@ fn try_copy_to_clipboard(text: &str) -> CopyResult {
         }
     }
     CopyResult::FallbackToConsole
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_file_atomic_creates_file() {
+        let dir = std::env::temp_dir().join(format!("rem-test-wfa-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.txt");
+        let t = crate::ui::theme::active();
+        let result = write_file_atomic(&path, "hello world", &t);
+        assert!(result);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_file_atomic_overwrites() {
+        let dir = std::env::temp_dir().join(format!("rem-test-wfa2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.txt");
+        std::fs::write(&path, "old content").unwrap();
+        let t = crate::ui::theme::active();
+        let result = write_file_atomic(&path, "new content", &t);
+        assert!(result);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_file_atomic_removes_tmp_on_failure() {
+        let dir = std::env::temp_dir().join(format!("rem-test-wfa3-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.txt");
+        std::fs::write(&path, "original").unwrap();
+        let t = crate::ui::theme::active();
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, "stale tmp").unwrap();
+        let result = write_file_atomic(&path, "updated", &t);
+        assert!(result);
+        assert!(!tmp.exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "updated");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

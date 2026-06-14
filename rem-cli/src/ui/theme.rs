@@ -4,11 +4,96 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::sync::RwLock;
 
 const DEFAULT_THEME_NAME: &str = "GHOST";
+
+/// Custom theme definition for loading from TOML files.
+#[derive(Debug, serde::Deserialize)]
+struct CustomThemeDef {
+    name: String,
+    bg: String,
+    surface: String,
+    border: String,
+    accent: String,
+    accent_dim: String,
+    accent_info: String,
+    text_muted: String,
+    text_faint: String,
+    pill_bg: String,
+    pill_border: String,
+    pill_text: String,
+    kbd_bg: String,
+    kbd_border: String,
+    kbd_text: String,
+    sys_color: String,
+    sel_bg: String,
+    sel_left: String,
+    cursor: String,
+    error: String,
+    success: String,
+    code_bg: String,
+}
+
+static CUSTOM_THEMES: LazyLock<Mutex<BTreeMap<String, Theme>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+
+/// Loads a custom theme from a TOML file.
+fn load_custom_theme(path: &PathBuf) -> Option<(String, Theme)> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let def: CustomThemeDef = toml::from_str(&text).ok()?;
+    let theme = Theme::build(
+        &def.name,
+        &def.bg,
+        &def.surface,
+        &def.border,
+        &def.accent,
+        &def.accent_dim,
+        &def.accent_info,
+        &def.text_muted,
+        &def.text_faint,
+        &def.pill_bg,
+        &def.pill_border,
+        &def.pill_text,
+        &def.kbd_bg,
+        &def.kbd_border,
+        &def.kbd_text,
+        &def.sys_color,
+        &def.sel_bg,
+        &def.sel_left,
+        &def.cursor,
+        &def.error,
+        &def.success,
+        &def.code_bg,
+    );
+    Some((def.name.to_uppercase(), theme))
+}
+
+/// Loads all custom themes from `~/.config/rem-cli/themes/`.
+fn load_custom_themes() {
+    let theme_dir = dirs::home_dir().map(|h| h.join(".config/rem-cli/themes"));
+    let Some(dir) = theme_dir else { return };
+    if !dir.exists() {
+        return;
+    }
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut custom = CUSTOM_THEMES.lock().unwrap_or_else(|e| e.into_inner());
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+            if let Some((name, theme)) = load_custom_theme(&path) {
+                custom.insert(name, theme);
+            }
+        }
+    }
+}
 
 static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
     let mut t = BTreeMap::new();
@@ -249,35 +334,58 @@ impl Theme {
 }
 
 /// Looks up a theme by name (case-insensitive), falling back to default.
+/// Checks built-in themes first, then custom themes from `~/.config/rem-cli/themes/`.
 pub fn by_name(name: &str) -> Theme {
     let upper = name.to_ascii_uppercase();
-    THEMES.get(upper.as_str()).cloned().unwrap_or_else(|| {
-        THEMES
-            .get(DEFAULT_THEME_NAME)
-            .cloned()
-            .expect("default theme missing")
-    })
+    if let Some(t) = THEMES.get(upper.as_str()) {
+        return t.clone();
+    }
+    load_custom_themes();
+    let custom = CUSTOM_THEMES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(t) = custom.get(&upper) {
+        return t.clone();
+    }
+    THEMES
+        .get(DEFAULT_THEME_NAME)
+        .cloned()
+        .expect("default theme missing")
 }
 
 /// Returns the currently active theme.
 pub fn active() -> Arc<Theme> {
-    ACTIVE_THEME.read().expect("theme lock").clone()
+    ACTIVE_THEME
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// Sets the active theme by name. Returns false if the name is unknown.
+/// Checks built-in themes first, then custom themes.
 pub fn set_active(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
-    if !THEMES.contains_key(upper.as_str()) {
-        return false;
+    if THEMES.contains_key(upper.as_str()) {
+        let theme = Arc::new(by_name(&upper));
+        *ACTIVE_THEME.write().unwrap_or_else(|e| e.into_inner()) = theme;
+        return true;
     }
-    let theme = Arc::new(by_name(&upper));
-    *ACTIVE_THEME.write().expect("theme lock") = theme;
-    true
+    load_custom_themes();
+    let custom = CUSTOM_THEMES.lock().unwrap_or_else(|e| e.into_inner());
+    if custom.contains_key(&upper) {
+        let theme = Arc::new(by_name(&upper));
+        *ACTIVE_THEME.write().unwrap_or_else(|e| e.into_inner()) = theme;
+        return true;
+    }
+    false
 }
 
-/// Returns a list of available theme names.
+/// Returns a list of available theme names (built-in + custom).
 pub fn list_names() -> Vec<String> {
-    THEMES.keys().map(|s| s.to_string()).collect()
+    let mut names: Vec<String> = THEMES.keys().map(|s| s.to_string()).collect();
+    load_custom_themes();
+    let custom = CUSTOM_THEMES.lock().unwrap_or_else(|e| e.into_inner());
+    names.extend(custom.keys().cloned());
+    names.sort();
+    names
 }
 
 /// Returns the theme accent field name for a given chat mode.

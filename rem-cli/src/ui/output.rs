@@ -1,6 +1,6 @@
 //! Spinner and output utilities.
 //! Provides [`SpinnerGuard`] for animated terminal spinners during
-//! long-running LLM requests.
+//! long-running LLM requests, and output formatting ([`print_reply`], [`print_banner`]).
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
+use crate::provider::Provider;
 use crate::ui::theme;
+use crate::{file_icon, is_command_blocked, sanitize_commands, ModelReply};
 
 /// An animated terminal spinner shown during long-running operations.
 pub struct SpinnerGuard {
@@ -57,5 +59,115 @@ impl SpinnerGuard {
 impl Drop for SpinnerGuard {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Prints the REM banner showing the provider and model name.
+pub fn print_banner(client: &Provider) {
+    let t = theme::active();
+    println!();
+    theme::println(&theme::paint_rail(&t, "accent", "text_muted", "REM"));
+    theme::println(&format!(
+        "  {} {} {}  {}",
+        theme::paint(&t, "accent_dim", "\u{258C}", true),
+        theme::paint(&t, "text_faint", "provider", false),
+        theme::paint(&t, "accent", &client.provider_label(), false),
+        theme::paint(&t, "text_faint", "\u{00B7} type /help for commands", false)
+    ));
+}
+
+/// Prints a structured [`ModelReply`] (explanation, files, code, commands, checks).
+pub fn print_reply(reply: &ModelReply, newline: bool) {
+    let t = theme::active();
+    if newline {
+        println!();
+    }
+    if !reply.explanation.trim().is_empty() {
+        theme::println(&format!(
+            "  {} {}",
+            theme::paint(&t, "accent", "\u{258C}", true),
+            reply.explanation
+        ));
+    }
+
+    if !reply.files.is_empty() {
+        theme::println(&format!(
+            "  {}",
+            theme::paint_success(&t, &format!("generated: {} file(s)", reply.files.len()))
+        ));
+        for f in &reply.files {
+            let icon = file_icon(&f.path);
+            if f.path.is_empty() {
+                theme::println(&format!(
+                    "    {}  {}",
+                    icon,
+                    theme::paint(
+                        &t,
+                        "accent_dim",
+                        &format!("(unnamed) {} bytes", f.content.len()),
+                        false
+                    )
+                ));
+            } else {
+                theme::println(&format!(
+                    "    {}  {}",
+                    icon,
+                    theme::paint(&t, "accent", &f.path, false)
+                ));
+            }
+        }
+        theme::println(&format!(
+            "    {}",
+            theme::paint(&t, "text_faint", "/write <path> to save", false)
+        ));
+    } else if !reply.code.trim().is_empty() {
+        theme::println(&format!("  {}", theme::paint_success(&t, "code:")));
+        for code_line in reply.code.lines() {
+            theme::println(&format!(
+                "    {}",
+                theme::paint(&t, "accent_dim", code_line, false)
+            ));
+        }
+        theme::println(&format!(
+            "    {}",
+            theme::paint(&t, "text_faint", "/write <path> to save", false)
+        ));
+    }
+    if !reply.commands.is_empty() {
+        theme::println(&format!(
+            "  {}",
+            theme::paint(&t, "accent", "commands:", true)
+        ));
+        for cmd in sanitize_commands(&reply.commands) {
+            if is_command_blocked(cmd) {
+                theme::println(&format!(
+                    "    {}",
+                    theme::paint_error(&t, &format!("[blocked] {}", cmd))
+                ));
+            } else {
+                theme::println(&format!(
+                    "    $ {}",
+                    theme::paint(&t, "accent_dim", cmd, false)
+                ));
+            }
+        }
+    }
+    if !reply.checks.is_empty() {
+        theme::println(&format!(
+            "  {}",
+            theme::paint(&t, "accent", "checks:", true)
+        ));
+        for item in &reply.checks {
+            theme::println(&format!(
+                "    {}",
+                theme::paint(&t, "text_muted", &format!("\u{2022} {}", item), false)
+            ));
+        }
+    }
+    if !reply.caution.trim().is_empty() {
+        theme::println(&format!(
+            "  {}",
+            theme::paint_error(&t, &format!("caution: {}", reply.caution))
+        ));
     }
 }

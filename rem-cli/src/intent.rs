@@ -294,12 +294,6 @@ fn is_question_about_lower(lower: &str, action_phrase: &str) -> bool {
     has_question_prefix_lower(lower)
 }
 
-#[allow(dead_code)]
-/// Checks if input is asking a question about a specific action phrase.
-pub(crate) fn is_question_about(input: &str, action_phrase: &str) -> bool {
-    is_question_about_lower(&input.to_lowercase(), action_phrase)
-}
-
 /// Detects whether input contains file path references (extensions, `/`, etc.).
 pub fn has_file_path(input: &str) -> bool {
     let lower = input.to_lowercase();

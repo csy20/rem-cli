@@ -57,11 +57,14 @@ impl super::Provider {
             "{}\n\nUser request:\n{}\n\nReturn JSON only.",
             self.system_prompt, user_prompt
         );
+        let num_thread = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let payload = json!({
             "model": self.model,
             "prompt": final_prompt,
             "stream": false,
-            "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": 4 },
+            "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": num_thread },
             "format": {
                 "type": "object",
                 "properties": {
@@ -134,11 +137,14 @@ impl super::Provider {
                 system_prompt, history, user_prompt
             )
         };
+        let num_thread = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let payload = json!({
             "model": self.model,
             "prompt": final_prompt,
             "stream": true,
-            "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": 4 }
+            "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": num_thread }
         });
         let resp = self
             .client

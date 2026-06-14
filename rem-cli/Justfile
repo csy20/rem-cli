@@ -1,0 +1,27 @@
+check:
+    cargo check --all-targets
+
+lint:
+    cargo clippy --all-targets
+
+fmt:
+    cargo fmt --check
+
+test:
+    cargo test
+
+test-all:
+    cargo test -- --include-ignored
+
+build:
+    cargo build
+
+build-release:
+    cargo build --release
+
+clean:
+    cargo clean
+
+all: check lint fmt test build-release
+
+.PHONY: check lint fmt test test-all build build-release clean all

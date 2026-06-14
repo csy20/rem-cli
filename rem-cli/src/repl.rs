@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::chat::{
-    build_prompt, detect_project_type, language_specific_guidance, print_welcome,
+    build_prompt, language_specific_guidance, print_welcome,
     validate_chat_response, ChatSession, RunMode,
 };
 use crate::cli::AppConfig;
@@ -27,6 +27,8 @@ use crate::parsing::extract_code_block;
 use crate::provider::Provider;
 use crate::ui;
 use crate::ui::output::SpinnerGuard;
+use crate::pager::maybe_page;
+use crate::token_count::estimate_tokens;
 use crate::{
     exit_requested, extract_code_blocks_with_names, file_icon, reset_ctrlc_count,
     CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN,
@@ -78,6 +80,7 @@ pub(crate) async fn run_chat(
     let t = ui::theme::active();
 
     loop {
+        crate::provider::STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
         let prompt = build_prompt(&session, client);
         let mut error_count = 0u8;
         let line = loop {
@@ -85,16 +88,32 @@ pub(crate) async fn run_chat(
             match line {
                 Ok(s) => break s,
                 Err(e) => {
+                    if e.kind() == io::ErrorKind::Interrupted
+                        || e.kind() == io::ErrorKind::UnexpectedEof
+                    {
+                        let count = crate::CTRL_C_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        if count >= 2 || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
+                            println!(
+                                "  {} Ctrl+C pressed twice -- bye!",
+                                ui::theme::paint_dim(&t, "!")
+                            );
+                            session.feedback.flush();
+                            session.save_history();
+                            session.auto_save_session();
+                            return Ok(());
+                        }
+                        crate::provider::STREAM_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+                        println!(
+                            "  {} press Ctrl+C again to exit",
+                            ui::theme::paint_dim(&t, "!")
+                        );
+                        continue;
+                    }
                     eprintln!(
                         "  {} input error: {}",
                         ui::theme::paint_error_label(&t, "err:"),
                         e
                     );
-                    if e.kind() == io::ErrorKind::Interrupted
-                        || e.kind() == io::ErrorKind::UnexpectedEof
-                    {
-                        return Ok(());
-                    }
                     error_count += 1;
                     if error_count >= 3 {
                         eprintln!(
@@ -107,13 +126,26 @@ pub(crate) async fn run_chat(
                 }
             }
         };
+        crate::CTRL_C_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        crate::SHOULD_EXIT.store(false, std::sync::atomic::Ordering::SeqCst);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
+        if trimmed == session.last_user_input && !trimmed.starts_with('/') {
+            println!(
+                "  {} duplicate input ignored (same as last message)",
+                ui::theme::paint_dim(&t, "!")
+            );
+            continue;
+        }
+
         if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
             println!("  {}", ui::theme::paint_dim(&t, "bye!"));
+            session.feedback.flush();
+            session.save_history();
+            session.auto_save_session();
             break;
         }
 
@@ -537,7 +569,12 @@ pub(crate) async fn run_chat(
             continue;
         }
 
-        let needs_path = (session.mode == RunMode::Code || has_creation_intent(trimmed))
+        let intent = classify_intent(trimmed);
+        session.last_intent = intent.clone();
+        session.last_user_input = trimmed.to_string();
+        let instruction = intent_instruction(&intent);
+
+        let needs_path = (session.mode == RunMode::Code || intent == TaskIntent::CodeAction)
             && !has_file_path(trimmed);
         let final_prompt = if needs_path {
             session.add_history(trimmed);
@@ -555,11 +592,6 @@ pub(crate) async fn run_chat(
                 format!("User request: {}", trimmed)
             }
         };
-
-        let intent = classify_intent(trimmed);
-        session.last_intent = intent.clone();
-        session.last_user_input = trimmed.to_string();
-        let instruction = intent_instruction(&intent);
 
         if session.mode == RunMode::Code {
             let rail = ui::theme::paint(&t, "accent", "\u{258C}", true);
@@ -582,6 +614,34 @@ pub(crate) async fn run_chat(
 
         let project_ctx = session.build_relevant_project_context(&resolved_input);
 
+        let mut last_code_ctx = String::new();
+        if !session.last_code.is_empty() || !session.last_files.is_empty() {
+            let mod_triggers = [
+                "add", "update", "change", "modify", "edit", "append", "improve", "enhance",
+                "refactor", "rewrite", "transform", "convert", "extend", "expand",
+            ];
+            let lower_in = trimmed.to_lowercase();
+            if mod_triggers.iter().any(|t| {
+                lower_in.starts_with(t) || lower_in.contains(&format!(" {} ", t))
+            }) || lower_in.contains("also") || lower_in.contains("and then") || lower_in.contains("more")
+            {
+                if !session.last_code.is_empty() {
+                    let truncated = crate::truncate_bytes(&session.last_code, 6000);
+                    last_code_ctx = format!("\n[Last generated code (for reference)]:\n```\n{}\n```\n", truncated);
+                }
+                if !session.last_files.is_empty() {
+                    let mut files_ctx = String::from("\n[Last generated files]:\n");
+                    for f in &session.last_files {
+                        if !f.path.is_empty() {
+                            let truncated = crate::truncate_bytes(&f.content, 3000);
+                            files_ctx.push_str(&format!("\n### {}\n```\n{}\n```\n", f.path, truncated));
+                        }
+                    }
+                    last_code_ctx.push_str(&files_ctx);
+                }
+            }
+        }
+
         let full_prompt = {
             let mut p = instruction.to_string();
             p.push('\n');
@@ -590,6 +650,9 @@ pub(crate) async fn run_chat(
             }
             if !project_ctx.is_empty() {
                 p.push_str(&project_ctx);
+            }
+            if !last_code_ctx.is_empty() {
+                p.push_str(&last_code_ctx);
             }
             if !at_context.is_empty() {
                 p.push_str(&at_context);
@@ -615,15 +678,13 @@ pub(crate) async fn run_chat(
             RunMode::Plan => CHAT_SYSTEM_PROMPT_PLAN,
         };
 
-        let lang_guidance = if let Some(ref dir) = session.project_dir {
-            let ptype = detect_project_type(dir);
+        let lang_guidance = {
+            let ptype = session.get_project_type();
             if !ptype.is_empty() {
                 language_specific_guidance(ptype)
             } else {
                 ""
             }
-        } else {
-            ""
         };
 
         let system_prompt = if !lang_guidance.is_empty() {
@@ -688,7 +749,7 @@ pub(crate) async fn run_chat(
                     text.trim().to_string()
                 };
 
-                session.last_tokens = (cleaned.len() / 4) as u32;
+                session.last_tokens = estimate_tokens(&cleaned) as u32;
 
                 let treat_as_code =
                     intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
@@ -711,6 +772,11 @@ pub(crate) async fn run_chat(
                     session.history.push((trimmed.to_string(), cleaned));
                     if session.history.len() > 12 {
                         session.history.remove(0);
+                    }
+                    session.messages_since_save += 1;
+                    if session.messages_since_save >= 5 {
+                        session.auto_save_session();
+                        session.messages_since_save = 0;
                     }
                 }
             }
@@ -785,9 +851,18 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
     }
 }
 
-/// Prints plain text output line by line.
+/// Prints plain text output line by line, using pager for long output.
 fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
     let rail_chr = || ui::theme::paint(t, "accent", "\u{258C}", true);
+    let line_count = cleaned.lines().count();
+    if line_count > 50 {
+        let mut buf = String::new();
+        for line in cleaned.lines() {
+            buf.push_str(&format!("{} {}\n", rail_chr(), line));
+        }
+        maybe_page(&buf);
+        return;
+    }
     for line in cleaned.lines() {
         println!("{} {}", rail_chr(), line);
     }

@@ -122,18 +122,29 @@ pub(crate) fn load_config() -> Result<AppConfig> {
 }
 
 /// Builds a [`Provider`] from config, resolving API keys and model defaults.
+/// Per-provider overrides from `config.providers` are merged on top of global values.
 pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<Provider> {
     let kind = ProviderKind::from_str(&cfg.provider);
+    let pcfg = cfg.providers.get(kind.as_str());
+
+    let timeout_s = pcfg.and_then(|p| p.timeout_s).unwrap_or(cfg.timeout_s);
+    let model = pcfg
+        .and_then(|p| p.model.clone())
+        .unwrap_or_else(|| cfg.model.clone());
+    let model_ctx = pcfg.and_then(|p| p.model_ctx).unwrap_or(cfg.model_ctx);
+
+    let api_url = pcfg
+        .and_then(|p| p.api_url.clone())
+        .or_else(|| cfg.api_url.clone());
+    let api_key = pcfg
+        .and_then(|p| p.api_key.clone())
+        .or_else(|| cfg.api_key.clone());
+
     match kind {
         ProviderKind::OpenAI => {
-            let base_url = cfg
-                .api_url
-                .clone()
-                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-            let key = cfg
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
+            let base_url = api_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let key =
+                api_key.unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
             if key.is_empty() {
                 eprintln!(
                     "\x1b[33mwarning\x1b[0m: provider 'openai' requires --api-key or OPENAI_API_KEY"
@@ -141,70 +152,63 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
             }
             Ok(Provider::new_openai(
                 base_url,
-                cfg.model.clone(),
-                cfg.timeout_s,
+                model,
+                timeout_s,
                 system_prompt,
                 key,
-                cfg.model_ctx,
+                model_ctx,
             ))
         }
         ProviderKind::Gemini => {
-            let key = cfg
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("GEMINI_API_KEY").unwrap_or_default());
+            let key =
+                api_key.unwrap_or_else(|| std::env::var("GEMINI_API_KEY").unwrap_or_default());
             if key.is_empty() {
                 eprintln!(
                     "\x1b[33mwarning\x1b[0m: provider 'gemini' requires --api-key or GEMINI_API_KEY"
                 );
             }
-            let model = if cfg.model == "rem-coder:latest" || cfg.model == "rem-coder" {
+            let model = if model == "rem-coder:latest" || model == "rem-coder" {
                 "gemini-2.0-flash".to_string()
             } else {
-                cfg.model.clone()
+                model
             };
             Ok(Provider::new_gemini(
                 key,
                 model,
-                cfg.timeout_s,
+                timeout_s,
                 system_prompt,
-                cfg.model_ctx,
+                model_ctx,
             ))
         }
         ProviderKind::Anthropic => {
-            let key = cfg
-                .api_key
-                .clone()
-                .unwrap_or_else(|| std::env::var("ANTHROPIC_API_KEY").unwrap_or_default());
+            let key =
+                api_key.unwrap_or_else(|| std::env::var("ANTHROPIC_API_KEY").unwrap_or_default());
             if key.is_empty() {
                 eprintln!(
                     "\x1b[33mwarning\x1b[0m: provider 'anthropic' requires --api-key or ANTHROPIC_API_KEY"
                 );
             }
-            let model = if cfg.model == "rem-coder:latest" || cfg.model == "rem-coder" {
+            let model = if model == "rem-coder:latest" || model == "rem-coder" {
                 "claude-sonnet-4-20250514".to_string()
             } else {
-                cfg.model.clone()
+                model
             };
             Ok(Provider::new_anthropic(
                 key,
                 model,
-                cfg.timeout_s,
+                timeout_s,
                 system_prompt,
-                cfg.model_ctx,
+                model_ctx,
             ))
         }
         _ => {
-            let base_url = cfg
-                .api_url
-                .clone()
-                .unwrap_or_else(|| cfg.ollama_url.clone());
+            let base_url = api_url.unwrap_or_else(|| cfg.ollama_url.clone());
             Ok(Provider::new_ollama(
                 base_url,
-                cfg.model.clone(),
-                cfg.timeout_s,
+                model,
+                timeout_s,
                 system_prompt,
-                cfg.model_ctx,
+                model_ctx,
             ))
         }
     }
@@ -228,6 +232,70 @@ pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
         }
     }
     crate::DEFAULT_SYSTEM_PROMPT.to_string()
+}
+
+/// Validates config at startup, printing warnings for common issues.
+/// Returns the (possibly adjusted) config.
+pub(crate) fn validate_config(cfg: &AppConfig) {
+    let known_providers = ["ollama", "openai", "vllm", "anthropic", "gemini"];
+    if !known_providers.contains(&cfg.provider.as_str()) {
+        eprintln!(
+            "\x1b[33mwarning\x1b[0m: unknown provider '{}'. Known: {}",
+            cfg.provider,
+            known_providers.join(", ")
+        );
+    }
+
+    if cfg.provider == "openai" || cfg.provider == "vllm" {
+        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
+            || std::env::var("OPENAI_API_KEY").is_ok_and(|k| !k.is_empty());
+        if !has_key {
+            eprintln!(
+                "\x1b[33mwarning\x1b[0m: provider '{}' may need --api-key or OPENAI_API_KEY",
+                cfg.provider
+            );
+        }
+    }
+    if cfg.provider == "anthropic" {
+        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
+            || std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty());
+        if !has_key {
+            eprintln!(
+                "\x1b[33mwarning\x1b[0m: provider 'anthropic' may need --api-key or ANTHROPIC_API_KEY"
+            );
+        }
+    }
+    if cfg.provider == "gemini" {
+        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
+            || std::env::var("GEMINI_API_KEY").is_ok_and(|k| !k.is_empty());
+        if !has_key {
+            eprintln!(
+                "\x1b[33mwarning\x1b[0m: provider 'gemini' may need --api-key or GEMINI_API_KEY"
+            );
+        }
+    }
+
+    let mode = cfg.mode.to_uppercase();
+    if !["CHAT", "CODE", "PLAN"].contains(&mode.as_str()) {
+        eprintln!(
+            "\x1b[33mwarning\x1b[0m: unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.",
+            cfg.mode
+        );
+    }
+
+    if cfg.timeout_s < 5 || cfg.timeout_s > 600 {
+        eprintln!(
+            "\x1b[33mwarning\x1b[0m: timeout_s={} seems unusual (expected 5-600)",
+            cfg.timeout_s
+        );
+    }
+
+    if cfg.model_ctx < 512 {
+        eprintln!(
+            "\x1b[33mwarning\x1b[0m: model_ctx={} is very low (< 512). Responses may be truncated.",
+            cfg.model_ctx
+        );
+    }
 }
 
 /// Persists the workspace directory to config.

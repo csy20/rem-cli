@@ -117,6 +117,14 @@ pub struct Provider {
 }
 
 impl Provider {
+    /// Builds a reqwest client with the given timeout.
+    fn build_client(timeout_s: u64) -> Client {
+        Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_s))
+            .build()
+            .unwrap_or_else(|_| Client::new())
+    }
+
     /// Creates a new Ollama provider instance.
     pub fn new_ollama(
         base_url: String,
@@ -127,10 +135,7 @@ impl Provider {
     ) -> Self {
         Self {
             kind: ProviderKind::Ollama,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_s))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: Self::build_client(timeout_s),
             base_url,
             model,
             system_prompt,
@@ -150,10 +155,7 @@ impl Provider {
     ) -> Self {
         Self {
             kind: ProviderKind::OpenAI,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_s))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: Self::build_client(timeout_s),
             base_url,
             model,
             system_prompt,
@@ -172,10 +174,7 @@ impl Provider {
     ) -> Self {
         Self {
             kind: ProviderKind::Gemini,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_s))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: Self::build_client(timeout_s),
             base_url: "https://generativelanguage.googleapis.com".to_string(),
             model,
             system_prompt,
@@ -194,10 +193,7 @@ impl Provider {
     ) -> Self {
         Self {
             kind: ProviderKind::Anthropic,
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_s))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: Self::build_client(timeout_s),
             base_url: "https://api.anthropic.com".to_string(),
             model,
             system_prompt,
@@ -349,10 +345,11 @@ impl Provider {
     }
 
     const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+    const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
     async fn stream_sse_response(&self, resp: reqwest::Response) -> Result<String> {
         let mut stream = resp.bytes_stream();
-        let mut full = String::new();
+        let mut full = String::with_capacity(4096);
 
         loop {
             if STREAM_CANCELLED.load(Ordering::SeqCst) {
@@ -377,6 +374,9 @@ impl Provider {
                             .and_then(|c| c.delta.content.as_deref())
                         {
                             full.push_str(content);
+                            if full.len() > Self::MAX_RESPONSE_BYTES {
+                                return Err(anyhow!("response too large ({} bytes)", Self::MAX_RESPONSE_BYTES));
+                            }
                         }
                     }
                 }
@@ -387,8 +387,8 @@ impl Provider {
 
     async fn stream_anthropic_sse(&self, resp: reqwest::Response) -> Result<String> {
         let mut stream = resp.bytes_stream();
-        let mut full = String::new();
-        let mut buf = String::new();
+        let mut full = String::with_capacity(4096);
+        let mut buf = String::with_capacity(4096);
         let mut cursor = 0usize;
 
         loop {
@@ -426,6 +426,9 @@ impl Provider {
                                 if chunk.chunk_type.as_deref() == Some("content_block_delta") {
                                     if let Some(text) = chunk.delta.and_then(|d| d.text) {
                                         full.push_str(&text);
+                                        if full.len() > Self::MAX_RESPONSE_BYTES {
+                                            return Err(anyhow!("response too large ({} bytes)", Self::MAX_RESPONSE_BYTES));
+                                        }
                                     }
                                 }
                             }

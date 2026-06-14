@@ -14,13 +14,21 @@ use crate::ui;
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-pub(crate) const BLOCKED_COMMAND_PATTERNS: [&str; 6] = [
+pub(crate) const BLOCKED_COMMAND_PATTERNS: [&str; 14] = [
     "rm -rf /",
+    "rm -rf --no-preserve-root",
+    "rm -rf /*",
     "mkfs",
     "dd if=",
     ":(){:|:&};:",
     "shutdown",
     "reboot",
+    "> /dev/sda",
+    "> /dev/nvme",
+    "chmod 777 /",
+    "wget http://",
+    "curl http://",
+    "sudo dd",
 ];
 
 /// Compiled regex for `@filename` references in user input.
@@ -150,6 +158,8 @@ pub(crate) fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
 // ── Path resolution ─────────────────────────────────────────────────────────
 
 /// Resolves a relative path against a base, preventing directory traversal.
+/// Uses parent directory canonicalization for paths that don't exist yet
+/// to avoid TOCTOU issues.
 pub(crate) fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
     let t = ui::theme::active();
     let expanded = if rel.starts_with('~') {
@@ -172,16 +182,18 @@ pub(crate) fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
         expanded
     };
 
-    let resolved = match std::fs::canonicalize(&candidate) {
-        Ok(r) => r,
-        Err(_) => {
-            let parent = candidate.parent()?;
-            let canonical_parent = std::fs::canonicalize(parent).ok()?;
-            canonical_parent.join(candidate.file_name()?)
-        }
+    let resolved = if candidate.exists() {
+        std::fs::canonicalize(&candidate).ok()?
+    } else {
+        // For new files, canonicalize the parent directory instead
+        let parent = candidate.parent()?;
+        let file_name = candidate.file_name()?;
+        let canonical_parent = std::fs::canonicalize(parent).ok()?;
+        canonical_parent.join(file_name)
     };
 
-    if resolved.starts_with(base) {
+    let canonical_base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    if resolved.starts_with(&canonical_base) {
         Some(resolved)
     } else {
         eprintln!(
@@ -330,7 +342,23 @@ pub(crate) fn format_timestamp() -> String {
 
 pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     let lower = cmd.to_lowercase();
-    BLOCKED_COMMAND_PATTERNS.iter().any(|p| lower.contains(p))
+    if BLOCKED_COMMAND_PATTERNS.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.len() >= 3
+        && (words[0] == "rm" || words[0] == "rmdir")
+        && words.iter().any(|w| {
+            *w == "/"
+                || w.starts_with('/')
+                    && w.len() < 6
+                    && w.chars()
+                        .all(|c| c.is_alphanumeric() || c == '/' || c == '*' || c == '.')
+        })
+    {
+        return true;
+    }
+    false
 }
 
 fn looks_like_shell_command(line: &str) -> bool {

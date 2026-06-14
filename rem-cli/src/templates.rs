@@ -533,3 +533,119 @@ footer { padding: 2rem 0; text-align: center; color: #a0aec0; font-family: syste
         },
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn template_bare_has_required_files() {
+        let files = template_bare("test-project");
+        let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(names.contains(&"index.html"));
+        assert!(names.contains(&"style.css"));
+        assert!(names.contains(&"script.js"));
+    }
+
+    #[test]
+    fn template_bare_title_in_html() {
+        let files = template_bare("my-app");
+        let html = files.iter().find(|f| f.path == "index.html").unwrap();
+        assert!(html.content.contains("my-app"));
+    }
+
+    #[test]
+    fn template_portfolio_has_required_files() {
+        let files = template_portfolio("portfolio");
+        let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(names.contains(&"index.html"));
+        assert!(names.contains(&"style.css"));
+    }
+
+    #[test]
+    fn template_landing_has_required_files() {
+        let files = template_landing("landing");
+        let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(names.contains(&"index.html"));
+    }
+
+    #[test]
+    fn template_blog_has_required_files() {
+        let files = template_blog("blog");
+        let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(names.contains(&"index.html"));
+        assert!(names.contains(&"style.css"));
+    }
+
+    #[test]
+    fn template_rust_has_required_files() {
+        let files = template_rust("rust-app");
+        let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(names.contains(&"Cargo.toml"));
+        assert!(names.contains(&"src/main.rs"));
+    }
+
+    #[test]
+    fn template_rust_cargo_toml_has_name() {
+        let files = template_rust("my-rust-app");
+        let cargo = files.iter().find(|f| f.path == "Cargo.toml").unwrap();
+        assert!(cargo.content.contains("my-rust-app"));
+    }
+
+    #[test]
+    fn template_python_has_required_files() {
+        let files = template_python("py-app");
+        let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(names.contains(&"main.py"));
+    }
+
+    #[test]
+    fn template_go_has_required_files() {
+        let files = template_go("go-app");
+        let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(names.contains(&"main.go"));
+    }
+
+    #[test]
+    fn template_javascript_has_required_files() {
+        let files = template_javascript("js-app");
+        let names: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(names.contains(&"package.json"));
+        assert!(names.contains(&"index.js"));
+    }
+
+    #[test]
+    fn template_javascript_package_json_has_name() {
+        let files = template_javascript("my-js-app");
+        let pkg = files.iter().find(|f| f.path == "package.json").unwrap();
+        assert!(pkg.content.contains("my-js-app"));
+    }
+
+    #[test]
+    fn template_bare_title_fallback_from_path() {
+        let files = template_bare("some/deep/path/proj");
+        let html = files.iter().find(|f| f.path == "index.html").unwrap();
+        assert!(html.content.contains("proj"));
+    }
+
+    #[test]
+    fn all_templates_return_non_empty_content() {
+        let names = ["test", "test", "test", "test", "test", "test", "test", "test"];
+        let templates: Vec<Vec<FileEntry>> = vec![
+            template_bare(names[0]),
+            template_portfolio(names[1]),
+            template_blog(names[2]),
+            template_landing(names[3]),
+            template_rust(names[4]),
+            template_python(names[5]),
+            template_go(names[6]),
+            template_javascript(names[7]),
+        ];
+        for (i, files) in templates.iter().enumerate() {
+            assert!(!files.is_empty(), "template {} returned empty", i);
+            for f in files {
+                assert!(!f.content.is_empty(), "file {} is empty in template {}", f.path, i);
+            }
+        }
+    }
+}

@@ -563,3 +563,128 @@ async fn test_anthropic_api_error() {
     let msg = format!("{}", err);
     assert!(msg.contains("Anthropic"));
 }
+
+// ── Additional healthcheck tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_openai_healthcheck_success() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "gpt-4"}, {"id": "gpt-3.5-turbo"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider {
+        kind: ProviderKind::OpenAI,
+        client: Client::new(),
+        base_url: mock_server.uri(),
+        model: "gpt-4".to_string(),
+        system_prompt: String::new(),
+        api_key: Some("test-key".to_string()),
+        model_ctx: 4096,
+    };
+
+    assert!(provider.healthcheck_openai().await.is_ok());
+}
+
+#[tokio::test]
+async fn test_openai_healthcheck_empty_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": []
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider {
+        kind: ProviderKind::OpenAI,
+        client: Client::new(),
+        base_url: mock_server.uri(),
+        model: "gpt-4".to_string(),
+        system_prompt: String::new(),
+        api_key: Some("test-key".to_string()),
+        model_ctx: 4096,
+    };
+
+    assert!(provider.healthcheck_openai().await.is_ok());
+}
+
+#[tokio::test]
+async fn test_gemini_healthcheck_success() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [
+                {"name": "models/gemini-2.0-flash", "display_name": "Gemini 2.0 Flash"}
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider {
+        kind: ProviderKind::Gemini,
+        client: Client::new(),
+        base_url: mock_server.uri(),
+        model: "gemini-2.0-flash".to_string(),
+        system_prompt: String::new(),
+        api_key: Some("test-key".to_string()),
+        model_ctx: 4096,
+    };
+
+    assert!(provider.healthcheck_gemini().await.is_ok());
+}
+
+#[tokio::test]
+async fn test_anthropic_healthcheck_success() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"type": "model", "id": "claude-sonnet-4-20250514"}
+            ]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider {
+        kind: ProviderKind::Anthropic,
+        client: Client::new(),
+        base_url: mock_server.uri(),
+        model: "claude-sonnet-4-20250514".to_string(),
+        system_prompt: String::new(),
+        api_key: Some("test-key".to_string()),
+        model_ctx: 4096,
+    };
+
+    assert!(provider.healthcheck_anthropic().await.is_ok());
+}
+
+#[tokio::test]
+async fn test_gemini_api_error() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": {"message": "API key not valid"}
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider {
+        kind: ProviderKind::Gemini,
+        client: Client::new(),
+        base_url: mock_server.uri(),
+        model: "gemini-2.0-flash".to_string(),
+        system_prompt: String::new(),
+        api_key: Some("bad-key".to_string()),
+        model_ctx: 4096,
+    };
+
+    let err = provider.complete_json_gemini("hello").await.unwrap_err();
+    let msg = format!("{}", err);
+    assert!(msg.contains("Gemini"));
+}

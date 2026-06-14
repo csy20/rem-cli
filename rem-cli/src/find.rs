@@ -29,6 +29,7 @@ pub struct FindOptions {
     pub max_file_bytes: u64,
     pub max_depth: usize,
     pub case_sensitive: bool,
+    pub use_regex: bool,
 }
 
 impl Default for FindOptions {
@@ -38,6 +39,7 @@ impl Default for FindOptions {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_depth: DEFAULT_MAX_DEPTH,
             case_sensitive: true,
+            use_regex: false,
         }
     }
 }
@@ -101,8 +103,9 @@ pub fn should_skip_file(name: &str) -> bool {
 
 /// Walk `root` and return every line whose contents contain `query`.
 ///
-/// `query` is matched as a plain substring — no regex metacharacters
-/// are interpreted. An empty `query` is treated as "no matches" rather
+/// By default `query` is matched as a plain substring — no regex metacharacters
+/// are interpreted. Set `opts.use_regex = true` to enable regex matching.
+/// An empty `query` is treated as "no matches" rather
 /// than matching every line, which would be useless.
 pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport {
     let start = Instant::now();
@@ -123,6 +126,17 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
         query.as_bytes().to_vec()
     } else {
         query.to_lowercase().into_bytes()
+    };
+
+    let regex_pattern: Option<regex::Regex> = if opts.use_regex {
+        let re_query = if opts.case_sensitive {
+            query.to_string()
+        } else {
+            format!("(?i){}", query)
+        };
+        regex::Regex::new(&re_query).ok()
+    } else {
+        None
     };
 
     let walker = WalkDir::new(root)
@@ -184,40 +198,58 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
         report.files_scanned += 1;
 
         for (idx, raw_line) in contents.lines().enumerate() {
-            let mut search_from = 0usize;
             let line_no = idx + 1;
 
-            macro_rules! search_in {
-                ($haystack:expr) => {{
-                    while let Some(pos) = find_subslice(&$haystack[search_from..], &needle) {
-                        let column = byte_to_column(&$haystack[..search_from + pos]);
-                        let line = raw_line.to_string();
+            if let Some(ref re) = regex_pattern {
+                if re.is_match(raw_line) {
+                    for cap in re.find_iter(raw_line) {
+                        let column = byte_to_column(&raw_line.as_bytes()[..cap.start()]);
                         report.matches.push(Match {
                             path: path.to_path_buf(),
                             line_no,
                             column: column + 1,
-                            line,
+                            line: raw_line.to_string(),
                         });
                         if report.matches.len() >= opts.max_results {
                             report.truncated = true;
                             report.elapsed_ms = start.elapsed().as_millis();
                             return report;
                         }
-                        search_from += pos + needle.len();
-                        if search_from > $haystack.len() {
-                            break;
-                        }
                     }
-                }};
-            }
-
-            if opts.case_sensitive {
-                let haystack = raw_line.as_bytes();
-                search_in!(haystack);
+                }
             } else {
-                let lowered = raw_line.to_lowercase();
-                let haystack = lowered.as_bytes();
-                search_in!(haystack);
+                let mut search_from = 0usize;
+                macro_rules! search_in {
+                    ($haystack:expr) => {{
+                        while let Some(pos) = find_subslice(&$haystack[search_from..], &needle) {
+                            let column = byte_to_column(&$haystack[..search_from + pos]);
+                            let line = raw_line.to_string();
+                            report.matches.push(Match {
+                                path: path.to_path_buf(),
+                                line_no,
+                                column: column + 1,
+                                line,
+                            });
+                            if report.matches.len() >= opts.max_results {
+                                report.truncated = true;
+                                report.elapsed_ms = start.elapsed().as_millis();
+                                return report;
+                            }
+                            search_from += pos + needle.len();
+                            if search_from > $haystack.len() {
+                                break;
+                            }
+                        }
+                    }};
+                }
+                if opts.case_sensitive {
+                    let haystack = raw_line.as_bytes();
+                    search_in!(haystack);
+                } else {
+                    let lowered = raw_line.to_lowercase();
+                    let haystack = lowered.as_bytes();
+                    search_in!(haystack);
+                }
             }
         }
     }
@@ -419,6 +451,30 @@ mod tests {
         assert_eq!(report.matches.len(), 1);
 
         let _ = fs::remove_dir_all(&deep_root);
+    }
+
+    #[test]
+    fn regex_mode_matches_pattern() {
+        let root = make_tree();
+        let opts = FindOptions {
+            use_regex: true,
+            ..Default::default()
+        };
+        let report = find_matches(&root, r"handle_\w+", &opts);
+        assert!(report.matches.len() >= 4);
+        assert!(report.matches.iter().any(|m| m.path.ends_with("main.rs")));
+    }
+
+    #[test]
+    fn regex_mode_with_case_insensitive() {
+        let root = make_tree();
+        let opts = FindOptions {
+            use_regex: true,
+            case_sensitive: false,
+            ..Default::default()
+        };
+        let report = find_matches(&root, r"HANDLE_\w+", &opts);
+        assert!(report.matches.len() >= 4);
     }
 
     #[test]

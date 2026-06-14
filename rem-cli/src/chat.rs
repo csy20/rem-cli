@@ -12,6 +12,7 @@ use crate::search::SearchResult;
 use crate::ui;
 use crate::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
+use rustyline::config::Configurer;
 use rustyline::DefaultEditor;
 use std::fs;
 use std::io::{self};
@@ -24,6 +25,7 @@ pub(crate) struct ChatSession {
     pub(crate) last_code: String,
     pub(crate) last_files: Vec<FileEntry>,
     pub(crate) last_files_written: Vec<PathBuf>,
+    pub(crate) undo_stack: Vec<Vec<PathBuf>>,
     pub(crate) last_search: Vec<SearchResult>,
     pub(crate) last_intent: TaskIntent,
     pub(crate) last_user_input: String,
@@ -35,12 +37,23 @@ pub(crate) struct ChatSession {
     pub(crate) last_tokens: u32,
     pub(crate) last_elapsed: std::time::Duration,
     pub(crate) project_memory: ProjectMemory,
+    pub(crate) messages_since_save: usize,
+    pub(crate) project_type: Option<String>,
 }
 
 impl ChatSession {
+    fn history_path() -> PathBuf {
+        dirs::home_dir()
+            .map(|h| h.join(".config/rem-cli/history.txt"))
+            .unwrap_or_else(|| PathBuf::from(".rem_history.txt"))
+    }
+
     /// Creates a new chat session with the given model and optional workspace.
     pub(crate) fn new(model: &str, workspace: Option<PathBuf>) -> Result<Self> {
-        let rl = DefaultEditor::new().context("failed to start line editor")?;
+        let mut rl = DefaultEditor::new().context("failed to start line editor")?;
+        let history_path = Self::history_path();
+        let _ = rl.load_history(&history_path);
+        rl.set_max_history_size(1000).ok();
         let project_dir = workspace.clone();
         let project_memory =
             ProjectMemory::load(project_dir.as_deref().unwrap_or_else(|| Path::new(".")));
@@ -49,6 +62,7 @@ impl ChatSession {
             last_code: String::new(),
             last_files: Vec::new(),
             last_files_written: Vec::new(),
+            undo_stack: Vec::new(),
             last_search: Vec::new(),
             last_intent: TaskIntent::FastAnswer,
             last_user_input: String::new(),
@@ -60,7 +74,18 @@ impl ChatSession {
             last_tokens: 0,
             last_elapsed: std::time::Duration::from_secs(0),
             project_memory,
+            messages_since_save: 0,
+            project_type: None,
         })
+    }
+
+    /// Saves the readline history to disk.
+    pub(crate) fn save_history(&mut self) {
+        let path = Self::history_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = self.rl.save_history(&path);
     }
 
     /// Reads a line from the terminal with the given prompt.
@@ -123,9 +148,60 @@ impl ChatSession {
         out
     }
 
+    /// Returns the cached project type, computing it on first call.
+    pub(crate) fn get_project_type(&mut self) -> &str {
+        if self.project_type.is_none() {
+            let t = self
+                .project_dir
+                .as_deref()
+                .map(detect_project_type)
+                .unwrap_or("")
+                .to_string();
+            self.project_type = Some(t);
+        }
+        self.project_type.as_deref().unwrap_or("")
+    }
+
     /// Returns the project memory as context for the LLM prompt.
     pub(crate) fn build_memory_context(&self) -> String {
         self.project_memory.as_context()
+    }
+
+    /// Returns the session data as a JSON value for persistence.
+    pub(crate) fn to_session_json(&self) -> serde_json::Value {
+        let last_files_json: Vec<serde_json::Value> = self
+            .last_files
+            .iter()
+            .map(|f| serde_json::json!({"path": f.path, "content": f.content}))
+            .collect();
+        serde_json::json!({
+            "history": self.history.iter().map(|(u, a)| serde_json::json!({"user": u, "assistant": a})).collect::<Vec<_>>(),
+            "mode": self.mode.label(),
+            "workspace": self.project_dir.as_ref().map(|d| d.display().to_string()),
+            "saved_at": crate::format_timestamp(),
+            "last_code": self.last_code,
+            "last_files": last_files_json,
+            "last_files_written": self.last_files_written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Returns the project directory, falling back to cwd.
+    pub(crate) fn session_dir(&self) -> std::path::PathBuf {
+        self.project_dir
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    }
+
+    /// Auto-saves the session to `.rem/session.json` every N messages.
+    pub(crate) fn auto_save_session(&self) {
+        let dir = self.session_dir();
+        let session_file = dir.join(".rem/session.json");
+        let _ = std::fs::create_dir_all(dir.join(".rem"));
+        let _ = std::fs::write(
+            &session_file,
+            serde_json::to_string_pretty(&self.to_session_json()).unwrap_or_default(),
+        );
     }
 
     /// Resolves `@<path>` references in user input to file contents.

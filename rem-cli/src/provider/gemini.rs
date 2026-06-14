@@ -179,9 +179,10 @@ impl super::Provider {
         }
 
         let mut stream = resp.bytes_stream();
-        let mut full = String::new();
-        let mut buf = String::new();
+        let mut full = String::with_capacity(4096);
+        let mut buf = String::with_capacity(4096);
         let mut cursor = 0usize;
+        const MAX_GEMINI_BYTES: usize = 10 * 1024 * 1024;
 
         loop {
             if super::STREAM_CANCELLED.load(std::sync::atomic::Ordering::SeqCst) {
@@ -219,6 +220,9 @@ impl super::Provider {
                                     .and_then(|p| p.text)
                                 {
                                     full.push_str(&text);
+                                    if full.len() > MAX_GEMINI_BYTES {
+                                        return Err(anyhow!("response too large (>{MAX_GEMINI_BYTES} bytes)"));
+                                    }
                                 }
                             }
                         }
