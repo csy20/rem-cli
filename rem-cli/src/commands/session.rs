@@ -8,7 +8,7 @@ use crate::memory::ProjectMemory;
 use crate::provider::Provider;
 use crate::token_count::{context_usage_percent, estimate_tokens_batch};
 use crate::ui;
-use crate::{file_icon, human_size, FileEntry};
+use crate::{file_icon, human_size, BackupEntry, FileEntry};
 use std::fs;
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -16,13 +16,62 @@ use walkdir::WalkDir;
 /// Sets the workspace directory (`/dir` command).
 pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
     let t = ui::theme::active();
-    let dir = PathBuf::from(path.trim());
-    let resolved = if path.trim() == "." {
-        std::env::current_dir().unwrap_or_default()
+    let raw = path.trim();
+    let cwd = std::env::current_dir().unwrap_or_default();
+
+    let dir = if raw == "." {
+        cwd.clone()
     } else {
-        dir
+        let p = PathBuf::from(raw);
+        if p.is_absolute() {
+            p
+        } else {
+            cwd.join(&p)
+        }
     };
-    if resolved.exists() || path.trim() == "." {
+
+    // Canonicalize to prevent path traversal (resolves .. segments)
+    let resolved = match dir.canonicalize() {
+        Ok(r) => r,
+        Err(_) => {
+            // Directory doesn't exist yet; canonicalize parent
+            if let Some(parent) = dir.parent() {
+                if let Ok(canon_parent) = parent.canonicalize() {
+                    if let Some(name) = dir.file_name() {
+                        let safe = canon_parent.join(name);
+                        // Prevent traversal via parent dir
+                        if safe.starts_with(&canon_parent) {
+                            safe
+                        } else {
+                            eprintln!(
+                                "  {} path traversal blocked",
+                                ui::theme::paint_error_label(&t, "\u{2717}")
+                            );
+                            return;
+                        }
+                    } else {
+                        canon_parent
+                    }
+                } else {
+                    println!(
+                        "  {} parent directory does not exist: {}",
+                        ui::theme::paint_warning(&t, "!"),
+                        parent.display()
+                    );
+                    return;
+                }
+            } else {
+                println!(
+                    "  {} invalid directory: {}",
+                    ui::theme::paint_warning(&t, "!"),
+                    raw
+                );
+                return;
+            }
+        }
+    };
+
+    if resolved.exists() {
         session.project_dir = Some(resolved.clone());
         session.workspace_dir = Some(resolved.clone());
         persist_workspace(&resolved);
@@ -575,9 +624,14 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                     }
                 }
                 if let Some(paths) = data["last_files_written"].as_array() {
-                    let written: Vec<PathBuf> = paths
+                    let written: Vec<BackupEntry> = paths
                         .iter()
-                        .filter_map(|p| p.as_str().map(PathBuf::from))
+                        .filter_map(|p| {
+                            p.as_str().map(|s| BackupEntry {
+                                path: PathBuf::from(s),
+                                original: None,
+                            })
+                        })
                         .collect();
                     if !written.is_empty() {
                         session.last_files_written = written;
@@ -595,5 +649,51 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
             ui::theme::paint_error_label(&t, "\u{258C}"),
             e
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_entry_new_file_has_no_original() {
+        let dir = std::env::temp_dir().join(format!("rem-test-be-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("new.txt");
+        let original = std::fs::read_to_string(&path).ok();
+        let entry = BackupEntry {
+            path: path.clone(),
+            original,
+        };
+        assert!(entry.original.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backup_entry_existing_file_stores_original() {
+        let dir = std::env::temp_dir().join(format!("rem-test-be2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("existing.txt");
+        std::fs::write(&path, "original content").unwrap();
+        let original = std::fs::read_to_string(&path).ok();
+        let entry = BackupEntry {
+            path: path.clone(),
+            original,
+        };
+        assert_eq!(entry.original.as_deref(), Some("original content"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn handle_dir_resolves_absolute_path() {
+        let tmp = std::env::temp_dir().join(format!("rem-test-dir-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
+
+        handle_dir(&mut session, tmp.to_str().unwrap());
+        assert_eq!(session.project_dir, Some(tmp.clone()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

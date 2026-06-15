@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -41,6 +42,7 @@ struct CustomThemeDef {
 
 static CUSTOM_THEMES: LazyLock<Mutex<BTreeMap<String, Theme>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
+static CUSTOM_THEMES_LOADED: AtomicBool = AtomicBool::new(false);
 
 /// Loads a custom theme from a TOML file.
 fn load_custom_theme(path: &PathBuf) -> Option<(String, Theme)> {
@@ -75,6 +77,9 @@ fn load_custom_theme(path: &PathBuf) -> Option<(String, Theme)> {
 
 /// Loads all custom themes from `~/.config/rem-cli/themes/`.
 fn load_custom_themes() {
+    if CUSTOM_THEMES_LOADED.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let theme_dir = dirs::home_dir().map(|h| h.join(".config/rem-cli/themes"));
     let Some(dir) = theme_dir else { return };
     if !dir.exists() {

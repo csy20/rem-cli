@@ -237,10 +237,12 @@ pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
 /// Validates config at startup, printing warnings for common issues.
 /// Returns the (possibly adjusted) config.
 pub(crate) fn validate_config(cfg: &AppConfig) {
+    let t = ui::theme::active();
     let known_providers = ["ollama", "openai", "vllm", "anthropic", "gemini"];
     if !known_providers.contains(&cfg.provider.as_str()) {
         eprintln!(
-            "\x1b[33mwarning\x1b[0m: unknown provider '{}'. Known: {}",
+            "{} unknown provider '{}'. Known: {}",
+            ui::theme::paint_warning(&t, "warning:"),
             cfg.provider,
             known_providers.join(", ")
         );
@@ -251,7 +253,8 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
             || std::env::var("OPENAI_API_KEY").is_ok_and(|k| !k.is_empty());
         if !has_key {
             eprintln!(
-                "\x1b[33mwarning\x1b[0m: provider '{}' may need --api-key or OPENAI_API_KEY",
+                "{} provider '{}' may need --api-key or OPENAI_API_KEY",
+                ui::theme::paint_warning(&t, "warning:"),
                 cfg.provider
             );
         }
@@ -261,7 +264,8 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
             || std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty());
         if !has_key {
             eprintln!(
-                "\x1b[33mwarning\x1b[0m: provider 'anthropic' may need --api-key or ANTHROPIC_API_KEY"
+                "{} provider 'anthropic' may need --api-key or ANTHROPIC_API_KEY",
+                ui::theme::paint_warning(&t, "warning:"),
             );
         }
     }
@@ -270,7 +274,8 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
             || std::env::var("GEMINI_API_KEY").is_ok_and(|k| !k.is_empty());
         if !has_key {
             eprintln!(
-                "\x1b[33mwarning\x1b[0m: provider 'gemini' may need --api-key or GEMINI_API_KEY"
+                "{} provider 'gemini' may need --api-key or GEMINI_API_KEY",
+                ui::theme::paint_warning(&t, "warning:"),
             );
         }
     }
@@ -278,21 +283,24 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
     let mode = cfg.mode.to_uppercase();
     if !["CHAT", "CODE", "PLAN"].contains(&mode.as_str()) {
         eprintln!(
-            "\x1b[33mwarning\x1b[0m: unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.",
+            "{} unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.",
+            ui::theme::paint_warning(&t, "warning:"),
             cfg.mode
         );
     }
 
     if cfg.timeout_s < 5 || cfg.timeout_s > 600 {
         eprintln!(
-            "\x1b[33mwarning\x1b[0m: timeout_s={} seems unusual (expected 5-600)",
+            "{} timeout_s={} seems unusual (expected 5-600)",
+            ui::theme::paint_warning(&t, "warning:"),
             cfg.timeout_s
         );
     }
 
     if cfg.model_ctx < 512 {
         eprintln!(
-            "\x1b[33mwarning\x1b[0m: model_ctx={} is very low (< 512). Responses may be truncated.",
+            "{} model_ctx={} is very low (< 512). Responses may be truncated.",
+            ui::theme::paint_warning(&t, "warning:"),
             cfg.model_ctx
         );
     }
@@ -346,5 +354,42 @@ mod tests {
         assert!(prompt.contains("REM"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_config_accepts_valid() {
+        let cfg = AppConfig::default();
+        // Should not panic or produce warnings.
+        validate_config(&cfg);
+    }
+
+    #[test]
+    fn validate_config_warns_on_unknown_mode() {
+        let mut cfg = AppConfig::default();
+        cfg.mode = "INVALID".into();
+        validate_config(&cfg);
+    }
+
+    #[test]
+    fn validate_config_warns_on_timeout_outside_range() {
+        let mut cfg = AppConfig::default();
+        cfg.timeout_s = 1000;
+        validate_config(&cfg);
+    }
+
+    #[test]
+    fn validate_config_warns_on_low_model_ctx() {
+        let mut cfg = AppConfig::default();
+        cfg.model_ctx = 128;
+        validate_config(&cfg);
+    }
+
+    #[test]
+    fn validate_config_accepts_known_providers() {
+        for provider in &["ollama", "openai", "vllm", "anthropic", "gemini"] {
+            let mut cfg = AppConfig::default();
+            cfg.provider = provider.to_string();
+            validate_config(&cfg);
+        }
     }
 }

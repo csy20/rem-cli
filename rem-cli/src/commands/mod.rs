@@ -5,6 +5,7 @@
 pub mod files;
 pub mod goal;
 pub mod help;
+pub mod repl;
 pub mod review;
 pub mod session;
 pub mod tools;
@@ -14,6 +15,10 @@ pub(crate) use files::{
 };
 pub(crate) use goal::handle_goal;
 pub(crate) use help::print_chat_help;
+pub(crate) use repl::{
+    handle_clear, handle_mode, handle_model, handle_plan, handle_provider, handle_reset,
+    handle_theme, handle_why,
+};
 pub(crate) use review::{handle_diff, handle_review};
 pub(crate) use session::{
     handle_compact, handle_config, handle_config_set, handle_dir, handle_init, handle_list_files,

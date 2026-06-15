@@ -192,9 +192,12 @@ async fn main() -> Result<()> {
     let models = client.list_models().await?;
     if !models.iter().any(|m| m == &cfg.model) {
         let fallback = models.first().cloned().unwrap_or_else(|| cfg.model.clone());
+        let t = ui::theme::active();
         eprintln!(
-            "\x1b[33mwarning\x1b[0m: model '{}' not found; using '{}'",
-            cfg.model, fallback
+            "{} model '{}' not found; using '{}'",
+            ui::theme::paint_warning(&t, "warning:"),
+            cfg.model,
+            fallback
         );
         client.set_model(fallback);
     }

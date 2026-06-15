@@ -35,6 +35,14 @@ pub(crate) const BLOCKED_COMMAND_PATTERNS: [&str; 14] = [
 pub(crate) static RE_AT_REF: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"@([^\s]+)").expect("invalid regex literal"));
 
+/// Tracks a written file and its original content for safe undo.
+#[derive(Debug, Clone)]
+pub(crate) struct BackupEntry {
+    pub(crate) path: PathBuf,
+    /// Original content before overwrite (None = file didn't exist).
+    pub(crate) original: Option<String>,
+}
+
 // ── Model types ─────────────────────────────────────────────────────────────
 
 /// A named code block extracted from an LLM response.

@@ -347,48 +347,14 @@ impl Provider {
     const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
     const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
-    async fn stream_sse_response(&self, resp: reqwest::Response) -> Result<String> {
-        let mut stream = resp.bytes_stream();
-        let mut full = String::with_capacity(4096);
-
-        loop {
-            if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                break;
-            }
-            let chunk = match timeout(Self::STREAM_CHUNK_TIMEOUT, stream.next()).await {
-                Ok(Some(Ok(c))) => c,
-                Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
-                Ok(None) => break,
-                Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
-            };
-            let text = String::from_utf8_lossy(&chunk);
-            for line in text.lines() {
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        return Ok(full);
-                    }
-                    if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
-                        if let Some(content) = chunk
-                            .choices
-                            .first()
-                            .and_then(|c| c.delta.content.as_deref())
-                        {
-                            full.push_str(content);
-                            if full.len() > Self::MAX_RESPONSE_BYTES {
-                                return Err(anyhow!(
-                                    "response too large ({} bytes)",
-                                    Self::MAX_RESPONSE_BYTES
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(full)
-    }
-
-    async fn stream_anthropic_sse(&self, resp: reqwest::Response) -> Result<String> {
+    /// Core streaming loop: reads SSE bytes, buffers partial lines, yields each line
+    /// to the provided callback. The callback receives the trimmed line and a mutable
+    /// output buffer. Return `Ok(true)` from the callback to continue, `Ok(false)` to
+    /// stop early with the current output, or `Err` to abort.
+    async fn stream_lines<F>(resp: reqwest::Response, mut on_line: F) -> Result<String>
+    where
+        F: FnMut(&str, &mut String) -> Result<bool>,
+    {
         let mut stream = resp.bytes_stream();
         let mut full = String::with_capacity(4096);
         let mut buf = String::with_capacity(4096);
@@ -405,7 +371,6 @@ impl Provider {
                 Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
             };
             buf.push_str(&String::from_utf8_lossy(&chunk));
-
             loop {
                 let tail = &buf[cursor..];
                 match tail.find('\n') {
@@ -413,39 +378,78 @@ impl Provider {
                         let line = &tail[..pos];
                         cursor += pos + 1;
                         let trimmed = line.trim();
-
                         if trimmed.is_empty() {
                             continue;
                         }
-
-                        if trimmed.starts_with("event: ") {
-                            continue;
-                        }
-
-                        if let Some(data) = trimmed.strip_prefix("data: ") {
-                            if let Ok(chunk) =
-                                serde_json::from_str::<anthropic::AnthropicStreamChunk>(data)
-                            {
-                                if chunk.chunk_type.as_deref() == Some("content_block_delta") {
-                                    if let Some(text) = chunk.delta.and_then(|d| d.text) {
-                                        full.push_str(&text);
-                                        if full.len() > Self::MAX_RESPONSE_BYTES {
-                                            return Err(anyhow!(
-                                                "response too large ({} bytes)",
-                                                Self::MAX_RESPONSE_BYTES
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
+                        if !on_line(trimmed, &mut full)? {
+                            return Ok(full);
                         }
                     }
                     None => break,
                 }
             }
         }
-
         Ok(full)
+    }
+
+    async fn stream_sse_response(&self, resp: reqwest::Response) -> Result<String> {
+        Self::stream_lines(resp, |trimmed, full| {
+            if let Some(data) = trimmed.strip_prefix("data: ") {
+                if data == "[DONE]" {
+                    return Ok(false);
+                }
+                if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
+                    if let Some(content) = chunk
+                        .choices
+                        .first()
+                        .and_then(|c| c.delta.content.as_deref())
+                    {
+                        full.push_str(content);
+                        if full.len() > Self::MAX_RESPONSE_BYTES {
+                            return Err(anyhow!(
+                                "response too large ({} bytes)",
+                                Self::MAX_RESPONSE_BYTES
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        })
+        .await
+    }
+
+    async fn stream_anthropic_sse(&self, resp: reqwest::Response) -> Result<String> {
+        Self::stream_lines(resp, |trimmed, full| {
+            if trimmed.starts_with("event: ") {
+                return Ok(true);
+            }
+            if let Some(data) = trimmed.strip_prefix("data: ") {
+                if let Ok(chunk) = serde_json::from_str::<anthropic::AnthropicStreamChunk>(data) {
+                    match chunk.chunk_type.as_deref() {
+                        Some("content_block_delta") => {
+                            if let Some(text) = chunk.delta.and_then(|d| d.text) {
+                                full.push_str(&text);
+                            }
+                        }
+                        Some("content_block_start") => {
+                            if let Some(text) = chunk.content_block.and_then(|b| b.text) {
+                                full.push_str(&text);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if full.len() > Self::MAX_RESPONSE_BYTES {
+                        return Err(anyhow!(
+                            "response too large ({} bytes)",
+                            Self::MAX_RESPONSE_BYTES
+                        ));
+                    }
+                }
+            }
+            Ok(true)
+        })
+        .await
     }
 
     async fn handle_ollama_error(&self, resp: reqwest::Response, url: &str) -> Result<String> {
@@ -474,50 +478,17 @@ impl Provider {
     }
 
     async fn stream_ollama_response(&self, resp: reqwest::Response) -> Result<String> {
-        const MAX_BUF: usize = 10 * 1024 * 1024;
-
-        let mut stream = resp.bytes_stream();
-        let mut full = String::new();
-        let mut buf = String::new();
-        let mut cursor = 0usize;
-
-        loop {
-            if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                break;
-            }
-            let chunk = match timeout(Self::STREAM_CHUNK_TIMEOUT, stream.next()).await {
-                Ok(Some(Ok(c))) => c,
-                Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
-                Ok(None) => break,
-                Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
-            };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            if buf.len() > MAX_BUF {
-                return Err(anyhow!("response too large (>{MAX_BUF} bytes)"));
-            }
-            loop {
-                let tail = &buf[cursor..];
-                match tail.find('\n') {
-                    Some(pos) => {
-                        let line = &tail[..pos];
-                        cursor += pos + 1;
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if let Ok(obj) = serde_json::from_str::<ollama::OllamaStreamLine>(trimmed) {
-                            if let Some(token) = obj.response {
-                                full.push_str(&token);
-                            }
-                            if obj.done == Some(true) {
-                                return Ok(full);
-                            }
-                        }
-                    }
-                    None => break,
+        Self::stream_lines(resp, |trimmed, full| {
+            if let Ok(obj) = serde_json::from_str::<ollama::OllamaStreamLine>(trimmed) {
+                if let Some(token) = obj.response {
+                    full.push_str(&token);
+                }
+                if obj.done == Some(true) {
+                    return Ok(false);
                 }
             }
-        }
-        Ok(full)
+            Ok(true)
+        })
+        .await
     }
 }

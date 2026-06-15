@@ -2,9 +2,17 @@
 //! Contains Ollama-specific request/response types and API methods
 //! (`chat_completion`, `chat_completion_stream`, `models`, `health`).
 
+use std::sync::LazyLock;
+
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
+
+static NUM_THREADS: LazyLock<usize> = LazyLock::new(|| {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+});
 
 #[derive(Debug, Deserialize)]
 pub struct OllamaTagsResponse {
@@ -57,14 +65,11 @@ impl super::Provider {
             "{}\n\nUser request:\n{}\n\nReturn JSON only.",
             self.system_prompt, user_prompt
         );
-        let num_thread = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
         let payload = json!({
             "model": self.model,
             "prompt": final_prompt,
             "stream": false,
-            "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": num_thread },
+            "options": { "num_predict": 4096, "num_ctx": self.model_ctx, "num_thread": *NUM_THREADS },
             "format": {
                 "type": "object",
                 "properties": {
@@ -94,28 +99,10 @@ impl super::Provider {
             .await
             .context("failed to call Ollama")?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|e| format!("(read error: {})", e));
-            let err_msg = serde_json::from_str::<super::LlmErrorResponse>(&body)
-                .map(|v| v.error.to_string())
-                .unwrap_or_else(|_| body.clone());
-            if status.as_u16() == 404 && err_msg.to_lowercase().contains("model") {
-                return Err(anyhow!(
-                    "Model '{}' not found. Pull it: `ollama pull {}`",
-                    self.model,
-                    self.model
-                ));
-            }
-            if status.as_u16() == 404 {
-                return Err(anyhow!(
-                    "Endpoint not found (404 at {}). Check --ollama-url",
-                    url
-                ));
-            }
-            return Err(anyhow!("Ollama failed: {} — {}", status, err_msg));
+            return match self.handle_ollama_error(resp, &url).await {
+                Err(e) => Err(e),
+                Ok(_) => unreachable!(),
+            };
         }
 
         let raw: OllamaJsonResponse = resp.json().await.context("invalid Ollama response")?;
@@ -137,14 +124,11 @@ impl super::Provider {
                 system_prompt, history, user_prompt
             )
         };
-        let num_thread = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
         let payload = json!({
             "model": self.model,
             "prompt": final_prompt,
             "stream": true,
-            "options": { "num_predict": 512, "num_ctx": self.model_ctx, "num_thread": num_thread }
+            "options": { "num_predict": 4096, "num_ctx": self.model_ctx, "num_thread": *NUM_THREADS }
         });
         let resp = self
             .client

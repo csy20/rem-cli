@@ -123,24 +123,79 @@ fn highlight_generic(code: &str) -> String {
     code.to_string()
 }
 
-/// Heuristically detects language (html/css/js) from code content.
+/// Heuristically detects language (html/css/js/rust/etc.) from code content.
 pub fn detect_language_from_content(code: &str) -> &str {
     let first_line = code.trim().lines().next().unwrap_or("");
     if first_line.starts_with("<!") || first_line.starts_with("<") {
-        "html"
-    } else if first_line.contains("{")
-        && first_line.contains("}")
-        && !first_line.contains("function")
-        && !first_line.contains("=>")
+        return "html";
+    }
+    if first_line.starts_with("fn ")
+        || first_line.starts_with("pub ")
+        || first_line.starts_with("impl ")
+        || first_line.starts_with("unsafe ")
+        || first_line.starts_with("#[")
+        || first_line.starts_with("struct ")
+        || first_line.starts_with("enum ")
+        || first_line.starts_with("trait ")
+        || first_line.starts_with("use ")
+        || first_line.starts_with("mod ")
+        || first_line.starts_with("let ")
+        || first_line.starts_with("const ")
+        || first_line.starts_with("static ")
+        || first_line.starts_with("async ")
+        || first_line.starts_with("await ")
+        || first_line.starts_with("type ")
+        || first_line.starts_with("macro_rules!")
     {
-        "css"
-    } else if first_line.starts_with("const ")
+        return "rust";
+    }
+    if first_line.starts_with("func ")
+        || first_line.starts_with("package ")
+        || first_line.starts_with("import \"")
+        || first_line.starts_with("import (")
+    {
+        return "go";
+    }
+    if first_line.starts_with("def ")
+        || first_line.starts_with("class ")
+        || first_line.starts_with("import ")
+        || first_line.starts_with("from ")
+        || first_line.starts_with("print(")
+    {
+        return "python";
+    }
+    if first_line.starts_with("#include")
+        || first_line.starts_with("int ")
+        || first_line.starts_with("char ")
+        || first_line.starts_with("void ")
+        || first_line.starts_with("float ")
+        || first_line.starts_with("double ")
+        || first_line.starts_with("long ")
+        || first_line.starts_with("short ")
+        || first_line.starts_with("unsigned ")
+        || first_line.starts_with("signed ")
+        || first_line.starts_with("static ")
+        || first_line.starts_with("extern ")
+        || first_line.starts_with("typedef ")
+        || first_line.starts_with("struct ")
+        || first_line.starts_with("enum ")
+        || first_line.starts_with("union ")
+    {
+        return "c";
+    }
+    if first_line.starts_with("const ")
         || first_line.starts_with("let ")
         || first_line.starts_with("function ")
         || first_line.starts_with("import ")
     {
-        "js"
-    } else {
-        ""
+        return "js";
     }
+    if first_line.contains("{")
+        && first_line.contains("}")
+        && !first_line.contains("fn ")
+        && !first_line.contains("=>")
+    {
+        return "css";
+    }
+    ""
 }

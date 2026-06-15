@@ -6,7 +6,7 @@ use crate::chat::ChatSession;
 use crate::highlight;
 use crate::intent::TaskIntent;
 use crate::ui;
-use crate::{file_icon, resolve_safe_path, FileEntry};
+use crate::{file_icon, resolve_safe_path, BackupEntry, FileEntry};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -146,6 +146,7 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
         }
     }
 
+    let original = fs::read_to_string(&abs_path).ok();
     if write_file_atomic(&abs_path, &session.last_code, &t) {
         println!(
             "  {} wrote {} ({} bytes)",
@@ -161,7 +162,10 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
                 session.undo_stack.remove(0);
             }
         }
-        session.last_files_written.push(abs_path);
+        session.last_files_written.push(BackupEntry {
+            path: abs_path,
+            original,
+        });
     }
 }
 
@@ -248,11 +252,9 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     );
     println!("{}", ui::theme::paint_rail_empty(&t));
 
-    let input = session
-        .readline("rem> ")
-        .unwrap_or_else(|_| String::from("y"));
+    let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
     let input = input.trim();
-    if !input.is_empty() && !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
+    if !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
         println!(
             "{} skipped. Use /write <path> to save individually.",
             ui::theme::paint_warning(&t, "\u{2502}  !")
@@ -261,9 +263,10 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
         return;
     }
 
-    let mut written: Vec<PathBuf> = Vec::new();
+    let mut written: Vec<BackupEntry> = Vec::new();
     for (f, abs_path) in &safe_entries {
         let will_overwrite = abs_path.exists();
+        let original = fs::read_to_string(abs_path).ok();
         if will_overwrite {
             println!(
                 "{}   {} {}",
@@ -297,7 +300,10 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
                 ui::theme::paint_dim(&t, &format!("{} bytes", f.content.len())),
                 ui::theme::paint_dim(&t, overwrite_note),
             );
-            written.push(abs_path.clone());
+            written.push(BackupEntry {
+                path: abs_path.clone(),
+                original,
+            });
         }
     }
 
@@ -319,8 +325,10 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     }
 }
 
-/// Deletes the last written files (`/undo` command).
+/// Restores or deletes the last written files (`/undo` command).
 /// Supports `/undo N` to undo multiple levels.
+/// If the file existed before writing, its original content is restored.
+/// If the file was new, it gets deleted.
 pub(crate) fn handle_undo(session: &mut ChatSession) {
     let t = ui::theme::active();
     if session.last_files_written.is_empty() && session.undo_stack.is_empty() {
@@ -336,7 +344,7 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
         ui::theme::paint_bright(
             &t,
             &format!(
-                "Delete the last {} written file(s)? [y/N] (or /undo N for N levels)",
+                "Revert the last {} written file(s)? [y/N] (or /undo N for N levels)",
                 total
             )
         )
@@ -349,7 +357,7 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
         return;
     }
 
-    let mut removed = 0;
+    let mut modified = 0;
     let mut dirs_to_clean: Vec<PathBuf> = Vec::new();
 
     let mut batches = Vec::new();
@@ -361,25 +369,45 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
     }
 
     for batch in &batches {
-        for path in batch {
-            if path.exists() {
-                if let Some(parent) = path.parent() {
+        for entry in batch {
+            if entry.original.is_some() {
+                // Restore original content
+                if let Err(e) =
+                    fs::write(&entry.path, entry.original.as_deref().unwrap_or_default())
+                {
+                    println!(
+                        "  {} failed to restore {}: {}",
+                        ui::theme::paint_error_label(&t, "\u{258C}"),
+                        entry.path.display(),
+                        e
+                    );
+                } else {
+                    println!(
+                        "  {} restored {}",
+                        ui::theme::paint_warning(&t, "\u{258C}"),
+                        ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
+                    );
+                    modified += 1;
+                }
+            } else if entry.path.exists() {
+                // File was new, delete it
+                if let Some(parent) = entry.path.parent() {
                     dirs_to_clean.push(parent.to_path_buf());
                 }
-                match fs::remove_file(path) {
+                match fs::remove_file(&entry.path) {
                     Ok(()) => {
                         println!(
                             "  {} removed {}",
                             ui::theme::paint_warning(&t, "\u{258C}"),
-                            ui::theme::paint_dim(&t, &format!("{}", path.display()))
+                            ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
                         );
-                        removed += 1;
+                        modified += 1;
                     }
                     Err(e) => {
                         println!(
                             "  {} failed to remove {}: {}",
                             ui::theme::paint_error_label(&t, "\u{258C}"),
-                            path.display(),
+                            entry.path.display(),
                             e
                         );
                     }
@@ -395,7 +423,7 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
         }
     }
 
-    if removed > 0 {
+    if modified > 0 {
         let input = session.last_user_input.clone();
         let intent = session.last_intent.clone();
         if intent == TaskIntent::CodeAction {
@@ -404,9 +432,9 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
                 .record_correction(&input, &intent, &TaskIntent::FastAnswer);
         }
         println!(
-            "  {} {}  file(s) removed.",
+            "  {} {}  file(s) reverted.",
             ui::theme::paint_success_label(&t, "\u{258C} \u{2713}"),
-            removed
+            modified
         );
     }
 }
@@ -614,6 +642,35 @@ mod tests {
         assert!(result);
         assert!(!tmp.exists());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "updated");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backup_entry_new_file_has_no_original() {
+        let dir = std::env::temp_dir().join(format!("rem-test-backup-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("new_file.txt");
+        let original = std::fs::read_to_string(&path).ok();
+        let entry = BackupEntry {
+            path: path.clone(),
+            original,
+        };
+        assert!(entry.original.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn backup_entry_existing_file_captures_original() {
+        let dir = std::env::temp_dir().join(format!("rem-test-backup2-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("existing.txt");
+        std::fs::write(&path, "original content").unwrap();
+        let original = std::fs::read_to_string(&path).ok();
+        let entry = BackupEntry {
+            path: path.clone(),
+            original,
+        };
+        assert_eq!(entry.original.as_deref(), Some("original content"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

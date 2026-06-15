@@ -49,6 +49,15 @@ pub struct IndexChunk {
     pub end_line: usize,
     #[serde(default)]
     pub embedding: Option<Vec<f32>>,
+    /// Pre-computed lowercased content for faster retrieval.
+    #[serde(skip)]
+    pub(crate) content_lower: String,
+    /// Pre-computed lowercased name for faster retrieval.
+    #[serde(skip)]
+    pub(crate) name_lower: String,
+    /// Pre-computed lowercased path for faster retrieval.
+    #[serde(skip)]
+    pub(crate) path_lower: String,
 }
 
 /// Try to load an index for the given project dir.
@@ -67,7 +76,10 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<Vec<IndexChunk>> {
                 if let Some(arr) = data.get("chunks").and_then(|v| v.as_array()) {
                     let mut out = Vec::new();
                     for item in arr {
-                        if let Ok(chunk) = serde_json::from_value::<IndexChunk>(item.clone()) {
+                        if let Ok(mut chunk) = serde_json::from_value::<IndexChunk>(item.clone()) {
+                            chunk.content_lower = chunk.content.to_lowercase();
+                            chunk.name_lower = chunk.name.to_lowercase();
+                            chunk.path_lower = chunk.path.to_lowercase();
                             out.push(chunk);
                         }
                     }
@@ -107,19 +119,16 @@ pub fn retrieve_relevant_chunks<'a>(
 
             // Strong signal: words appear in the actual code content
             if c.content.len() < 20000 {
-                let content_l = c.content.to_lowercase();
                 for w in &q_words {
-                    if content_l.contains(w) {
+                    if c.content_lower.contains(w) {
                         score += 10;
                     }
                 }
             }
             // Bonus for name / path match (e.g. "auth" in auth.rs or user auth handler)
             if c.name.len() < 500 && c.path.len() < 500 {
-                let name_l = c.name.to_lowercase();
-                let path_l = c.path.to_lowercase();
                 for w in &q_words {
-                    if name_l.contains(w) || path_l.contains(w) {
+                    if c.name_lower.contains(w) || c.path_lower.contains(w) {
                         score += 4;
                     }
                 }
@@ -273,6 +282,9 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
                     name: fe.name.clone(),
                     chunk_type: ctype.to_string(),
                     content: fe.content.clone(),
+                    content_lower: fe.content.to_lowercase(),
+                    name_lower: fe.name.to_lowercase(),
+                    path_lower: fe.rel_str.to_lowercase(),
                     start_line: 1,
                     end_line: fe.line_count,
                     embedding: None,
@@ -288,11 +300,15 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
                     } else {
                         guess_chunk_type(&fe.rel_str, &piece)
                     };
+                    let content_lower = piece.to_lowercase();
                     local_chunks.push(IndexChunk {
                         path: fe.rel_str.clone(),
                         name: fe.name.clone(),
                         chunk_type: piece_ctype.to_string(),
                         content: piece,
+                        content_lower,
+                        name_lower: fe.name.to_lowercase(),
+                        path_lower: fe.rel_str.to_lowercase(),
                         start_line: start_l,
                         end_line: end_l,
                         embedding: None,
@@ -330,13 +346,13 @@ fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, St
         out.push((cur_start_line, end_l, buf));
     }
 
-    // Force split giant single chunk (rare, e.g. minified or one huge paragraph)
     if out.len() == 1 && out[0].2.len() > target * 2 {
         let big = out.remove(0).2;
         let mut start = 0usize;
         let mut lnum = 1usize;
         while start < big.len() {
             let end = (start + target).min(big.len());
+            let end = big.floor_char_boundary(end);
             let piece = &big[start..end];
             let piece_lines = piece.lines().count().max(1);
             out.push((lnum, lnum + piece_lines - 1, piece.to_string()));
@@ -466,6 +482,9 @@ mod tests {
                 name: "main.rs".into(),
                 chunk_type: "function".into(),
                 content: "fn main() {\n    println!(\"hello\");\n}".into(),
+                content_lower: "fn main() {\n    println!(\"hello\");\n}".into(),
+                name_lower: "main.rs".into(),
+                path_lower: "src/main.rs".into(),
                 start_line: 1,
                 end_line: 3,
                 embedding: None,
@@ -475,6 +494,9 @@ mod tests {
                 name: "auth.rs".into(),
                 chunk_type: "file".into(),
                 content: "pub fn login() {}\npub fn logout() {}".into(),
+                content_lower: "pub fn login() {}\npub fn logout() {}".into(),
+                name_lower: "auth.rs".into(),
+                path_lower: "src/auth.rs".into(),
                 start_line: 1,
                 end_line: 2,
                 embedding: None,
@@ -484,6 +506,9 @@ mod tests {
                 name: "README.md".into(),
                 chunk_type: "docs".into(),
                 content: "# Project\nThis is a project about authentication.".into(),
+                content_lower: "# project\nthis is a project about authentication.".into(),
+                name_lower: "readme.md".into(),
+                path_lower: "readme.md".into(),
                 start_line: 1,
                 end_line: 2,
                 embedding: None,

@@ -21,6 +21,7 @@ pub struct AnthropicStreamChunk {
     #[serde(rename = "type")]
     pub chunk_type: Option<String>,
     pub delta: Option<AnthropicDelta>,
+    pub content_block: Option<AnthropicContentBlock>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -133,8 +134,7 @@ impl super::Provider {
 
         let mut messages: Vec<serde_json::Value> = vec![];
         if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
-            messages.push(json!({"role": "assistant", "content": "I understand. Continue."}));
+            messages.push(json!({"role": "user", "content": format!("[Previous conversation]:\n{}", history)}));
         }
         messages.push(json!({"role": "user", "content": user_prompt}));
 

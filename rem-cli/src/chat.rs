@@ -24,8 +24,8 @@ pub(crate) struct ChatSession {
     pub(crate) rl: DefaultEditor,
     pub(crate) last_code: String,
     pub(crate) last_files: Vec<FileEntry>,
-    pub(crate) last_files_written: Vec<PathBuf>,
-    pub(crate) undo_stack: Vec<Vec<PathBuf>>,
+    pub(crate) last_files_written: Vec<crate::BackupEntry>,
+    pub(crate) undo_stack: Vec<Vec<crate::BackupEntry>>,
     pub(crate) last_search: Vec<SearchResult>,
     pub(crate) last_intent: TaskIntent,
     pub(crate) last_user_input: String,
@@ -181,7 +181,7 @@ impl ChatSession {
             "saved_at": crate::format_timestamp(),
             "last_code": self.last_code,
             "last_files": last_files_json,
-            "last_files_written": self.last_files_written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "last_files_written": self.last_files_written.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
         })
     }
 

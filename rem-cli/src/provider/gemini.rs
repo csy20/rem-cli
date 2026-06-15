@@ -207,9 +207,6 @@ impl super::Provider {
                             continue;
                         }
                         if let Some(data) = trimmed.strip_prefix("data: ") {
-                            if data == "[DONE]" {
-                                continue;
-                            }
                             if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
                                 if let Some(text) = chunk
                                     .candidates

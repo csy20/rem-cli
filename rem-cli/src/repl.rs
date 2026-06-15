@@ -13,16 +13,15 @@ use crate::chat::{
 };
 use crate::cli::AppConfig;
 use crate::commands::{
-    auto_write_files, handle_compact, handle_config, handle_config_set, handle_copy, handle_diff,
-    handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint,
-    handle_list_files, handle_memory, handle_memory_set, handle_refactor, handle_resume_session,
-    handle_review, handle_save_session, handle_search, handle_test, handle_tokens, handle_undo,
-    handle_write, print_chat_help, print_last_files, prompt_for_path,
+    auto_write_files, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy,
+    handle_diff, handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint,
+    handle_list_files, handle_memory, handle_memory_set, handle_mode, handle_model, handle_plan,
+    handle_provider, handle_refactor, handle_reset, handle_resume_session, handle_review,
+    handle_save_session, handle_search, handle_test, handle_theme, handle_tokens, handle_undo,
+    handle_why, handle_write, print_chat_help, print_last_files, prompt_for_path,
 };
-use crate::config::{build_provider, first_run_setup, load_system_prompt, save_config};
-use crate::intent::{
-    classify_intent, has_creation_intent, has_file_path, intent_instruction, TaskIntent,
-};
+use crate::config::first_run_setup;
+use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskIntent};
 use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
@@ -160,126 +159,29 @@ pub(crate) async fn run_chat(
         }
 
         if trimmed.eq_ignore_ascii_case("/theme") {
-            let themes = ui::theme::list_names();
-            println!("{}", ui::theme::paint_rail_empty(&t));
-            println!(
-                "{} {}",
-                ui::theme::paint_rail_empty(&t),
-                ui::theme::paint_bright(&t, "themes")
-            );
-            println!("{}", ui::theme::paint_rail_empty(&t));
-            for name in &themes {
-                let preview = ui::theme::by_name(name);
-                let is_active = name == &t.name;
-                let marker = if is_active { "\u{25C8}" } else { "\u{25C7}" };
-                let accent = ui::theme::paint(&preview, "accent", marker, true);
-                let label = if is_active {
-                    ui::theme::paint_bright(&preview, &format!(" {} (active)", name))
-                } else {
-                    ui::theme::paint(&preview, "accent_dim", &format!(" {}", name), false)
-                };
-                let swatch = ui::theme::paint_on(&preview, "accent", "surface", "  ", false);
-                println!("{accent} {label}  {swatch}");
-            }
-            println!("{}", ui::theme::paint_rail_empty(&t));
-            println!(
-                "{} {}",
-                ui::theme::paint_rail_empty(&t),
-                ui::theme::paint_dim(&t, "use /theme <name> to switch")
-            );
-            println!("{}", ui::theme::paint_rail_empty(&t));
+            handle_theme(cfg, None);
             continue;
         }
         if let Some(tail) = trimmed.strip_prefix("/theme ") {
-            let name = tail.trim();
-            if ui::theme::set_active(name) {
-                let active_theme = ui::theme::active();
-                cfg.theme = active_theme.name.clone();
-                let _ = save_config(cfg);
-                let rail = ui::theme::paint_rail_empty(&t);
-                let msg = ui::theme::paint_success_label(
-                    &t,
-                    &format!("theme \u{2192} {}", active_theme.name),
-                );
-                println!("{rail}");
-                println!("{rail} {msg}");
-                println!("{rail}");
-            } else {
-                let rail = ui::theme::paint_rail_empty(&t);
-                let msg = ui::theme::paint_warning(&t, &format!("unknown theme '{}'", name));
-                println!("{rail} {msg}");
-                println!(
-                    "{rail} {}",
-                    ui::theme::paint_dim(
-                        &t,
-                        "available: GHOST, PHOSPHOR, MIST, EMBER, SAKURA, PAPER"
-                    )
-                );
-                println!("{rail}");
-            }
+            handle_theme(cfg, Some(tail));
             continue;
         }
 
         if let Some(tail) = trimmed.strip_prefix("/model ") {
-            let new_model = tail.trim().to_string();
-            if new_model.is_empty() {
-                println!(
-                    "{} model: {}",
-                    ui::theme::paint_rail_empty(&t),
-                    client.model
-                );
-            } else {
-                client.set_model(new_model.clone());
-                cfg.model = new_model;
-                let _ = save_config(cfg);
-                let rail = ui::theme::paint_rail_empty(&t);
-                let msg =
-                    ui::theme::paint_success_label(&t, &format!("model \u{2192} {}", client.model));
-                println!("{rail}");
-                println!("{rail} {msg}");
-                println!("{rail}");
-            }
+            handle_model(client, cfg, Some(tail));
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("/model") {
+            handle_model(client, cfg, None);
             continue;
         }
 
         if let Some(tail) = trimmed.strip_prefix("/provider ") {
-            let new_provider = tail.trim().to_lowercase();
-            if new_provider.is_empty() {
-                let rail = ui::theme::paint_rail_empty(&t);
-                let label = ui::theme::paint_bright(&t, "current provider:");
-                let val = ui::theme::paint_dim(&t, client.kind.as_str());
-                println!("{rail}");
-                println!("{rail} {label} {val}");
-                println!("{rail}");
-                continue;
-            }
-            let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
-            match build_provider(cfg, system_prompt) {
-                Ok(new_client) => {
-                    cfg.provider = new_provider;
-                    let _ = save_config(cfg);
-                    *client = new_client;
-                    let rail = ui::theme::paint_rail_empty(&t);
-                    let msg = ui::theme::paint_success_label(
-                        &t,
-                        &format!("provider \u{2192} {}", client.kind.as_str()),
-                    );
-                    println!("{rail}");
-                    println!("{rail} {msg}");
-                    let model_msg = ui::theme::paint_dim(&t, &format!("model: {}", client.model));
-                    println!("{rail}  {model_msg}");
-                    println!("{rail}");
-                }
-                Err(e) => {
-                    let rail = ui::theme::paint_rail_empty(&t);
-                    let msg = ui::theme::paint_error_label(
-                        &t,
-                        &format!("failed to switch provider: {}", e),
-                    );
-                    println!("{rail} {msg}");
-                    println!("{rail}");
-                }
-            }
+            handle_provider(client, cfg, Some(tail));
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("/provider") {
+            handle_provider(client, cfg, None);
             continue;
         }
 
@@ -333,57 +235,17 @@ pub(crate) async fn run_chat(
         }
 
         if trimmed.eq_ignore_ascii_case("/mode") {
-            session.mode = session.mode.toggle();
-            let mode_label = session.mode.label();
-            cfg.mode = mode_label.to_string();
-            let _ = save_config(cfg);
-            let mode_key = ui::theme::accent_for_mode(mode_label);
-            let hint = match session.mode {
-                RunMode::Chat => "reply in plain text \u{2014} ask questions, chat",
-                RunMode::Code => "generate code/files \u{2014} create, fix, build",
-                RunMode::Plan => "explore & plan \u{2014} analyze, propose approach, no code",
-            };
-            let rail = ui::theme::paint_rail_empty(&t);
-            let status = ui::theme::paint(
-                &t,
-                mode_key,
-                &format!("switched to {mode_label} mode"),
-                true,
-            );
-            let sub = ui::theme::paint_dim(&t, hint);
-            println!("{rail}");
-            println!("{rail} {status}");
-            println!("{rail}  {sub}");
-            println!("{rail}");
+            handle_mode(&mut session, cfg);
             continue;
         }
 
         if trimmed.eq_ignore_ascii_case("/plan") {
-            session.mode = RunMode::Plan;
-            cfg.mode = "PLAN".to_string();
-            let _ = save_config(cfg);
-            let rail = ui::theme::paint_rail_empty(&t);
-            let status = ui::theme::paint(&t, "accent_info", "switched to PLAN mode", true);
-            let sub = ui::theme::paint_dim(
-                &t,
-                "explore & plan \u{2014} analyze, propose approach, no code",
-            );
-            println!("{rail}");
-            println!("{rail} {status}");
-            println!("{rail}  {sub}");
-            println!("{rail}");
+            handle_plan(&mut session, cfg);
             continue;
         }
 
         if trimmed.eq_ignore_ascii_case("/clear") {
-            session.history.clear();
-            session.last_search.clear();
-            session.last_tokens = 0;
-            let rail = ui::theme::paint_rail_empty(&t);
-            let msg = ui::theme::paint_success_label(&t, "conversation cleared");
-            println!("{rail}");
-            println!("{rail} {msg}");
-            println!("{rail}");
+            handle_clear(&mut session);
             continue;
         }
 
@@ -426,25 +288,7 @@ pub(crate) async fn run_chat(
         }
 
         if trimmed.eq_ignore_ascii_case("/reset") {
-            session.history.clear();
-            session.last_search.clear();
-            session.last_tokens = 0;
-            session.last_code.clear();
-            session.last_files.clear();
-            session.last_files_written.clear();
-            let rail = ui::theme::paint_rail_empty(&t);
-            let msg = ui::theme::paint_success_label(
-                &t,
-                "full reset \u{2014} history, code cache, and results cleared",
-            );
-            let sub = ui::theme::paint_dim(
-                &t,
-                "(memory preserved \u{2014} use /memory to clear project memory)",
-            );
-            println!("{rail}");
-            println!("{rail} {msg}");
-            println!("{rail}   {sub}");
-            println!("{rail}");
+            handle_reset(&mut session);
             continue;
         }
 
@@ -485,7 +329,7 @@ pub(crate) async fn run_chat(
                     session
                         .last_files_written
                         .iter()
-                        .map(|p| p.display().to_string())
+                        .map(|p| p.path.display().to_string())
                         .collect()
                 } else {
                     session
@@ -537,40 +381,7 @@ pub(crate) async fn run_chat(
         }
 
         if trimmed.eq_ignore_ascii_case("/why") {
-            let intent_name = match session.last_intent {
-                TaskIntent::FastAnswer => "chat/question",
-                TaskIntent::Planning => "planning",
-                TaskIntent::WebNeeded => "web search needed",
-                TaskIntent::CodeAction => "code/file action",
-            };
-            let rail = ui::theme::paint_rail_empty(&t);
-            let intent_label = ui::theme::paint_bright(&t, "last intent:");
-            let intent_val = ui::theme::paint_success_label(&t, intent_name);
-            let input_label = ui::theme::paint_bright(&t, "last input:");
-            let input_val = ui::theme::paint_dim(&t, &format!("\"{}\"", session.last_user_input));
-            let create_hit = has_creation_intent(&session.last_user_input);
-            let lower_db = session.last_user_input.to_lowercase();
-            let fix_hit = lower_db.starts_with("fix ")
-                || lower_db.starts_with("refactor ")
-                || lower_db.starts_with("rename ")
-                || lower_db.starts_with("delete ")
-                || lower_db.starts_with("remove ")
-                || lower_db.starts_with("optimize ")
-                || lower_db.starts_with("update ");
-            let is_q = lower_db.starts_with("what ")
-                || lower_db.starts_with("how ")
-                || lower_db.starts_with("why ")
-                || lower_db.starts_with("explain ");
-            let debug_intent =
-                ui::theme::paint_dim(&t, &format!("  has_creation_intent={create_hit}"));
-            let debug_fix =
-                ui::theme::paint_dim(&t, &format!("  fix_window={fix_hit}  is_question={is_q}"));
-            println!("{rail}");
-            println!("{rail} {intent_label} {intent_val}");
-            println!("{rail} {input_label} {input_val}");
-            println!("{rail} {debug_intent}");
-            println!("{rail} {debug_fix}");
-            println!("{rail}");
+            handle_why(&session);
             continue;
         }
 
