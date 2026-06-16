@@ -2,34 +2,17 @@
 //! Provides [`FileEntry`], [`ModelReply`], path resolution, file icons,
 //! text truncation, command sanitization, and related helpers.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::blocklist::looks_like_shell_command;
 use crate::parsing::{current_name_from_bold, extract_code_block, guess_filename};
 use crate::ui;
 
 // ── Constants ───────────────────────────────────────────────────────────────
-
-pub(crate) const BLOCKED_COMMAND_PATTERNS: [&str; 14] = [
-    "rm -rf /",
-    "rm -rf --no-preserve-root",
-    "rm -rf /*",
-    "mkfs",
-    "dd if=",
-    ":(){:|:&};:",
-    "shutdown",
-    "reboot",
-    "> /dev/sda",
-    "> /dev/nvme",
-    "chmod 777 /",
-    "wget http://",
-    "curl http://",
-    "sudo dd",
-];
 
 /// Compiled regex for `@filename` references in user input.
 pub(crate) static RE_AT_REF: LazyLock<Regex> =
@@ -241,191 +224,11 @@ fn file_icon_for(path: &str) -> &'static str {
     }
 }
 
-// ── Byte/string utilities ───────────────────────────────────────────────────
-
-/// Formats byte counts as human-readable strings (e.g., `1.5K`, `3.2M`).
-pub(crate) fn human_size(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{}", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
-    } else {
-        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
-
-/// Truncates a string to at most `max` bytes, preserving char boundaries.
-pub(crate) fn truncate_bytes(s: &str, max: usize) -> String {
-    if max == 0 || s.is_empty() {
-        return "[truncated]".to_string();
-    }
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end == 0 {
-        return "[truncated]".to_string();
-    }
-    format!("{}\n...[truncated]", &s[..end])
-}
-
-/// Truncates a string to at most `max_lines` lines.
-pub(crate) fn truncate_to_lines(s: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = s.lines().take(max_lines).collect();
-    let mut result = lines.join("\n");
-    if s.lines().count() > max_lines {
-        result.push_str("\n...[truncated]");
-    }
-    result
-}
-
-// ── Timestamp ───────────────────────────────────────────────────────────────
-
-/// Returns the current UTC timestamp as `YYYY-MM-DD HH:MM:SS`.
-pub(crate) fn format_timestamp() -> String {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = dur.as_secs();
-
-    let days = total_secs / 86400;
-    let time_secs = total_secs % 86400;
-    let hours = time_secs / 3600;
-    let minutes = (time_secs % 3600) / 60;
-    let seconds = time_secs % 60;
-
-    let mut y = 1970i64;
-    let mut d = days as i64;
-    loop {
-        let year_days = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
-            366
-        } else {
-            365
-        };
-        if d < year_days {
-            break;
-        }
-        d -= year_days;
-        y += 1;
-    }
-    let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let month_days = [
-        31u64,
-        if is_leap { 29 } else { 28 },
-        31,
-        30,
-        31,
-        30,
-        31,
-        31,
-        30,
-        31,
-        30,
-        31,
-    ];
-    let mut month = 1usize;
-    let mut day = d as u64;
-    for &md in &month_days {
-        if day < md {
-            break;
-        }
-        day -= md;
-        month += 1;
-    }
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        y,
-        month,
-        day + 1,
-        hours,
-        minutes,
-        seconds
-    )
-}
-
-// ── Command sanitization ────────────────────────────────────────────────────
-
-pub(crate) fn is_command_blocked(cmd: &str) -> bool {
-    let lower = cmd.to_lowercase();
-    if BLOCKED_COMMAND_PATTERNS.iter().any(|p| lower.contains(p)) {
-        return true;
-    }
-    let words: Vec<&str> = lower.split_whitespace().collect();
-    if words.len() >= 3
-        && (words[0] == "rm" || words[0] == "rmdir")
-        && words.iter().any(|w| {
-            *w == "/"
-                || w.starts_with('/')
-                    && w.len() < 6
-                    && w.chars()
-                        .all(|c| c.is_alphanumeric() || c == '/' || c == '*' || c == '.')
-        })
-    {
-        return true;
-    }
-    false
-}
-
-fn looks_like_shell_command(line: &str) -> bool {
-    let first = line.split_whitespace().next().unwrap_or_default();
-    matches!(
-        first,
-        "ls" | "pwd"
-            | "cd"
-            | "mkdir"
-            | "cp"
-            | "mv"
-            | "touch"
-            | "cat"
-            | "echo"
-            | "rm"
-            | "find"
-            | "grep"
-    )
-}
-
-pub(crate) fn sanitize_commands(cmds: &[String]) -> Vec<&str> {
-    let mut seen = BTreeMap::<String, ()>::new();
-    let mut out = Vec::new();
-    for cmd in cmds {
-        let key = cmd.trim().to_string();
-        if key.is_empty() || seen.contains_key(&key) {
-            continue;
-        }
-        seen.insert(key.clone(), ());
-        out.push(cmd.trim());
-    }
-    out
-}
-
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn blocks_dangerous_commands() {
-        assert!(is_command_blocked("rm -rf /tmp"));
-        assert!(is_command_blocked("shutdown now"));
-        assert!(!is_command_blocked("ls -la"));
-    }
-
-    #[test]
-    fn truncates_string() {
-        let out = truncate_bytes("abcdef", 3);
-        assert!(out.starts_with("abc"));
-    }
-
-    #[test]
-    fn command_sanitization_dedups() {
-        let input = vec![" ls ".to_string(), "ls".to_string(), "".to_string()];
-        let out = sanitize_commands(&input);
-        assert_eq!(out, vec!["ls"]);
-    }
 
     #[test]
     fn fallback_extracts_commands() {
@@ -482,13 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn human_size_works() {
-        assert_eq!(human_size(500), "500");
-        assert_eq!(human_size(2048), "2.0K");
-        assert_eq!(human_size(5_242_880), "5.0M");
-    }
-
-    #[test]
     fn extract_code_blocks_with_names_parses_multi_file() {
         let input = "### src/main.rs\n```rust\nfn main() {}\n```\n### src/lib.rs\n```rust\npub fn hello() {}\n```";
         let files = extract_code_blocks_with_names(input);
@@ -503,36 +299,5 @@ mod tests {
         let files = extract_code_blocks_with_names(input);
         assert!(!files.is_empty());
         assert_eq!(files[0].content, "fn main() {}");
-    }
-
-    #[test]
-    fn truncate_to_lines_limits_lines() {
-        let input = "line1\nline2\nline3\nline4";
-        let out = truncate_to_lines(input, 2);
-        assert_eq!(out.lines().count(), 3);
-        assert!(out.ends_with("[truncated]"));
-    }
-
-    #[test]
-    fn truncate_to_lines_passes_short() {
-        let input = "short";
-        let out = truncate_to_lines(input, 10);
-        assert_eq!(out, "short");
-    }
-
-    #[test]
-    fn format_timestamp_returns_valid_format() {
-        let ts = format_timestamp();
-        assert_eq!(ts.len(), 19);
-        assert!(ts.chars().nth(4) == Some('-'));
-        assert!(ts.chars().nth(7) == Some('-'));
-    }
-
-    #[test]
-    fn truncate_bytes_preserves_char_boundaries() {
-        let s = "Hell\u{00e9} world";
-        let out = truncate_bytes(s, 5);
-        assert_eq!(out, "Hell\n...[truncated]");
-        assert!(!out.contains('\u{00e9}'));
     }
 }

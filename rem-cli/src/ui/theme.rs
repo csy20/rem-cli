@@ -13,6 +13,12 @@ use std::sync::RwLock;
 
 const DEFAULT_THEME_NAME: &str = "GHOST";
 
+/// Returns true if NO_COLOR or CLICOLOR=0 is set (disables ANSI output).
+fn no_color() -> bool {
+    std::env::var("NO_COLOR").is_ok()
+        || std::env::var("CLICOLOR").map(|v| v == "0").unwrap_or(false)
+}
+
 /// Custom theme definition for loading from TOML files.
 #[derive(Debug, serde::Deserialize)]
 struct CustomThemeDef {
@@ -328,12 +334,20 @@ impl Theme {
     }
 
     /// Returns the ANSI foreground escape code for a named color field.
+    /// Returns empty string if NO_COLOR or CLICOLOR=0 is set.
     pub fn fg(&self, field: &str) -> &str {
+        if no_color() {
+            return "";
+        }
         self.fg_cache.get(field).map(|s| s.as_str()).unwrap_or("")
     }
 
     /// Returns the ANSI background escape code for a named color field.
+    /// Returns empty string if NO_COLOR or CLICOLOR=0 is set.
     pub fn bg(&self, field: &str) -> &str {
+        if no_color() {
+            return "";
+        }
         self.bg_cache.get(field).map(|s| s.as_str()).unwrap_or("")
     }
 }
@@ -408,7 +422,11 @@ pub const RESET: &str = "\x1b[0m";
 pub const BOLD: &str = "\x1b[1m";
 
 /// Paints text in a named theme color, optionally bold.
+/// Returns plain text when NO_COLOR or CLICOLOR=0 is set.
 pub fn paint(t: &Theme, field: &str, text: &str, bold: bool) -> String {
+    if no_color() {
+        return text.to_string();
+    }
     let mut out = String::with_capacity(text.len() + 16);
     out.push_str(t.fg(field));
     if bold {
@@ -420,7 +438,11 @@ pub fn paint(t: &Theme, field: &str, text: &str, bold: bool) -> String {
 }
 
 /// Paints text with foreground and background colors.
+/// Returns plain text when NO_COLOR or CLICOLOR=0 is set.
 pub fn paint_on(t: &Theme, fg_field: &str, bg_field: &str, text: &str, bold: bool) -> String {
+    if no_color() {
+        return text.to_string();
+    }
     let mut out = String::with_capacity(text.len() + 32);
     out.push_str(t.fg(fg_field));
     out.push_str(t.bg(bg_field));

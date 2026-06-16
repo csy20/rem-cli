@@ -48,9 +48,9 @@ impl SpinnerGuard {
     /// Stops the spinner and clears the line.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            h.abort();
-        }
+        // Signal graceful shutdown via AtomicBool instead of abort.
+        // The task will exit on its next tick (within 80ms).
+        self.handle.take();
         eprint!("\r{}\r", " ".repeat(60));
         let _ = io::stderr().flush();
     }

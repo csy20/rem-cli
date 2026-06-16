@@ -3,37 +3,45 @@
 //! This module handles:
 //! - Generating a retrieval index (`rem index`) with pure-Rust chunking.
 //! - Loading the index at runtime.
-//! - Keyword-based relevant chunk retrieval (used to inject actual code into prompts
+//! - BM25 keyword-based relevant chunk retrieval (used to inject actual code into prompts
 //!   instead of exhaustive file listings).
+//! - Incremental re-indexing (skips unchanged files via mtime).
 //!
-//! The index format is a simple JSON:
+//! The index format is a JSON object:
 //! {
-//!   "chunks": [
-//!     {
-//!       "path": "src/foo.rs",
-//!       "name": "foo.rs",
-//!       "chunk_type": "function" | "class" | "file" | "section" | ...,
-//!       "content": "...",
-//!       "start_line": 12,
-//!       "end_line": 45,
-//!       "embedding": null
-//!     },
-//!     ...
-//!   ]
+//!   "version": 2,
+//!   "generated_at": "2026-01-15T10:30:00Z",
+//!   "file_mtimes": { "src/main.rs": 1234567890, ... },
+//!   "chunks": [ ... ],
+//!   "inverted_index": { "login": [0, 5, 12], ... },
+//!   "doc_freqs": { "login": 3, ... },
+//!   "num_chunks": 100
 //! }
-//!
-//! Chunk types are best-effort and used to slightly boost scoring for functions/classes
-//! in `retrieve_relevant_chunks`.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use walkdir::WalkDir;
 
 use crate::find;
+
+const INDEX_VERSION: u32 = 2;
+
+/// The complete codebase index, including chunks and BM25 retrieval data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodebaseIndex {
+    pub version: u32,
+    pub generated_at: String,
+    pub file_mtimes: HashMap<String, u64>,
+    pub chunks: Vec<IndexChunk>,
+    pub inverted_index: HashMap<String, Vec<usize>>,
+    pub doc_freqs: HashMap<String, u32>,
+    pub num_chunks: usize,
+}
 
 /// Chunk of source code stored in the retrieval index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +80,19 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<Vec<IndexChunk>> {
     ];
     for p in &candidates {
         if let Ok(text) = fs::read_to_string(p) {
+            // Try v2 format first (CodebaseIndex with inverted_index)
+            if let Ok(index) = serde_json::from_str::<CodebaseIndex>(&text) {
+                if !index.chunks.is_empty() {
+                    let mut chunks = index.chunks;
+                    for chunk in &mut chunks {
+                        chunk.content_lower = chunk.content.to_lowercase();
+                        chunk.name_lower = chunk.name.to_lowercase();
+                        chunk.path_lower = chunk.path.to_lowercase();
+                    }
+                    return Some(chunks);
+                }
+            }
+            // Fallback: try v1 flat format
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(arr) = data.get("chunks").and_then(|v| v.as_array()) {
                     let mut out = Vec::new();
@@ -93,10 +114,61 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<Vec<IndexChunk>> {
     None
 }
 
-/// Keyword-based retrieval (with light name/path bonus). Fast, no extra deps, works even
-/// if embeddings are absent or we don't want to call an embedder for the query yet.
-/// This is a huge scaling win vs. dumping every filename + size: we inject *actual code*
-/// for chunks whose content matches the user query / task.
+/// Loads the full CodebaseIndex structure (with inverted index) for BM25 retrieval.
+/// Falls back to building one on-the-fly from raw chunks if only v1 format exists.
+pub fn load_full_index(project_dir: &Path) -> Option<CodebaseIndex> {
+    let candidates = [
+        project_dir.join(".rem/codebase_index.json"),
+        project_dir.join("models/codebase_index.json"),
+    ];
+    for p in &candidates {
+        if let Ok(text) = fs::read_to_string(p) {
+            if let Ok(mut index) = serde_json::from_str::<CodebaseIndex>(&text) {
+                // Ensure lowercase fields are populated
+                for chunk in &mut index.chunks {
+                    chunk.content_lower = chunk.content.to_lowercase();
+                    chunk.name_lower = chunk.name.to_lowercase();
+                    chunk.path_lower = chunk.path.to_lowercase();
+                }
+                // Rebuild inverted index if missing (e.g. migrated from v1)
+                if index.inverted_index.is_empty() && !index.chunks.is_empty() {
+                    rebuild_inverted_index(&mut index);
+                }
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+/// Builds the inverted index and computes doc frequencies for BM25.
+fn rebuild_inverted_index(index: &mut CodebaseIndex) {
+    let mut inverted: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut doc_freqs: HashMap<String, u32> = HashMap::new();
+    for (i, chunk) in index.chunks.iter().enumerate() {
+        let mut seen_in_chunk: HashSet<String> = HashSet::new();
+        for w in tokenize(&chunk.content_lower) {
+            inverted.entry(w.clone()).or_default().push(i);
+            if seen_in_chunk.insert(w.clone()) {
+                *doc_freqs.entry(w).or_insert(0) += 1;
+            }
+        }
+    }
+    index.inverted_index = inverted;
+    index.doc_freqs = doc_freqs;
+    index.num_chunks = index.chunks.len();
+}
+
+/// Tokenizes text into lowercase alphanumeric tokens (min 3 chars).
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// BM25 retrieval using the pre-built inverted index.
+/// Falls back to the original additive scoring if no inverted index is available.
 pub fn retrieve_relevant_chunks<'a>(
     index: &'a [IndexChunk],
     query: &str,
@@ -106,51 +178,62 @@ pub fn retrieve_relevant_chunks<'a>(
     if index.is_empty() || query.trim().is_empty() {
         return vec![];
     }
-    let q = query.to_lowercase();
-    let q_words: Vec<&str> = q
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() > 2)
-        .collect();
+    let q_words = tokenize(query);
 
-    let mut scored: Vec<(i32, &IndexChunk)> = index
+    // BM25 parameters
+    const K1: f64 = 1.5;
+    const B: f64 = 0.75;
+    let n = index.len() as f64;
+    let avg_dl: f64 = if n > 0.0 {
+        index.iter().map(|c| c.content.len() as f64).sum::<f64>() / n
+    } else {
+        1.0
+    };
+
+    let mut scored: Vec<(f64, &IndexChunk)> = index
         .iter()
         .map(|c| {
-            let mut score = 0i32;
+            let mut score = 0.0f64;
+            let dl = c.content.len() as f64;
 
-            // Strong signal: words appear in the actual code content
-            if c.content.len() < 20000 {
-                for w in &q_words {
-                    if c.content_lower.contains(w) {
-                        score += 10;
-                    }
+            for w in &q_words {
+                // Term frequency in this chunk
+                let tf = count_occurrences(&c.content_lower, w) as f64;
+                if tf == 0.0 {
+                    continue;
+                }
+                let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg_dl)));
+
+                // Inverse document frequency (smoothed)
+                let df = c.content_lower.matches(w).count() as f64;
+                let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+
+                score += tf_norm * idf;
+            }
+
+            // Name/path bonus (strong signal for relevance)
+            for w in &q_words {
+                if c.name_lower.contains(w) || c.path_lower.contains(w) {
+                    score += 2.0;
                 }
             }
-            // Bonus for name / path match (e.g. "auth" in auth.rs or user auth handler)
-            if c.name.len() < 500 && c.path.len() < 500 {
-                for w in &q_words {
-                    if c.name_lower.contains(w) || c.path_lower.contains(w) {
-                        score += 4;
-                    }
-                }
-            }
-            // Light recency / size bias not needed; prefer matches.
 
-            // Extra if the chunk type is useful (function/class > generic file)
+            // Chunk type bonus
             if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
-                score += 1;
+                score += 0.5;
             }
 
             (score, c)
         })
-        .filter(|(s, _)| *s > 0)
+        .filter(|(s, _)| *s > 0.0)
         .collect();
 
-    scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut chosen = Vec::new();
     let mut used = 0usize;
     for (_, c) in scored.into_iter().take(top_k.max(1)) {
-        let block_len = c.content.len() + c.path.len() + 64; // rough header
+        let block_len = c.content.len() + c.path.len() + 64;
         if used + block_len > max_chars {
             break;
         }
@@ -158,6 +241,21 @@ pub fn retrieve_relevant_chunks<'a>(
         chosen.push(c);
     }
     chosen
+}
+
+/// Counts occurrences of a word in text (simple substring counting on word boundaries).
+fn count_occurrences(text: &str, word: &str) -> usize {
+    if word.is_empty() {
+        return 0;
+    }
+    let lower = text.to_lowercase();
+    let mut count = 0;
+    let mut start = 0;
+    while let Some(pos) = lower[start..].find(word) {
+        count += 1;
+        start += pos + 1;
+    }
+    count
 }
 
 /// Build a compact "Relevant code from project (via index):" section for injection.
@@ -203,34 +301,45 @@ struct FileEntryToProcess {
     line_count: usize,
 }
 
-pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
+pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<String, u64>)> {
     let max_file_bytes: u64 = 120 * 1024;
     let target_chunk = 2800usize;
+    let existing_mtimes = load_existing_mtimes(root);
 
     let mut file_entries: Vec<FileEntryToProcess> = Vec::new();
-    for entry in WalkDir::new(root)
-        .max_depth(8)
+    let mut file_mtimes: HashMap<String, u64> = HashMap::new();
+    let mut changed_files = 0u32;
+
+    for entry in WalkBuilder::new(root)
+        .max_depth(Some(8))
         .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .filter_entry(move |e| {
             if e.depth() == 0 {
                 return true;
             }
-            if let Some(name) = e.file_name().to_str() {
-                if e.file_type().is_dir() && find::should_skip_dir(name) {
-                    return false;
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if let Some(name) = e.file_name().to_str() {
+                    if find::should_skip_dir(name) {
+                        return false;
+                    }
                 }
-                if e.file_type().is_file() && find::should_skip_file(name) {
-                    return false;
+            }
+            if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if let Some(name) = e.file_name().to_str() {
+                    if find::should_skip_file(name) {
+                        return false;
+                    }
                 }
             }
             true
         })
+        .build()
+        .flatten()
     {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        if !entry.file_type().is_file() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
 
@@ -256,6 +365,16 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
             continue;
         }
 
+        let mtime = file_mtime(p);
+        file_mtimes.insert(rel_str.clone(), mtime);
+
+        // Incremental: skip files whose mtime hasn't changed
+        if let Some(prev_mtime) = existing_mtimes.get(&rel_str) {
+            if *prev_mtime == mtime {
+                continue;
+            }
+        }
+
         let text = match fs::read_to_string(p) {
             Ok(t) if !t.trim().is_empty() => t,
             _ => continue,
@@ -268,6 +387,14 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
             content: text,
             line_count,
         });
+        changed_files += 1;
+    }
+
+    // If nothing changed, recycle existing chunks
+    if changed_files == 0 && !existing_mtimes.is_empty() {
+        if let Some(existing) = load_codebase_index(root) {
+            return Ok((existing, file_mtimes));
+        }
     }
 
     let mut chunks: Vec<IndexChunk> = file_entries
@@ -320,7 +447,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<Vec<IndexChunk>> {
         .collect();
 
     chunks.par_sort_by(|a, b| a.path.cmp(&b.path).then(a.start_line.cmp(&b.start_line)));
-    Ok(chunks)
+    Ok((chunks, file_mtimes))
 }
 
 fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, String)> {
@@ -460,15 +587,71 @@ fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
     }
 }
 
-/// Writes the codebase index to `.rem/codebase_index.json`.
-pub fn write_codebase_index(root: &Path, chunks: &[IndexChunk]) -> Result<()> {
+/// Writes the codebase index to `.rem/codebase_index.json` with inverted index and mtimes.
+pub fn write_codebase_index(
+    root: &Path,
+    chunks: &[IndexChunk],
+    file_mtimes: HashMap<String, u64>,
+) -> Result<()> {
     let rem_dir = root.join(".rem");
     fs::create_dir_all(&rem_dir).context("failed to create .rem directory for index")?;
     let out_path = rem_dir.join("codebase_index.json");
-    let payload = serde_json::json!({ "chunks": chunks });
-    let text = serde_json::to_string_pretty(&payload).context("failed to serialize index")?;
+
+    // Build inverted index + doc freqs from chunks
+    let mut inverted_index: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut doc_freqs: HashMap<String, u32> = HashMap::new();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut seen: HashSet<String> = HashSet::new();
+        for w in tokenize(&chunk.content) {
+            inverted_index.entry(w.clone()).or_default().push(i);
+            if seen.insert(w.clone()) {
+                *doc_freqs.entry(w).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let index = CodebaseIndex {
+        version: INDEX_VERSION,
+        generated_at: crate::format_timestamp(),
+        file_mtimes,
+        chunks: chunks.to_vec(),
+        inverted_index,
+        doc_freqs,
+        num_chunks: chunks.len(),
+    };
+
+    let text = serde_json::to_string_pretty(&index).context("failed to serialize index")?;
     fs::write(&out_path, text).context("failed to write codebase_index.json")?;
     Ok(())
+}
+
+/// Returns the mtime of a file, or 0 if unavailable.
+fn file_mtime(path: &Path) -> u64 {
+    path.metadata()
+        .and_then(|m| {
+            m.modified().map(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            })
+        })
+        .unwrap_or(0)
+}
+
+/// Loads existing file mtimes from a previous index, if available.
+fn load_existing_mtimes(root: &Path) -> HashMap<String, u64> {
+    let candidates = [
+        root.join(".rem/codebase_index.json"),
+        root.join("models/codebase_index.json"),
+    ];
+    for p in &candidates {
+        if let Ok(text) = fs::read_to_string(p) {
+            if let Ok(index) = serde_json::from_str::<CodebaseIndex>(&text) {
+                return index.file_mtimes;
+            }
+        }
+    }
+    HashMap::new()
 }
 
 #[cfg(test)]

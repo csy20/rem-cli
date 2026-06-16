@@ -2,6 +2,10 @@
 //! Iteratively generates code, runs lint/tests, and feeds results back to
 //! the LLM until the goal is achieved or max iterations are reached.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::time::Duration;
+
 use crate::agentic::{
     build_agentic_prompt, build_tool_context, extract_goal_signal, format_tool_output, run_lint,
     run_test,
@@ -11,6 +15,15 @@ use crate::parsing::extract_code_block;
 use crate::provider::Provider;
 use crate::ui;
 use crate::{extract_code_blocks_with_names, CHAT_SYSTEM_PROMPT_CODE};
+
+const MAX_TOOL_OUTPUT_LEN: usize = 2000;
+const ITERATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn circuit_breaker_hash(output: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    output.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, condition: &str) {
     let t = ui::theme::active();
@@ -40,6 +53,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
 
     let max_iter = 10;
     let mut last_tool_output = String::new();
+    let mut last_tool_hash: u64 = 0;
     let mut last_written_files: Vec<String> = Vec::new();
 
     for i in 0..max_iter {
@@ -60,98 +74,108 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
             build_agentic_prompt(&goal_prompt_text, &last_tool_output, i, max_iter)
         };
 
-        match client
-            .complete_chat_stream(&prompt, CHAT_SYSTEM_PROMPT_CODE, "")
-            .await
-        {
-            Ok(text) => {
-                let cleaned = text.trim().to_string();
-                session
-                    .history
-                    .push((format!("/goal {}", condition), cleaned.clone()));
+        let result = tokio::time::timeout(
+            ITERATION_TIMEOUT,
+            client.complete_chat_stream(&prompt, CHAT_SYSTEM_PROMPT_CODE, ""),
+        )
+        .await;
 
-                let files = extract_code_blocks_with_names(&cleaned);
-                let code = extract_code_block(&cleaned);
-                if !files.is_empty() {
-                    session.last_files = files.clone();
-                    session.last_code = if code.is_empty() { String::new() } else { code };
-                    crate::commands::auto_write_files(session, &files);
-                    last_written_files = files.iter().map(|f| f.path.clone()).collect();
-                } else if !code.is_empty() {
-                    session.last_code = code;
-                    session.last_files.clear();
-                    println!(
-                        "{} {} use /write <path> to save",
-                        ui::theme::paint(&t, "accent", "\u{258C}", true),
-                        ui::theme::paint_dim(&t, "code detected —")
-                    );
-                }
-
-                if let Some((achieved, msg)) = extract_goal_signal(&cleaned) {
-                    if achieved {
-                        println!(
-                            "{} {} goal achieved! {}",
-                            ui::theme::paint_success_label(&t, "\u{258C}"),
-                            ui::theme::paint_success_label(&t, "\u{2713}"),
-                            msg
-                        );
-                    } else {
-                        println!(
-                            "{} {} {}",
-                            ui::theme::paint_warning(&t, "\u{258C}"),
-                            ui::theme::paint_warning(&t, "!"),
-                            msg
-                        );
-                    }
-                    break;
-                }
-
-                if cleaned.contains("GOAL_ACHIEVED") {
-                    println!(
-                        "{} {} goal achieved!",
-                        ui::theme::paint_success_label(&t, "\u{258C}"),
-                        ui::theme::paint_success_label(&t, "\u{2713}")
-                    );
-                    break;
-                }
-                if cleaned.contains("GOAL_FAILED") {
-                    println!(
-                        "{} {} goal could not be achieved.",
-                        ui::theme::paint_warning(&t, "\u{258C}"),
-                        ui::theme::paint_warning(&t, "!")
-                    );
-                    break;
-                }
-
-                if !last_written_files.is_empty() {
-                    let mut tool_results = String::new();
-                    for file_path in &last_written_files {
-                        let lint_result = run_lint(file_path);
-                        println!("{}", format_tool_output(&lint_result));
-
-                        let test_result = run_test(file_path);
-                        if !test_result.stderr.is_empty() || !test_result.stdout.is_empty() {
-                            println!("{}", format_tool_output(&test_result));
-                        }
-
-                        tool_results.push_str(&build_tool_context(
-                            Some(&lint_result),
-                            Some(&test_result),
-                            None,
-                        ));
-                    }
-                    last_tool_output = tool_results;
-                }
-            }
-            Err(e) => {
+        let text = match result {
+            Ok(Ok(text)) => text,
+            Ok(Err(e)) => {
                 println!(
-                    "{} {} error: {}",
+                    "{} {} {}",
                     ui::theme::paint_error_label(&t, "\u{258C}"),
                     ui::theme::paint_error_label(&t, "\u{2717}"),
                     e
                 );
                 break;
             }
+            Err(_) => {
+                println!(
+                    "{} {} iteration timed out after 120s",
+                    ui::theme::paint_warning(&t, "\u{258C}"),
+                    ui::theme::paint_warning(&t, "\u{23F3}")
+                );
+                break;
+            }
+        };
+
+        let cleaned = text.trim().to_string();
+        session
+            .history
+            .push((format!("/goal {}", condition), cleaned.clone()));
+
+        let files = extract_code_blocks_with_names(&cleaned);
+        let code = extract_code_block(&cleaned);
+        if !files.is_empty() {
+            session.last_files = files.clone();
+            session.last_code = if code.is_empty() { String::new() } else { code };
+            crate::commands::auto_write_files(session, &files);
+            last_written_files = files.iter().map(|f| f.path.clone()).collect();
+        } else if !code.is_empty() {
+            session.last_code = code;
+            session.last_files.clear();
+            println!(
+                "{} {} use /write <path> to save",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "code detected \u{2014}")
+            );
+        }
+
+        if let Some((achieved, msg)) = extract_goal_signal(&cleaned) {
+            if achieved {
+                println!(
+                    "{} {} goal achieved! {}",
+                    ui::theme::paint_success_label(&t, "\u{258C}"),
+                    ui::theme::paint_success_label(&t, "\u{2713}"),
+                    msg
+                );
+            } else {
+                println!(
+                    "{} {} {}",
+                    ui::theme::paint_warning(&t, "\u{258C}"),
+                    ui::theme::paint_warning(&t, "!"),
+                    msg
+                );
+            }
+            break;
+        }
+
+        if !last_written_files.is_empty() {
+            let mut tool_results = String::new();
+            for file_path in &last_written_files {
+                let lint_result = run_lint(file_path);
+                println!("{}", format_tool_output(&lint_result));
+
+                let test_result = run_test(file_path);
+                if !test_result.stderr.is_empty() || !test_result.stdout.is_empty() {
+                    println!("{}", format_tool_output(&test_result));
+                }
+
+                tool_results.push_str(&build_tool_context(
+                    Some(&lint_result),
+                    Some(&test_result),
+                    None,
+                ));
+            }
+
+            let new_hash = circuit_breaker_hash(&tool_results);
+            if new_hash == last_tool_hash && !tool_results.is_empty() {
+                println!(
+                    "{} {} circuit breaker: same results as previous iteration, stopping",
+                    ui::theme::paint_warning(&t, "\u{258C}"),
+                    ui::theme::paint_warning(&t, "!")
+                );
+                break;
+            }
+            last_tool_hash = new_hash;
+
+            if tool_results.len() > MAX_TOOL_OUTPUT_LEN {
+                tool_results.truncate(MAX_TOOL_OUTPUT_LEN);
+                tool_results.push_str("\n... [truncated]");
+            }
+            last_tool_output = tool_results;
         }
     }
     println!("{}", ui::theme::paint_rail_empty(&t));

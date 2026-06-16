@@ -23,6 +23,8 @@ tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "signal"] }
 toml = "0.8"
 walkdir = "2.5"
 rayon = "1.10"
+ignore = "0.4"
+similar = "2.5"
 
 [dev-dependencies]
 wiremock = "0.6"

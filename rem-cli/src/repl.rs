@@ -7,10 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::chat::{
-    build_prompt, language_specific_guidance, print_welcome, validate_chat_response, ChatSession,
-    RunMode,
-};
+use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
 use crate::commands::{
     auto_write_files, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy,
@@ -25,6 +22,9 @@ use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskInte
 use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
+use crate::session_io::{
+    build_prompt, language_specific_guidance, print_welcome, validate_chat_response,
+};
 use crate::token_count::estimate_tokens;
 use crate::ui;
 use crate::ui::output::SpinnerGuard;
@@ -67,6 +67,458 @@ fn initialize_session(client: &Provider, cfg: &mut AppConfig) -> Result<ChatSess
     Ok(session)
 }
 
+/// Reads a single line of input from the user with Ctrl+C handling and error recovery.
+/// Returns `None` if the user double-pressed Ctrl+C (signals exit).
+fn read_user_input(
+    session: &mut ChatSession,
+    prompt: &str,
+    t: &crate::ui::theme::Theme,
+) -> Option<String> {
+    let mut error_count = 0u8;
+    loop {
+        let line = session.readline(prompt);
+        match line {
+            Ok(s) => {
+                crate::CTRL_C_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+                crate::SHOULD_EXIT.store(false, std::sync::atomic::Ordering::SeqCst);
+                return Some(s);
+            }
+            Err(e) => {
+                if e.kind() == io::ErrorKind::Interrupted
+                    || e.kind() == io::ErrorKind::UnexpectedEof
+                {
+                    let count =
+                        crate::CTRL_C_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if count >= 2 || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
+                        println!(
+                            "  {} Ctrl+C pressed twice -- bye!",
+                            ui::theme::paint_dim(t, "!")
+                        );
+                        session.feedback.flush();
+                        session.save_history();
+                        session.auto_save_session();
+                        return None;
+                    }
+                    crate::provider::STREAM_CANCELLED
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    println!(
+                        "  {} press Ctrl+C again to exit",
+                        ui::theme::paint_dim(t, "!")
+                    );
+                    continue;
+                }
+                eprintln!(
+                    "  {} input error: {}",
+                    ui::theme::paint_error_label(t, "err:"),
+                    e
+                );
+                error_count += 1;
+                if error_count >= 3 {
+                    eprintln!(
+                        "  {} too many errors, exiting",
+                        ui::theme::paint_error_label(t, "err:")
+                    );
+                    return None;
+                }
+                continue;
+            }
+        }
+    }
+}
+
+/// Dispatches a recognized slash command to the appropriate handler.
+/// Returns `true` if the program should exit, `false` to continue the loop.
+/// For non-command input (or unrecognized commands), returns `false` and
+/// the caller should proceed with the LLM call.
+async fn dispatch_slash_command(
+    trimmed: &str,
+    session: &mut ChatSession,
+    client: &mut Provider,
+    cfg: &mut AppConfig,
+    t: &crate::ui::theme::Theme,
+) -> bool {
+    let reg = crate::commands::registry();
+    let (name, args) = reg.parse(trimmed);
+
+    if !reg.is_command(trimmed) {
+        return false; // not a command, continue to LLM
+    }
+
+    // Handle exit/quit specially
+    if name == "exit" || name == "quit" {
+        println!("  {}", ui::theme::paint_dim(t, "bye!"));
+        session.feedback.flush();
+        session.save_history();
+        session.auto_save_session();
+        return true;
+    }
+
+    // Sync commands
+    match name {
+        "/help" | "help" => {
+            print_chat_help();
+            return false;
+        }
+        "/theme" => {
+            handle_theme(cfg, if args.is_empty() { None } else { Some(args) });
+            return false;
+        }
+        "/model" => {
+            handle_model(client, cfg, if args.is_empty() { None } else { Some(args) });
+            return false;
+        }
+        "/provider" => {
+            handle_provider(client, cfg, if args.is_empty() { None } else { Some(args) });
+            return false;
+        }
+        "/write" => {
+            handle_write(session, args);
+            return false;
+        }
+        "/save" if !args.is_empty() => {
+            handle_write(session, args);
+            return false;
+        }
+        "/dir" => {
+            handle_dir(session, args);
+            return false;
+        }
+        "/code" => {
+            print_last_files(session);
+            return false;
+        }
+        "/undo" => {
+            handle_undo(session);
+            return false;
+        }
+        "/files" => {
+            handle_list_files(session);
+            return false;
+        }
+        "/mode" => {
+            handle_mode(session, cfg);
+            return false;
+        }
+        "/plan" => {
+            handle_plan(session, cfg);
+            return false;
+        }
+        "/clear" => {
+            handle_clear(session);
+            return false;
+        }
+        "/config" => {
+            if args.is_empty() {
+                handle_config(session, client);
+            } else {
+                handle_config_set(session, client, args);
+            }
+            return false;
+        }
+        "/diff" => {
+            handle_diff(session);
+            return false;
+        }
+        "/tokens" => {
+            handle_tokens(session);
+            return false;
+        }
+        "/memory" => {
+            if args.is_empty() {
+                handle_memory(session);
+            } else {
+                handle_memory_set(session, args);
+            }
+            return false;
+        }
+        "/init" => {
+            handle_init(session);
+            return false;
+        }
+        "/reset" => {
+            handle_reset(session);
+            return false;
+        }
+        "/why" => {
+            handle_why(session);
+            return false;
+        }
+        "/resume" => {
+            handle_resume_session(session);
+            return false;
+        }
+        "/copy" => {
+            let n: usize = args.parse().unwrap_or(1);
+            handle_copy(session, n);
+            return false;
+        }
+        "/lint" => {
+            if args.is_empty() {
+                if session.last_files.is_empty() && session.last_files_written.is_empty() {
+                    println!(
+                        "{} no files to lint. Generate code first.",
+                        ui::theme::paint_warning(t, "│")
+                    );
+                } else {
+                    let paths: Vec<String> = if !session.last_files_written.is_empty() {
+                        session
+                            .last_files_written
+                            .iter()
+                            .map(|p| p.path.display().to_string())
+                            .collect()
+                    } else {
+                        session
+                            .last_files
+                            .iter()
+                            .filter(|f| !f.path.is_empty())
+                            .map(|f| f.path.clone())
+                            .collect()
+                    };
+                    for p in paths {
+                        handle_lint(session, &p);
+                    }
+                }
+            } else {
+                handle_lint(session, args);
+            }
+            return false;
+        }
+        "/find" => {
+            if args.is_empty() {
+                let rail = ui::theme::paint_rail_empty(t);
+                let usage = ui::theme::paint_bright(t, "usage: /find <query>");
+                let detail = ui::theme::paint_dim(
+                    t,
+                    "search text inside the project (skips node_modules, target, .git, ...)",
+                );
+                println!("{rail}");
+                println!("{rail} {usage}");
+                println!("{rail}  {detail}");
+                println!("{rail}");
+            } else {
+                handle_find(session, args);
+            }
+            return false;
+        }
+        _ => {}
+    }
+
+    // `/save` (no args) — save session
+    if name == "/save" {
+        handle_save_session(session);
+        return false;
+    }
+
+    // Async commands (require .await)
+    match name {
+        "/search" => {
+            handle_search(client, session, args).await;
+            false
+        }
+        "/explain" => {
+            handle_explain(client, session, args).await;
+            false
+        }
+        "/test" => {
+            handle_test(client, session, args).await;
+            false
+        }
+        "/refactor" => {
+            handle_refactor(client, session, args).await;
+            false
+        }
+        "/review" => {
+            handle_review(client, session).await;
+            false
+        }
+        "/compact" => {
+            handle_compact(client, session).await;
+            false
+        }
+        "/goal" => {
+            handle_goal(client, session, args).await;
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Builds the full LLM prompt from all context sources.
+fn build_llm_prompt(
+    session: &mut ChatSession,
+    trimmed: &str,
+    intent: &TaskIntent,
+) -> (String, String) {
+    let instruction = intent_instruction(intent);
+
+    let needs_path = (session.mode == RunMode::Code || *intent == TaskIntent::CodeAction)
+        && !has_file_path(trimmed);
+    let final_prompt = if needs_path {
+        session.add_history(trimmed);
+        let path = prompt_for_path(session).unwrap_or_else(|_| trimmed.to_string());
+        format!("User request: {}\n\nSave file at: {}", trimmed, path)
+    } else {
+        session.add_history(trimmed);
+        if let Some(ref dir) = session.project_dir {
+            format!(
+                "User request: {}\n\nWorking directory: {}",
+                trimmed,
+                dir.display()
+            )
+        } else {
+            format!("User request: {}", trimmed)
+        }
+    };
+
+    let search_ctx = session.build_search_context();
+    let history_ctx = session.build_chat_history();
+    let memory_ctx = session.build_memory_context();
+    let (resolved_input, at_context) = session.resolve_at_references(&final_prompt);
+    let project_ctx = session.build_relevant_project_context(&resolved_input);
+
+    let last_code_ctx = build_last_code_context(session, trimmed);
+
+    let full_prompt = {
+        let mut p = instruction.to_string();
+        p.push('\n');
+        if !memory_ctx.is_empty() {
+            p.push_str(&memory_ctx);
+        }
+        if !project_ctx.is_empty() {
+            p.push_str(&project_ctx);
+        }
+        if !last_code_ctx.is_empty() {
+            p.push_str(&last_code_ctx);
+        }
+        if !at_context.is_empty() {
+            p.push_str(&at_context);
+        }
+        p.push_str(&resolved_input);
+        if !search_ctx.is_empty() {
+            p.push_str(&search_ctx);
+        }
+        p
+    };
+
+    (full_prompt, history_ctx)
+}
+
+/// Builds the "last generated code/files" context for follow-up requests.
+fn build_last_code_context(session: &ChatSession, trimmed: &str) -> String {
+    if session.last_code.is_empty() && session.last_files.is_empty() {
+        return String::new();
+    }
+    let mod_triggers = [
+        "add",
+        "update",
+        "change",
+        "modify",
+        "edit",
+        "append",
+        "improve",
+        "enhance",
+        "refactor",
+        "rewrite",
+        "transform",
+        "convert",
+        "extend",
+        "expand",
+    ];
+    let lower_in = trimmed.to_lowercase();
+    if !mod_triggers
+        .iter()
+        .any(|t| lower_in.starts_with(t) || lower_in.contains(&format!(" {} ", t)))
+        && !lower_in.contains("also")
+        && !lower_in.contains("and then")
+        && !lower_in.contains("more")
+    {
+        return String::new();
+    }
+
+    let mut ctx = String::new();
+    if !session.last_code.is_empty() {
+        let truncated = crate::truncate_bytes(&session.last_code, 6000);
+        ctx = format!(
+            "\n[Last generated code (for reference)]:\n```\n{}\n```\n",
+            truncated
+        );
+    }
+    if !session.last_files.is_empty() {
+        let mut files_ctx = String::from("\n[Last generated files]:\n");
+        for f in &session.last_files {
+            if !f.path.is_empty() {
+                let truncated = crate::truncate_bytes(&f.content, 3000);
+                files_ctx.push_str(&format!("\n### {}\n```\n{}\n```\n", f.path, truncated));
+            }
+        }
+        ctx.push_str(&files_ctx);
+    }
+    ctx
+}
+
+/// Processes the LLM response: validates, displays, and updates session state.
+#[allow(clippy::too_many_arguments)]
+fn handle_llm_response(
+    session: &mut ChatSession,
+    trimmed: &str,
+    text: String,
+    intent: &TaskIntent,
+    elapsed: std::time::Duration,
+    client: &Provider,
+    verbose: bool,
+    t: &crate::ui::theme::Theme,
+) {
+    if verbose {
+        eprintln!(
+            "\n  {} raw response:\n{}\n",
+            ui::theme::paint_dim(t, "verbose:"),
+            text
+        );
+    }
+
+    let (was_validated, validated_text) = validate_chat_response(&text, intent, &session.mode);
+    let cleaned = if was_validated && session.mode != RunMode::Code {
+        let warn = ui::theme::paint_warning(t, "\u{258C}");
+        let note = ui::theme::paint_dim(
+            t,
+            "(response contained unexpected code \u{2014} showing text only)",
+        );
+        println!("{warn} {note}");
+        validated_text
+    } else {
+        text.trim().to_string()
+    };
+
+    session.last_tokens = estimate_tokens(&cleaned) as u32;
+
+    let treat_as_code = *intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
+    if treat_as_code {
+        display_code_files(session, &cleaned, t);
+    } else if cleaned.is_empty() {
+        println!(
+            "{} {}",
+            ui::theme::paint_warning(t, "\u{258C}"),
+            ui::theme::paint_dim(t, "(empty response)")
+        );
+    } else {
+        display_text_output(&cleaned, t);
+    }
+
+    display_performance_stats(client, session, elapsed, t);
+
+    if !cleaned.is_empty() {
+        session.history.push((trimmed.to_string(), cleaned));
+        if session.history.len() > 12 {
+            session.history.remove(0);
+        }
+        session.messages_since_save += 1;
+        if session.messages_since_save >= 5 {
+            session.auto_save_session();
+            session.messages_since_save = 0;
+        }
+    }
+}
+
 /// Main interactive REPL loop: reads user input, dispatches slash commands,
 /// calls the LLM, and manages conversation history.
 pub(crate) async fn run_chat(
@@ -81,57 +533,15 @@ pub(crate) async fn run_chat(
     loop {
         crate::provider::STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
         let prompt = build_prompt(&session, client);
-        let mut error_count = 0u8;
-        let line = loop {
-            let line = session.readline(&prompt);
-            match line {
-                Ok(s) => break s,
-                Err(e) => {
-                    if e.kind() == io::ErrorKind::Interrupted
-                        || e.kind() == io::ErrorKind::UnexpectedEof
-                    {
-                        let count = crate::CTRL_C_COUNT
-                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                            + 1;
-                        if count >= 2
-                            || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst)
-                        {
-                            println!(
-                                "  {} Ctrl+C pressed twice -- bye!",
-                                ui::theme::paint_dim(&t, "!")
-                            );
-                            session.feedback.flush();
-                            session.save_history();
-                            session.auto_save_session();
-                            return Ok(());
-                        }
-                        crate::provider::STREAM_CANCELLED
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
-                        println!(
-                            "  {} press Ctrl+C again to exit",
-                            ui::theme::paint_dim(&t, "!")
-                        );
-                        continue;
-                    }
-                    eprintln!(
-                        "  {} input error: {}",
-                        ui::theme::paint_error_label(&t, "err:"),
-                        e
-                    );
-                    error_count += 1;
-                    if error_count >= 3 {
-                        eprintln!(
-                            "  {} too many errors, exiting",
-                            ui::theme::paint_error_label(&t, "err:")
-                        );
-                        return Ok(());
-                    }
-                    continue;
-                }
+
+        let line = match read_user_input(&mut session, &prompt, &t) {
+            Some(l) => l,
+            None => {
+                session.feedback.flush();
+                return Ok(());
             }
         };
-        crate::CTRL_C_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
-        crate::SHOULD_EXIT.store(false, std::sync::atomic::Ordering::SeqCst);
+
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -145,269 +555,21 @@ pub(crate) async fn run_chat(
             continue;
         }
 
-        if trimmed.eq_ignore_ascii_case("exit") || trimmed.eq_ignore_ascii_case("quit") {
-            println!("  {}", ui::theme::paint_dim(&t, "bye!"));
-            session.feedback.flush();
-            session.save_history();
-            session.auto_save_session();
+        let handled = dispatch_slash_command(trimmed, &mut session, client, cfg, &t).await;
+        if handled {
+            // "exit" or "quit" triggered a break
             break;
         }
-
-        if trimmed.eq_ignore_ascii_case("/help") || trimmed.eq_ignore_ascii_case("help") {
-            print_chat_help();
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/theme") {
-            handle_theme(cfg, None);
-            continue;
-        }
-        if let Some(tail) = trimmed.strip_prefix("/theme ") {
-            handle_theme(cfg, Some(tail));
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/model ") {
-            handle_model(client, cfg, Some(tail));
-            continue;
-        }
-        if trimmed.eq_ignore_ascii_case("/model") {
-            handle_model(client, cfg, None);
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/provider ") {
-            handle_provider(client, cfg, Some(tail));
-            continue;
-        }
-        if trimmed.eq_ignore_ascii_case("/provider") {
-            handle_provider(client, cfg, None);
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/write ") {
-            handle_write(&mut session, tail);
-            continue;
-        }
-        if let Some(tail) = trimmed.strip_prefix("/save ") {
-            handle_write(&mut session, tail);
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/dir ") {
-            handle_dir(&mut session, tail);
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/search ") {
-            handle_search(client, &mut session, tail.trim()).await;
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/explain ") {
-            handle_explain(client, &mut session, tail.trim()).await;
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/test ") {
-            handle_test(client, &mut session, tail.trim()).await;
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/refactor ") {
-            handle_refactor(client, &mut session, tail.trim()).await;
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/code") {
-            print_last_files(&session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/undo") {
-            handle_undo(&mut session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/files") {
-            handle_list_files(&session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/mode") {
-            handle_mode(&mut session, cfg);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/plan") {
-            handle_plan(&mut session, cfg);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/clear") {
-            handle_clear(&mut session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/config") {
-            handle_config(&session, client);
-            continue;
-        }
-        if let Some(tail) = trimmed.strip_prefix("/config ") {
-            handle_config_set(&mut session, client, tail.trim());
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/diff") {
-            handle_diff(&session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/tokens") {
-            handle_tokens(&session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/memory") {
-            handle_memory(&session);
-            continue;
-        }
-        if let Some(tail) = trimmed.strip_prefix("/memory ") {
-            handle_memory_set(&mut session, tail.trim());
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/init") {
-            handle_init(&mut session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/compact") {
-            handle_compact(client, &mut session).await;
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/reset") {
-            handle_reset(&mut session);
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/goal ") {
-            handle_goal(client, &mut session, tail.trim()).await;
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/copy") || trimmed == "/copy 1" {
-            handle_copy(&session, 1);
-            continue;
-        }
-        if let Some(tail) = trimmed.strip_prefix("/copy ") {
-            if let Ok(n) = tail.trim().parse::<usize>() {
-                handle_copy(&session, n);
-            } else {
-                println!(
-                    "{} usage: /copy [N] — N is a number",
-                    ui::theme::paint_warning(&t, "│")
-                );
-            }
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/lint ") {
-            handle_lint(&mut session, tail.trim());
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/lint") {
-            if session.last_files.is_empty() && session.last_files_written.is_empty() {
-                println!(
-                    "{} no files to lint. Generate code first.",
-                    ui::theme::paint_warning(&t, "│")
-                );
-            } else {
-                let paths: Vec<String> = if !session.last_files_written.is_empty() {
-                    session
-                        .last_files_written
-                        .iter()
-                        .map(|p| p.path.display().to_string())
-                        .collect()
-                } else {
-                    session
-                        .last_files
-                        .iter()
-                        .filter(|f| !f.path.is_empty())
-                        .map(|f| f.path.clone())
-                        .collect()
-                };
-                for p in paths {
-                    handle_lint(&mut session, &p);
-                }
-            }
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/review") {
-            handle_review(client, &mut session).await;
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/find") {
-            let rail = ui::theme::paint_rail_empty(&t);
-            let usage = ui::theme::paint_bright(&t, "usage: /find <query>");
-            let detail = ui::theme::paint_dim(
-                &t,
-                "search text inside the project (skips node_modules, target, .git, ...)",
-            );
-            println!("{rail}");
-            println!("{rail} {usage}");
-            println!("{rail}  {detail}");
-            println!("{rail}");
-            continue;
-        }
-
-        if let Some(tail) = trimmed.strip_prefix("/find ") {
-            handle_find(&session, tail.trim());
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/save") && !trimmed.starts_with("/save ") {
-            handle_save_session(&session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/resume") {
-            handle_resume_session(&mut session);
-            continue;
-        }
-
-        if trimmed.eq_ignore_ascii_case("/why") {
-            handle_why(&session);
+        // A slash command was dispatched and handled; skip LLM call
+        if trimmed.starts_with('/') {
             continue;
         }
 
         let intent = classify_intent(trimmed);
         session.last_intent = intent.clone();
         session.last_user_input = trimmed.to_string();
-        let instruction = intent_instruction(&intent);
 
-        let needs_path = (session.mode == RunMode::Code || intent == TaskIntent::CodeAction)
-            && !has_file_path(trimmed);
-        let final_prompt = if needs_path {
-            session.add_history(trimmed);
-            let path = prompt_for_path(&mut session)?;
-            format!("User request: {}\n\nSave file at: {}", trimmed, path)
-        } else {
-            session.add_history(trimmed);
-            if let Some(ref dir) = session.project_dir {
-                format!(
-                    "User request: {}\n\nWorking directory: {}",
-                    trimmed,
-                    dir.display()
-                )
-            } else {
-                format!("User request: {}", trimmed)
-            }
-        };
+        let (full_prompt, history_ctx) = build_llm_prompt(&mut session, trimmed, &intent);
 
         if session.mode == RunMode::Code {
             let rail = ui::theme::paint(&t, "accent", "\u{258C}", true);
@@ -422,82 +584,6 @@ pub(crate) async fn run_chat(
             let msg = ui::theme::paint(&t, "accent", "Analyzing...", true);
             println!("{rail} {msg}");
         }
-
-        let search_ctx = session.build_search_context();
-        let history_ctx = session.build_chat_history();
-        let memory_ctx = session.build_memory_context();
-        let (resolved_input, at_context) = session.resolve_at_references(&final_prompt);
-
-        let project_ctx = session.build_relevant_project_context(&resolved_input);
-
-        let mut last_code_ctx = String::new();
-        if !session.last_code.is_empty() || !session.last_files.is_empty() {
-            let mod_triggers = [
-                "add",
-                "update",
-                "change",
-                "modify",
-                "edit",
-                "append",
-                "improve",
-                "enhance",
-                "refactor",
-                "rewrite",
-                "transform",
-                "convert",
-                "extend",
-                "expand",
-            ];
-            let lower_in = trimmed.to_lowercase();
-            if mod_triggers
-                .iter()
-                .any(|t| lower_in.starts_with(t) || lower_in.contains(&format!(" {} ", t)))
-                || lower_in.contains("also")
-                || lower_in.contains("and then")
-                || lower_in.contains("more")
-            {
-                if !session.last_code.is_empty() {
-                    let truncated = crate::truncate_bytes(&session.last_code, 6000);
-                    last_code_ctx = format!(
-                        "\n[Last generated code (for reference)]:\n```\n{}\n```\n",
-                        truncated
-                    );
-                }
-                if !session.last_files.is_empty() {
-                    let mut files_ctx = String::from("\n[Last generated files]:\n");
-                    for f in &session.last_files {
-                        if !f.path.is_empty() {
-                            let truncated = crate::truncate_bytes(&f.content, 3000);
-                            files_ctx
-                                .push_str(&format!("\n### {}\n```\n{}\n```\n", f.path, truncated));
-                        }
-                    }
-                    last_code_ctx.push_str(&files_ctx);
-                }
-            }
-        }
-
-        let full_prompt = {
-            let mut p = instruction.to_string();
-            p.push('\n');
-            if !memory_ctx.is_empty() {
-                p.push_str(&memory_ctx);
-            }
-            if !project_ctx.is_empty() {
-                p.push_str(&project_ctx);
-            }
-            if !last_code_ctx.is_empty() {
-                p.push_str(&last_code_ctx);
-            }
-            if !at_context.is_empty() {
-                p.push_str(&at_context);
-            }
-            p.push_str(&resolved_input);
-            if !search_ctx.is_empty() {
-                p.push_str(&search_ctx);
-            }
-            p
-        };
 
         let label = ui::theme::paint(&t, "accent", "\u{258C}", true);
         let model_tag = ui::theme::paint(&t, "accent", &client.model, false);
@@ -554,6 +640,7 @@ pub(crate) async fn run_chat(
             println!("{rail}  {hint_label} {hint_msg}");
             println!("{rail}");
         }
+
         let result = client
             .complete_chat_stream(&full_prompt, &system_prompt, &history_ctx)
             .await;
@@ -562,58 +649,16 @@ pub(crate) async fn run_chat(
 
         match result {
             Ok(text) => {
-                if verbose {
-                    eprintln!(
-                        "\n  {} raw response:\n{}\n",
-                        ui::theme::paint_dim(&t, "verbose:"),
-                        text
-                    );
-                }
-
-                let (was_validated, validated_text) =
-                    validate_chat_response(&text, &intent, &session.mode);
-                let cleaned = if was_validated && session.mode != RunMode::Code {
-                    let warn = ui::theme::paint_warning(&t, "\u{258C}");
-                    let note = ui::theme::paint_dim(
-                        &t,
-                        "(response contained unexpected code \u{2014} showing text only)",
-                    );
-                    println!("{warn} {note}");
-                    validated_text
-                } else {
-                    text.trim().to_string()
-                };
-
-                session.last_tokens = estimate_tokens(&cleaned) as u32;
-
-                let treat_as_code =
-                    intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
-
-                if treat_as_code {
-                    display_code_files(&mut session, &cleaned, &t);
-                } else if cleaned.is_empty() {
-                    println!(
-                        "{} {}",
-                        ui::theme::paint_warning(&t, "\u{258C}"),
-                        ui::theme::paint_dim(&t, "(empty response)")
-                    );
-                } else {
-                    display_text_output(&cleaned, &t);
-                }
-
-                display_performance_stats(client, &session, elapsed, &t);
-
-                if !cleaned.is_empty() {
-                    session.history.push((trimmed.to_string(), cleaned));
-                    if session.history.len() > 12 {
-                        session.history.remove(0);
-                    }
-                    session.messages_since_save += 1;
-                    if session.messages_since_save >= 5 {
-                        session.auto_save_session();
-                        session.messages_since_save = 0;
-                    }
-                }
+                handle_llm_response(
+                    &mut session,
+                    trimmed,
+                    text,
+                    &intent,
+                    elapsed,
+                    client,
+                    verbose,
+                    &t,
+                );
             }
             Err(e) => {
                 let rail = ui::theme::paint_rail_empty(&t);

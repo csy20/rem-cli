@@ -16,6 +16,7 @@ use cli::{
 use walkdir::WalkDir;
 
 mod agentic;
+mod blocklist;
 mod chat;
 mod cli;
 mod commands;
@@ -31,16 +32,18 @@ mod parsing;
 mod provider;
 mod repl;
 mod search;
+mod session_io;
 mod templates;
+mod text_util;
 mod token_count;
 mod types;
 mod ui;
 
-use crate::chat::check_system_resources;
 use crate::config::{build_provider, load_config, load_system_prompt, validate_config};
 use crate::intent::{classify_intent, TaskIntent};
-use crate::types::*;
+use crate::session_io::check_system_resources;
 use crate::ui::output::{print_banner, print_reply, SpinnerGuard};
+use crate::{blocklist::*, text_util::*, types::*};
 use indexer::{generate_codebase_index, load_codebase_index, write_codebase_index};
 
 use provider::Provider;
@@ -531,7 +534,7 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     );
 
     let refreshing = load_codebase_index(&dir).is_some();
-    let chunks = generate_codebase_index(&dir)?;
+    let (chunks, file_mtimes) = generate_codebase_index(&dir)?;
     if chunks.is_empty() {
         println!(
             "{} {} no indexable files found (after skips)",
@@ -557,7 +560,7 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
         return Ok(());
     }
 
-    write_codebase_index(&dir, &chunks)?;
+    write_codebase_index(&dir, &chunks, file_mtimes)?;
 
     let out_path = dir.join(".rem/codebase_index.json");
     let unique_files = chunks

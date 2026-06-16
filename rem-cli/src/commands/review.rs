@@ -6,6 +6,7 @@ use crate::chat::ChatSession;
 use crate::provider::Provider;
 use crate::ui;
 use crate::{file_icon, truncate_bytes};
+use similar::{ChangeTag, TextDiff};
 use std::fs;
 use std::path::PathBuf;
 
@@ -84,34 +85,36 @@ pub(crate) fn handle_diff(session: &ChatSession) {
                         ui::theme::paint_error_label(&t, &format!("-{} lines", removed)),
                     );
                 }
-                let old_lines: Vec<&str> = existing.lines().collect();
-                let new_lines: Vec<&str> = f.content.lines().collect();
-                let max_lines = old_lines.len().max(new_lines.len());
+                let diff = TextDiff::from_lines(&existing, &f.content);
                 let mut diff_printed = 0;
-                for i in 0..max_lines {
-                    let old = old_lines.get(i).copied().unwrap_or("");
-                    let new = new_lines.get(i).copied().unwrap_or("");
-                    if old != new && diff_printed < 8 {
-                        if i < old_lines.len() && !old.is_empty() {
+                let total = diff.iter_all_changes().count();
+                for change in diff.iter_all_changes() {
+                    if diff_printed >= 8 {
+                        break;
+                    }
+                    match change.tag() {
+                        ChangeTag::Delete => {
                             println!(
                                 "{}     {} {}",
                                 ui::theme::paint_dim(&t, "\u{2502}"),
                                 ui::theme::paint_error_label(&t, "-"),
-                                ui::theme::paint_error_label(&t, old)
+                                ui::theme::paint_error_label(&t, change.value().trim_end())
                             );
+                            diff_printed += 1;
                         }
-                        if i < new_lines.len() && !new.is_empty() {
+                        ChangeTag::Insert => {
                             println!(
                                 "{}     {} {}",
                                 ui::theme::paint_dim(&t, "\u{2502}"),
                                 ui::theme::paint_success_label(&t, "+"),
-                                ui::theme::paint_success_label(&t, new)
+                                ui::theme::paint_success_label(&t, change.value().trim_end())
                             );
+                            diff_printed += 1;
                         }
-                        diff_printed += 1;
+                        ChangeTag::Equal => {}
                     }
                 }
-                if max_lines > 8 && diff_printed > 0 {
+                if total > 8 && diff_printed > 0 {
                     println!(
                         "{}     {}",
                         ui::theme::paint_dim(&t, "\u{2502}"),

@@ -147,7 +147,8 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
                 api_key.unwrap_or_else(|| std::env::var("OPENAI_API_KEY").unwrap_or_default());
             if key.is_empty() {
                 eprintln!(
-                    "\x1b[33mwarning\x1b[0m: provider 'openai' requires --api-key or OPENAI_API_KEY"
+                    "{} provider 'openai' requires --api-key or OPENAI_API_KEY",
+                    ui::theme::paint_warning(&ui::theme::active(), "warning:"),
                 );
             }
             Ok(Provider::new_openai(
@@ -164,7 +165,8 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
                 api_key.unwrap_or_else(|| std::env::var("GEMINI_API_KEY").unwrap_or_default());
             if key.is_empty() {
                 eprintln!(
-                    "\x1b[33mwarning\x1b[0m: provider 'gemini' requires --api-key or GEMINI_API_KEY"
+                    "{} provider 'gemini' requires --api-key or GEMINI_API_KEY",
+                    ui::theme::paint_warning(&ui::theme::active(), "warning:"),
                 );
             }
             let model = if model == "rem-coder:latest" || model == "rem-coder" {
@@ -185,7 +187,8 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
                 api_key.unwrap_or_else(|| std::env::var("ANTHROPIC_API_KEY").unwrap_or_default());
             if key.is_empty() {
                 eprintln!(
-                    "\x1b[33mwarning\x1b[0m: provider 'anthropic' requires --api-key or ANTHROPIC_API_KEY"
+                    "{} provider 'anthropic' requires --api-key or ANTHROPIC_API_KEY",
+                    ui::theme::paint_warning(&ui::theme::active(), "warning:"),
                 );
             }
             let model = if model == "rem-coder:latest" || model == "rem-coder" {

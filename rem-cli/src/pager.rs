@@ -13,8 +13,9 @@ pub fn maybe_page(text: &str) {
         return;
     }
 
-    let mut child = match Command::new("less")
-        .args(["-R", "-F", "-X"])
+    let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    let mut child = match Command::new(&pager_cmd)
+        .args(pager_args(&pager_cmd))
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::null())
@@ -34,8 +35,17 @@ pub fn maybe_page(text: &str) {
     let _ = child.wait();
 }
 
+fn pager_args(cmd: &str) -> Vec<&str> {
+    if cmd.contains("less") {
+        vec!["-R", "-F", "-X"]
+    } else {
+        vec![]
+    }
+}
+
 fn pager_available() -> bool {
-    Command::new("less")
+    let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    Command::new(&pager_cmd)
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

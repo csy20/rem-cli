@@ -2,10 +2,11 @@
 //! Handlers for commands that manage the workspace directory, configuration,
 //! project memory, token stats, and session save/resume.
 
-use crate::chat::{detect_project_type, ChatSession};
+use crate::chat::ChatSession;
 use crate::config::persist_workspace;
 use crate::memory::ProjectMemory;
 use crate::provider::Provider;
+use crate::session_io::detect_project_type;
 use crate::token_count::{context_usage_percent, estimate_tokens_batch};
 use crate::ui;
 use crate::{file_icon, human_size, BackupEntry, FileEntry};

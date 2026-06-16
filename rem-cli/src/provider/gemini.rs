@@ -3,10 +3,8 @@
 //! (`chat_completion`, `chat_completion_stream`, `models`, `health`).
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Deserialize)]
 pub struct GeminiResponse {
@@ -178,59 +176,6 @@ impl super::Provider {
             return Err(self.parse_api_error("Gemini", resp).await);
         }
 
-        let mut stream = resp.bytes_stream();
-        let mut full = String::with_capacity(4096);
-        let mut buf = String::with_capacity(4096);
-        let mut cursor = 0usize;
-        const MAX_GEMINI_BYTES: usize = 10 * 1024 * 1024;
-
-        loop {
-            if super::STREAM_CANCELLED.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            let chunk = match timeout(Duration::from_secs(60), stream.next()).await {
-                Ok(Some(Ok(c))) => c,
-                Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
-                Ok(None) => break,
-                Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
-            };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-
-            loop {
-                let tail = &buf[cursor..];
-                match tail.find('\n') {
-                    Some(pos) => {
-                        let line = &tail[..pos];
-                        cursor += pos + 1;
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() || trimmed.starts_with(':') {
-                            continue;
-                        }
-                        if let Some(data) = trimmed.strip_prefix("data: ") {
-                            if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
-                                if let Some(text) = chunk
-                                    .candidates
-                                    .and_then(|c| c.into_iter().next())
-                                    .and_then(|c| c.content)
-                                    .and_then(|c| c.parts)
-                                    .and_then(|p| p.into_iter().next())
-                                    .and_then(|p| p.text)
-                                {
-                                    full.push_str(&text);
-                                    if full.len() > MAX_GEMINI_BYTES {
-                                        return Err(anyhow!(
-                                            "response too large (>{MAX_GEMINI_BYTES} bytes)"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    None => break,
-                }
-            }
-        }
-
-        Ok(full)
+        self.stream_gemini_sse(resp).await
     }
 }

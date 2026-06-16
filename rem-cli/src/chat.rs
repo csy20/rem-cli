@@ -6,10 +6,8 @@ use crate::feedback::FeedbackTracker;
 use crate::indexer::{build_retrieved_context, load_codebase_index, retrieve_relevant_chunks};
 use crate::intent::TaskIntent;
 use crate::memory::ProjectMemory;
-use crate::parsing::strip_code_blocks;
-use crate::provider::{Provider, ProviderKind};
 use crate::search::SearchResult;
-use crate::ui;
+use crate::session_io::{build_project_context, detect_project_type};
 use crate::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
 use rustyline::config::Configurer;
@@ -18,6 +16,22 @@ use std::fs;
 use std::io::{self};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+/// Cached project file listing to avoid repeated directory walks.
+struct ProjectListingCache {
+    listing: String,
+    dir: PathBuf,
+}
+
+impl ProjectListingCache {
+    fn get_or_build(&mut self, dir: &Path, max_bytes: usize) -> &str {
+        if self.dir != dir {
+            self.listing = build_project_context(dir, max_bytes);
+            self.dir = dir.to_path_buf();
+        }
+        &self.listing
+    }
+}
 
 /// Holds all mutable state for an interactive chat session.
 pub(crate) struct ChatSession {
@@ -39,6 +53,7 @@ pub(crate) struct ChatSession {
     pub(crate) project_memory: ProjectMemory,
     pub(crate) messages_since_save: usize,
     pub(crate) project_type: Option<String>,
+    listing_cache: Option<ProjectListingCache>,
 }
 
 impl ChatSession {
@@ -76,6 +91,7 @@ impl ChatSession {
             project_memory,
             messages_since_save: 0,
             project_type: None,
+            listing_cache: None,
         })
     }
 
@@ -117,22 +133,26 @@ impl ChatSession {
     /// Falls back to the classic exhaustive (but capped) file listing when no index.
     /// Builds project context for the given query.
     /// Uses codebase index for retrieval when available; falls back to file listing.
-    pub(crate) fn build_relevant_project_context(&self, query: &str) -> String {
-        if let Some(ref dir) = self.project_dir {
+    pub(crate) fn build_relevant_project_context(&mut self, query: &str) -> String {
+        if let Some(ref dir) = self.project_dir.clone() {
             if let Some(index) = load_codebase_index(dir) {
-                // Pull more candidates, let the injector cap by chars
                 let hits = retrieve_relevant_chunks(&index, query, 8, 4500);
                 if !hits.is_empty() {
                     return build_retrieved_context(&hits, 4800);
                 }
-                // Index existed but nothing matched the query — still better to give a small
-                // generic listing than nothing, or fall through.
             }
-            // No index or no hits: classic behavior (names + sizes, depth-limited)
-            build_project_context(dir, 6000)
-        } else {
-            String::new()
+            // No index or no hits: use cached listing
+            if self.listing_cache.is_none() {
+                self.listing_cache = Some(ProjectListingCache {
+                    listing: String::new(),
+                    dir: PathBuf::new(),
+                });
+            }
+            if let Some(ref mut cache) = self.listing_cache {
+                return cache.get_or_build(dir, 6000).to_string();
+            }
         }
+        String::new()
     }
 
     /// Builds a truncated history string from recent conversation turns.
@@ -216,7 +236,7 @@ impl ChatSession {
                 continue;
             }
             let path = if ref_path.starts_with('/') || ref_path.starts_with("~/") {
-                let resolved = if ref_path.starts_with("~/") {
+                if ref_path.starts_with("~/") {
                     if let Some(home) = dirs::home_dir() {
                         home.join(ref_path.trim_start_matches("~/"))
                     } else {
@@ -224,14 +244,16 @@ impl ChatSession {
                     }
                 } else {
                     PathBuf::from(ref_path)
-                };
-                resolved
+                }
             } else {
                 let base = self
                     .project_dir
                     .as_deref()
                     .unwrap_or_else(|| Path::new("."));
-                base.join(ref_path)
+                match crate::resolve_safe_path(base, ref_path) {
+                    Some(p) => p,
+                    None => continue,
+                }
             };
 
             if path.is_file() {
@@ -287,226 +309,6 @@ impl ChatSession {
     }
 }
 
-/// Warns if system RAM is 16 GB or less (important for local LLM performance).
-pub(crate) fn check_system_resources() {
-    let t = ui::theme::active();
-    let mem_gb = detect_system_ram_gb();
-    if mem_gb > 0 && mem_gb <= 16 {
-        eprintln!(
-            "{} {} GB RAM detected — Ollama may be slow on CPU.",
-            ui::theme::paint_warning(&t, "\u{258C} system:"),
-            mem_gb
-        );
-        eprintln!(
-            "{} Try:  OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 ollama serve",
-            ui::theme::paint_rail_empty(&t)
-        );
-        eprintln!();
-    }
-}
-
-fn detect_system_ram_gb() -> u64 {
-    if let Ok(content) = fs::read_to_string("/proc/meminfo") {
-        for line in content.lines() {
-            if line.starts_with("MemTotal:") {
-                let kb: u64 = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                return kb / 1024 / 1024;
-            }
-        }
-    }
-    0
-}
-
-/// Prints the welcome banner with model and mode information.
-pub(crate) fn print_welcome(client: &Provider) {
-    println!();
-    ui::header::render(&client.provider_label(), "CHAT");
-    println!();
-}
-
-/// Builds a file tree listing of the project directory (depth-limited, size-capped).
-pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
-    let mut out = String::from("Project files:\n");
-    let mut count = 0u32;
-    let max_depth = 4;
-
-    let mut entries: Vec<String> = Vec::new();
-    for entry in WalkDir::new(dir)
-        .max_depth(max_depth as usize)
-        .sort_by_file_name()
-    {
-        let Ok(entry) = entry else { continue };
-        let p = entry.path();
-        let Ok(rel) = p.strip_prefix(dir) else {
-            continue;
-        };
-        let rel_str = rel.display().to_string();
-        if rel_str.is_empty() {
-            continue;
-        }
-        if rel_str.starts_with('.') && rel_str != "." {
-            continue;
-        }
-        if rel_str.contains("venv")
-            || rel_str.contains("dist")
-            || rel_str.contains(".pytest_cache")
-            || rel.components().any(|c| {
-                c.as_os_str()
-                    .to_str()
-                    .is_some_and(crate::find::should_skip_dir)
-            })
-        {
-            continue;
-        }
-
-        if p.is_dir() {
-            if rel.components().count() >= 3 {
-                continue;
-            }
-            entries.push(format!("{}/", rel_str));
-        } else {
-            let size = p.metadata().map(|m| m.len()).unwrap_or(0);
-            entries.push(format!("{}  ({} bytes)", rel_str, size));
-        }
-        count += 1;
-        if out.len() > max_bytes {
-            break;
-        }
-    }
-
-    if count > 0 {
-        out.push_str(&entries.join("\n"));
-        out.push_str("\n\n");
-        out
-    } else {
-        String::new()
-    }
-}
-
-/// Detects project language type from files in directory (Cargo.toml → rust, etc.).
-pub(crate) fn detect_project_type(dir: &Path) -> &'static str {
-    if !dir.exists() {
-        return "";
-    }
-    let entries: Vec<String> = WalkDir::new(dir)
-        .max_depth(1)
-        .into_iter()
-        .filter_map(|e: Result<walkdir::DirEntry, walkdir::Error>| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.file_name().to_string_lossy().to_lowercase())
-        .collect();
-
-    let has_file = |name: &str| entries.iter().any(|f| f == name);
-
-    if has_file("Cargo.toml") {
-        return "rust";
-    }
-    if has_file("go.mod") {
-        return "go";
-    }
-    if has_file("pyproject.toml") || has_file("setup.py") || has_file("requirements.txt") {
-        return "python";
-    }
-    if has_file("package.json") {
-        return "javascript";
-    }
-    if has_file("index.html") && has_file("style.css") {
-        return "html_css";
-    }
-    if has_file("dart.yaml") || has_file("pubspec.yaml") {
-        return "dart";
-    }
-    if has_file("Makefile") {
-        return "cpp";
-    }
-    ""
-}
-
-/// Returns language-specific guidance text for the system prompt.
-pub(crate) fn language_specific_guidance(project_type: &str) -> &'static str {
-    match project_type {
-        "rust" => "\nLanguage context: Rust project. Use cargo build/run. Prefer &str over String where possible. Include Cargo.toml deps.",
-        "go" => "\nLanguage context: Go project. Use go mod tidy. Follow standard library patterns.",
-        "python" => "\nLanguage context: Python project. Use pip install for deps. Follow PEP 8. Use type hints.",
-        "javascript" => "\nLanguage context: JavaScript/Node.js project. Use npm/yarn. Prefer ES modules. Include package.json deps.",
-        "html_css" => "\nLanguage context: HTML/CSS project. Use semantic HTML. Responsive CSS with modern layout (flexbox/grid).",
-        "dart" => "\nLanguage context: Dart/Flutter project. Use pub get for deps. Follow effective Dart guidelines.",
-        "cpp" => "\nLanguage context: C/C++ project. Use make/gcc. Show compilation commands.",
-        _ => "",
-    }
-}
-
-/// Builds the styled terminal prompt string (e.g., `[CODE] ollama/rem-coder>`).
-pub(crate) fn build_prompt(session: &ChatSession, client: &Provider) -> String {
-    let t = ui::theme::active();
-    let model_short = client.model.split(':').next().unwrap_or(&client.model);
-    let mode_key = ui::theme::accent_for_mode(session.mode.label());
-    let provider_prefix = match client.kind {
-        ProviderKind::Ollama => "",
-        _ => client.kind.as_str(),
-    };
-    let mut p = String::new();
-    p.push('\x01');
-    p.push_str(t.fg(mode_key));
-    p.push('\x02');
-    p.push('[');
-    p.push_str(session.mode.label());
-    p.push(']');
-    p.push_str("\x01\x1b[0m\x02");
-    p.push(' ');
-    p.push('\x01');
-    p.push_str(t.fg("accent"));
-    p.push('\x02');
-    if !provider_prefix.is_empty() {
-        p.push_str(provider_prefix);
-        p.push('/');
-    }
-    p.push_str(model_short);
-    p.push('>');
-    p.push_str("\x01\x1b[0m\x02");
-    p.push(' ');
-    p
-}
-
-/// Validates the LLM response, stripping code if in CHAT mode and inappropriate.
-/// Returns (was_validated, cleaned_response).
-pub(crate) fn validate_chat_response(
-    response: &str,
-    intent: &TaskIntent,
-    mode: &RunMode,
-) -> (bool, String) {
-    if *intent != TaskIntent::CodeAction && *mode != RunMode::Code {
-        let has_code_fences = response.contains("```");
-        let has_multi_file = response.contains("### ") && has_code_fences;
-        let has_json = response.trim().starts_with('{')
-            && (response.contains("\"code\"") || response.contains("\"files\""));
-
-        if has_multi_file || has_json {
-            let code_stripped = strip_code_blocks(response);
-            if !code_stripped.trim().is_empty() {
-                return (true, code_stripped);
-            }
-            return (
-                true,
-                "I understood your question. Let me answer directly: ".to_string(),
-            );
-        }
-    }
-
-    if response.trim().is_empty() {
-        return (
-            true,
-            "(No response generated — please try again or rephrase)".to_string(),
-        );
-    }
-
-    (false, String::new())
-}
-
 /// Chat interaction mode: Chat, Code, or Plan.
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum RunMode {
@@ -532,57 +334,5 @@ impl RunMode {
             RunMode::Code => "CODE",
             RunMode::Plan => "PLAN",
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::intent::TaskIntent;
-
-    #[test]
-    fn validate_chat_response_passes_plain_text() {
-        let (was_validated, _) =
-            validate_chat_response("Hi there!", &TaskIntent::FastAnswer, &RunMode::Chat);
-        assert!(!was_validated);
-    }
-
-    #[test]
-    fn validate_chat_allows_code_in_code_mode() {
-        let (was_validated, _) = validate_chat_response(
-            "### app.js\n```js\nconst x = 1;\n```",
-            &TaskIntent::CodeAction,
-            &RunMode::Code,
-        );
-        assert!(!was_validated);
-    }
-
-    #[test]
-    fn validate_chat_strips_code_in_chat_mode() {
-        let (was_validated, cleaned) = validate_chat_response(
-            "Here's the code:\n### app.js\n```js\nconst x = 1;\n```\n done",
-            &TaskIntent::FastAnswer,
-            &RunMode::Chat,
-        );
-        assert!(was_validated);
-        assert!(!cleaned.contains("```"));
-    }
-
-    #[test]
-    fn validate_chat_strips_json_in_chat_mode() {
-        let (was_validated, _cleaned) = validate_chat_response(
-            "{\"code\": \"fn main() {}\"}",
-            &TaskIntent::FastAnswer,
-            &RunMode::Chat,
-        );
-        assert!(was_validated);
-    }
-
-    #[test]
-    fn validate_chat_handles_empty_response() {
-        let (was_validated, cleaned) =
-            validate_chat_response("", &TaskIntent::CodeAction, &RunMode::Chat);
-        assert!(was_validated);
-        assert!(cleaned.contains("No response generated"));
     }
 }

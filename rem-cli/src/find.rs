@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use walkdir::WalkDir;
+use ignore::WalkBuilder;
 
 const DEFAULT_MAX_FILE_BYTES: u64 = 64 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 500;
@@ -139,27 +139,36 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
         None
     };
 
-    let walker = WalkDir::new(root)
-        .max_depth(opts.max_depth)
+    let walker = WalkBuilder::new(root)
+        .max_depth(Some(opts.max_depth))
         .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .filter_entry(move |e| {
             if e.depth() == 0 {
                 return true;
             }
-            if let Some(name) = e.file_name().to_str() {
-                if e.file_type().is_dir() && should_skip_dir(name) {
-                    return false;
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if let Some(name) = e.file_name().to_str() {
+                    if should_skip_dir(name) {
+                        return false;
+                    }
                 }
-                if e.file_type().is_file() && should_skip_file(name) {
-                    return false;
+            }
+            if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if let Some(name) = e.file_name().to_str() {
+                    if should_skip_file(name) {
+                        return false;
+                    }
                 }
             }
             true
-        });
+        })
+        .build();
 
     for entry in walker.filter_map(|e| e.ok()) {
-        if !entry.file_type().is_file() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
 

@@ -491,4 +491,34 @@ impl Provider {
         })
         .await
     }
+
+    async fn stream_gemini_sse(&self, resp: reqwest::Response) -> Result<String> {
+        Self::stream_lines(resp, |trimmed, full| {
+            if trimmed.is_empty() || trimmed.starts_with(':') {
+                return Ok(true);
+            }
+            if let Some(data) = trimmed.strip_prefix("data: ") {
+                if let Ok(chunk) = serde_json::from_str::<gemini::GeminiStreamChunk>(data) {
+                    if let Some(text) = chunk
+                        .candidates
+                        .and_then(|c| c.into_iter().next())
+                        .and_then(|c| c.content)
+                        .and_then(|c| c.parts)
+                        .and_then(|p| p.into_iter().next())
+                        .and_then(|p| p.text)
+                    {
+                        full.push_str(&text);
+                        if full.len() > Self::MAX_RESPONSE_BYTES {
+                            return Err(anyhow!(
+                                "response too large ({} bytes)",
+                                Self::MAX_RESPONSE_BYTES
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(true)
+        })
+        .await
+    }
 }
