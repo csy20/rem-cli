@@ -147,9 +147,12 @@ pub struct AppConfig {
     pub theme: String,
     #[serde(default = "default_mode_name")]
     pub mode: String,
-    /// Per-provider overrides keyed by provider name (e.g. "ollama", "openai").
     #[serde(default)]
     pub providers: HashMap<String, ProviderSettings>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub thinking_budget: Option<u32>,
 }
 
 fn default_theme_name() -> String {
@@ -178,6 +181,8 @@ impl Default for AppConfig {
             theme: default_theme_name(),
             mode: default_mode_name(),
             providers: HashMap::new(),
+            reasoning_effort: None,
+            thinking_budget: None,
         }
     }
 }
@@ -199,6 +204,8 @@ pub struct PartialConfig {
     pub mode: Option<String>,
     #[serde(default)]
     pub providers: Option<HashMap<String, ProviderSettings>>,
+    pub reasoning_effort: Option<String>,
+    pub thinking_budget: Option<u32>,
 }
 
 impl AppConfig {
@@ -242,6 +249,12 @@ impl AppConfig {
         }
         if let Some(v) = part.providers {
             self.providers = v;
+        }
+        if let Some(v) = part.reasoning_effort {
+            self.reasoning_effort = Some(v);
+        }
+        if let Some(v) = part.thinking_budget {
+            self.thinking_budget = Some(v);
         }
     }
 }

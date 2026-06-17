@@ -3,8 +3,13 @@
 //! (`chat_completion`, `chat_completion_stream`, `models`, `health`).
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
+
+use super::tools::{ToolCall, ToolResponse, ToolSpec};
+use super::STREAM_CANCELLED;
+use std::sync::atomic::Ordering;
 
 #[derive(Debug, Deserialize)]
 pub struct GeminiResponse {
@@ -24,6 +29,15 @@ pub struct GeminiContent {
 #[derive(Debug, Deserialize)]
 pub struct GeminiPart {
     pub text: Option<String>,
+    #[serde(default)]
+    pub function_call: Option<GeminiFunctionCall>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GeminiFunctionCall {
+    pub name: Option<String>,
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,5 +191,187 @@ impl super::Provider {
         }
 
         self.stream_gemini_sse(resp).await
+    }
+
+    pub(super) async fn complete_chat_vision_gemini(
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        mime_type: &str,
+        base64_data: &str,
+    ) -> Result<String> {
+        let url = self.gemini_url(&format!(
+            "/models/{}:streamGenerateContent?alt=sse",
+            self.model
+        ));
+
+        let mut parts: Vec<serde_json::Value> = vec![];
+        if !history.is_empty() {
+            parts.push(json!({"text": format!("[Previous conversation]:\n{}", history)}));
+        }
+        parts.push(json!({"text": user_prompt}));
+        parts.push(json!({
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": base64_data
+            }
+        }));
+
+        let mut payload = json!({
+            "contents": [{"parts": parts}],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 4096
+            }
+        });
+
+        if !system_prompt.is_empty() {
+            payload["systemInstruction"] = json!({"parts": [{"text": system_prompt}]});
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("x-goog-api-key", self.api_key_str())
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Gemini vision API")?;
+
+        if !resp.status().is_success() {
+            return Err(self.parse_api_error("Gemini", resp).await);
+        }
+
+        self.stream_gemini_sse(resp).await
+    }
+
+    pub(super) async fn complete_chat_stream_tools_gemini(
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        tool_specs: &[ToolSpec],
+    ) -> Result<ToolResponse> {
+        let url = self.gemini_url(&format!(
+            "/models/{}:streamGenerateContent?alt=sse",
+            self.model
+        ));
+
+        let mut contents = vec![];
+        if !history.is_empty() {
+            contents.push(json!({"role": "user", "parts": [{"text": history}]}));
+        }
+        contents.push(json!({"role": "user", "parts": [{"text": user_prompt}]}));
+
+        let mut payload = json!({
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 4096
+            }
+        });
+
+        if !system_prompt.is_empty() {
+            payload["systemInstruction"] = json!({"parts": [{"text": system_prompt}]});
+        }
+
+        if !tool_specs.is_empty() {
+            let declarations: Vec<serde_json::Value> = tool_specs
+                .iter()
+                .map(|t| t.to_gemini_function_declaration())
+                .collect();
+            payload["tools"] = json!([{"function_declarations": declarations}]);
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("x-goog-api-key", self.api_key_str())
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Gemini API")?;
+
+        if !resp.status().is_success() {
+            return Err(self.parse_api_error("Gemini", resp).await);
+        }
+
+        // Parse SSE stream for text and function calls
+        let mut full_text = String::with_capacity(4096);
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::with_capacity(4096);
+        let mut cursor = 0usize;
+
+        loop {
+            if STREAM_CANCELLED.load(Ordering::SeqCst) {
+                break;
+            }
+            let chunk =
+                match tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await
+                {
+                    Ok(Some(Ok(c))) => c,
+                    Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
+                    Ok(None) => break,
+                    Err(_) => return Err(anyhow!("stream timed out")),
+                };
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            loop {
+                let tail = &buf[cursor..];
+                match tail.find('\n') {
+                    Some(pos) => {
+                        let line = &tail[..pos];
+                        cursor += pos + 1;
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || trimmed.starts_with(':') {
+                            continue;
+                        }
+                        if let Some(data) = trimmed.strip_prefix("data: ") {
+                            if let Ok(chunk) =
+                                serde_json::from_str::<super::gemini::GeminiStreamChunk>(data)
+                            {
+                                if let Some(candidates) = chunk.candidates {
+                                    if let Some(candidate) = candidates.into_iter().next() {
+                                        if let Some(content) = candidate.content {
+                                            if let Some(parts) = content.parts {
+                                                for part in parts {
+                                                    if let Some(text) = part.text {
+                                                        full_text.push_str(&text);
+                                                    }
+                                                    if let Some(fc) = part.function_call {
+                                                        let name = fc.name.unwrap_or_default();
+                                                        let args = fc
+                                                            .args
+                                                            .unwrap_or(serde_json::Value::Null);
+                                                        if !name.is_empty() {
+                                                            return Ok(ToolResponse::ToolCalls(
+                                                                vec![ToolCall {
+                                                                    id: format!("fc_{}", name),
+                                                                    name,
+                                                                    arguments: args,
+                                                                }],
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if full_text.len() > super::MAX_RESPONSE_BYTES {
+                return Err(anyhow!(
+                    "response too large ({} bytes)",
+                    super::MAX_RESPONSE_BYTES
+                ));
+            }
+        }
+
+        Ok(ToolResponse::Text(full_text))
     }
 }

@@ -30,14 +30,17 @@ mod memory;
 mod pager;
 mod parsing;
 mod provider;
+mod reasoning;
 mod repl;
 mod search;
 mod session_io;
 mod templates;
 mod text_util;
 mod token_count;
+mod tool_executor;
 mod types;
 mod ui;
+mod vision;
 
 use crate::config::{build_provider, load_config, load_system_prompt, validate_config};
 use crate::intent::{classify_intent, TaskIntent};

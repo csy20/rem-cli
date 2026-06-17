@@ -212,6 +212,115 @@ pub(crate) fn handle_reset(session: &mut ChatSession) {
     println!("{rail}");
 }
 
+pub(crate) fn handle_reasoning(client: &mut Provider, cfg: &mut AppConfig, tail: Option<&str>) {
+    let t = ui::theme::active();
+    let rail = ui::theme::paint_rail_empty(&t);
+    if let Some(args) = tail {
+        let args = args.trim().to_lowercase();
+        match args.as_str() {
+            "on" | "enable" => {
+                client.reasoning_config.enabled = true;
+                cfg.reasoning_effort = Some(client.reasoning_config.effort.as_str().to_string());
+                let msg = ui::theme::paint_success_label(&t, "reasoning enabled");
+                println!("{rail}");
+                println!("{rail} {msg}");
+                println!("{rail}");
+            }
+            "off" | "disable" => {
+                client.reasoning_config.enabled = false;
+                cfg.reasoning_effort = None;
+                let msg = ui::theme::paint_success_label(&t, "reasoning disabled");
+                println!("{rail}");
+                println!("{rail} {msg}");
+                println!("{rail}");
+            }
+            "low" | "medium" | "high" => {
+                let effort = crate::reasoning::ReasoningEffort::from_str(&args);
+                client.reasoning_config.effort = effort;
+                client.reasoning_config.enabled = true;
+                cfg.reasoning_effort = Some(effort.as_str().to_string());
+                let msg = ui::theme::paint_success_label(
+                    &t,
+                    &format!("reasoning effort \u{2192} {}", effort.as_str()),
+                );
+                println!("{rail}");
+                println!("{rail} {msg}");
+                println!("{rail}");
+            }
+            "show" => {
+                client.reasoning_config.show_reasoning = true;
+                let msg = ui::theme::paint_success_label(&t, "showing reasoning trace");
+                println!("{rail}");
+                println!("{rail} {msg}");
+                println!("{rail}");
+            }
+            "hide" => {
+                client.reasoning_config.show_reasoning = false;
+                let msg = ui::theme::paint_success_label(&t, "hiding reasoning trace");
+                println!("{rail}");
+                println!("{rail} {msg}");
+                println!("{rail}");
+            }
+            _ if args.starts_with("budget ") => {
+                if let Ok(n) = args.trim_start_matches("budget ").parse::<u32>() {
+                    client.reasoning_config.thinking_budget = n;
+                    cfg.thinking_budget = Some(n);
+                    let msg = ui::theme::paint_success_label(
+                        &t,
+                        &format!("thinking budget \u{2192} {} tokens", n),
+                    );
+                    println!("{rail}");
+                    println!("{rail} {msg}");
+                    println!("{rail}");
+                } else {
+                    let msg = ui::theme::paint_error_label(
+                        &t,
+                        "invalid budget — usage: /reasoning budget <tokens>",
+                    );
+                    println!("{rail} {msg}");
+                    println!("{rail}");
+                }
+            }
+            _ => {
+                let msg = ui::theme::paint_warning(
+                    &t,
+                    "usage: /reasoning [on|off|low|medium|high|show|hide|budget <n>]",
+                );
+                println!("{rail}");
+                println!("{rail} {msg}");
+                println!("{rail}");
+            }
+        }
+    } else {
+        // Toggle
+        client.reasoning_config.enabled = !client.reasoning_config.enabled;
+        if client.reasoning_config.enabled {
+            cfg.reasoning_effort = Some(client.reasoning_config.effort.as_str().to_string());
+            let msg = ui::theme::paint_success_label(&t, "reasoning enabled");
+            let detail = ui::theme::paint_dim(
+                &t,
+                &format!(
+                    "effort: {}  budget: {} tokens  show_trace: {}",
+                    client.reasoning_config.effort.as_str(),
+                    client.reasoning_config.thinking_budget,
+                    client.reasoning_config.show_reasoning,
+                ),
+            );
+            println!("{rail}");
+            println!("{rail} {msg}");
+            println!("{rail}  {detail}");
+            println!("{rail}");
+        } else {
+            cfg.reasoning_effort = None;
+            let msg = ui::theme::paint_success_label(&t, "reasoning disabled");
+            println!("{rail}");
+            println!("{rail} {msg}");
+            println!("{rail}");
+        }
+    }
+    let _ = save_config(cfg);
+}
+
 pub(crate) fn handle_why(session: &ChatSession) {
     let t = ui::theme::active();
     let intent_name = match session.last_intent {

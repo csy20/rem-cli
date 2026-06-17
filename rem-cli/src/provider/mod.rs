@@ -13,9 +13,13 @@ use serde::Deserialize;
 use tokio::time::{sleep, timeout, Duration};
 
 pub mod anthropic;
+pub mod azure;
+pub mod bedrock;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod openrouter;
+pub mod tools;
 
 #[cfg(test)]
 mod tests;
@@ -63,6 +67,9 @@ impl std::fmt::Display for LlmErrorBody {
 /// Set to `true` by the global Ctrl+C handler to cancel an in-flight stream.
 pub(crate) static STREAM_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
 /// Builds a full API URL by combining base URL and endpoint path.
 pub fn api_url(base_url: &str, endpoint: &str) -> String {
     let base = base_url.trim_end_matches('/');
@@ -81,6 +88,9 @@ pub enum ProviderKind {
     OpenAI,
     Gemini,
     Anthropic,
+    Azure,
+    Bedrock,
+    OpenRouter,
 }
 
 impl ProviderKind {
@@ -91,6 +101,9 @@ impl ProviderKind {
             ProviderKind::OpenAI => "openai",
             ProviderKind::Gemini => "gemini",
             ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Azure => "azure",
+            ProviderKind::Bedrock => "bedrock",
+            ProviderKind::OpenRouter => "openrouter",
         }
     }
 
@@ -100,6 +113,9 @@ impl ProviderKind {
             "openai" => ProviderKind::OpenAI,
             "gemini" | "google" => ProviderKind::Gemini,
             "anthropic" | "claude" => ProviderKind::Anthropic,
+            "azure" => ProviderKind::Azure,
+            "bedrock" | "aws" => ProviderKind::Bedrock,
+            "openrouter" => ProviderKind::OpenRouter,
             _ => ProviderKind::Ollama,
         }
     }
@@ -114,6 +130,7 @@ pub struct Provider {
     pub system_prompt: String,
     api_key: Option<String>,
     pub model_ctx: usize,
+    pub reasoning_config: crate::reasoning::ReasoningConfig,
 }
 
 impl Provider {
@@ -141,6 +158,7 @@ impl Provider {
             system_prompt,
             api_key: None,
             model_ctx,
+            reasoning_config: Default::default(),
         }
     }
 
@@ -161,6 +179,7 @@ impl Provider {
             system_prompt,
             api_key: Some(api_key),
             model_ctx,
+            reasoning_config: Default::default(),
         }
     }
 
@@ -180,6 +199,7 @@ impl Provider {
             system_prompt,
             api_key: Some(api_key),
             model_ctx,
+            reasoning_config: Default::default(),
         }
     }
 
@@ -199,7 +219,74 @@ impl Provider {
             system_prompt,
             api_key: Some(api_key),
             model_ctx,
+            reasoning_config: Default::default(),
         }
+    }
+
+    /// Creates a new Azure OpenAI provider instance.
+    pub fn new_azure(
+        base_url: String,
+        model: String,
+        timeout_s: u64,
+        system_prompt: String,
+        api_key: String,
+        model_ctx: usize,
+    ) -> Self {
+        Self {
+            kind: ProviderKind::Azure,
+            client: Self::build_client(timeout_s),
+            base_url,
+            model,
+            system_prompt,
+            api_key: Some(api_key),
+            model_ctx,
+            reasoning_config: Default::default(),
+        }
+    }
+
+    /// Creates a new AWS Bedrock provider instance.
+    pub fn new_bedrock(
+        model: String,
+        timeout_s: u64,
+        system_prompt: String,
+        api_key: String,
+        model_ctx: usize,
+    ) -> Self {
+        Self {
+            kind: ProviderKind::Bedrock,
+            client: Self::build_client(timeout_s),
+            base_url: String::new(),
+            model,
+            system_prompt,
+            api_key: Some(api_key),
+            model_ctx,
+            reasoning_config: Default::default(),
+        }
+    }
+
+    /// Creates a new OpenRouter provider instance.
+    pub fn new_openrouter(
+        model: String,
+        timeout_s: u64,
+        system_prompt: String,
+        api_key: String,
+        model_ctx: usize,
+    ) -> Self {
+        Self {
+            kind: ProviderKind::OpenRouter,
+            client: Self::build_client(timeout_s),
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            model,
+            system_prompt,
+            api_key: Some(api_key),
+            model_ctx,
+            reasoning_config: Default::default(),
+        }
+    }
+
+    /// Returns true if this provider supports native tool/function calling.
+    pub fn supports_tools(&self) -> bool {
+        tools::provider_supports_tools(&self.kind)
     }
 
     /// Overrides the model name.
@@ -214,6 +301,9 @@ impl Provider {
             ProviderKind::OpenAI => format!("openai/{}", self.model),
             ProviderKind::Gemini => format!("gemini/{}", self.model),
             ProviderKind::Anthropic => format!("anthropic/{}", self.model),
+            ProviderKind::Azure => format!("azure/{}", self.model),
+            ProviderKind::Bedrock => format!("bedrock/{}", self.model),
+            ProviderKind::OpenRouter => format!("openrouter/{}", self.model),
         }
     }
 
@@ -256,6 +346,9 @@ impl Provider {
                 ProviderKind::OpenAI => self.list_models_openai().await,
                 ProviderKind::Gemini => self.list_models_gemini().await,
                 ProviderKind::Anthropic => self.list_models_anthropic().await,
+                ProviderKind::Azure => self.list_models_azure().await,
+                ProviderKind::Bedrock => self.list_models_bedrock().await,
+                ProviderKind::OpenRouter => self.list_models_openrouter().await,
             }
         })
         .await
@@ -269,6 +362,9 @@ impl Provider {
                 ProviderKind::OpenAI => self.healthcheck_openai().await,
                 ProviderKind::Gemini => self.healthcheck_gemini().await,
                 ProviderKind::Anthropic => self.healthcheck_anthropic().await,
+                ProviderKind::Azure => self.healthcheck_azure().await,
+                ProviderKind::Bedrock => self.healthcheck_bedrock().await,
+                ProviderKind::OpenRouter => self.healthcheck_openrouter().await,
             }
         })
         .await
@@ -282,6 +378,175 @@ impl Provider {
                 ProviderKind::OpenAI => self.complete_json_openai(user_prompt).await,
                 ProviderKind::Gemini => self.complete_json_gemini(user_prompt).await,
                 ProviderKind::Anthropic => self.complete_json_anthropic(user_prompt).await,
+                ProviderKind::Azure => self.complete_json_azure(user_prompt).await,
+                ProviderKind::Bedrock => self.complete_json_bedrock(user_prompt).await,
+                ProviderKind::OpenRouter => self.complete_json_openrouter(user_prompt).await,
+            }
+        })
+        .await
+    }
+
+    /// Sends a prompt with an image attached, streaming response.
+    /// Supported by OpenAI, Anthropic, Gemini, and Ollama.
+    pub async fn complete_chat_stream_with_vision(
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        mime_type: &str,
+        base64_data: &str,
+    ) -> Result<String> {
+        Self::with_retry(|| async {
+            match self.kind {
+                ProviderKind::OpenAI => {
+                    self.complete_chat_vision_openai(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        mime_type,
+                        base64_data,
+                    )
+                    .await
+                }
+                ProviderKind::Anthropic => {
+                    self.complete_chat_vision_anthropic(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        mime_type,
+                        base64_data,
+                    )
+                    .await
+                }
+                ProviderKind::Gemini => {
+                    self.complete_chat_vision_gemini(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        mime_type,
+                        base64_data,
+                    )
+                    .await
+                }
+                ProviderKind::Ollama => {
+                    self.complete_chat_vision_ollama(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        mime_type,
+                        base64_data,
+                    )
+                    .await
+                }
+                ProviderKind::Azure => {
+                    self.complete_chat_vision_azure(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        mime_type,
+                        base64_data,
+                    )
+                    .await
+                }
+                ProviderKind::Bedrock => {
+                    self.complete_chat_vision_bedrock(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        mime_type,
+                        base64_data,
+                    )
+                    .await
+                }
+                ProviderKind::OpenRouter => {
+                    self.complete_chat_vision_openrouter(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        mime_type,
+                        base64_data,
+                    )
+                    .await
+                }
+            }
+        })
+        .await
+    }
+
+    /// Sends a prompt with streaming response, printing tokens as they arrive.
+    /// Supports tool calls: returns ToolResponse which may contain text or tool calls.
+    pub async fn complete_chat_stream_with_tools(
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        tool_specs: &[tools::ToolSpec],
+    ) -> Result<tools::ToolResponse> {
+        Self::with_retry(|| async {
+            match self.kind {
+                ProviderKind::Ollama => {
+                    self.complete_chat_stream_tools_ollama(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        tool_specs,
+                    )
+                    .await
+                }
+                ProviderKind::OpenAI => {
+                    self.complete_chat_stream_tools_openai(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        tool_specs,
+                    )
+                    .await
+                }
+                ProviderKind::Gemini => {
+                    self.complete_chat_stream_tools_gemini(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        tool_specs,
+                    )
+                    .await
+                }
+                ProviderKind::Anthropic => {
+                    self.complete_chat_stream_tools_anthropic(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        tool_specs,
+                    )
+                    .await
+                }
+                ProviderKind::Azure => {
+                    self.complete_chat_stream_tools_azure(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        tool_specs,
+                    )
+                    .await
+                }
+                ProviderKind::Bedrock => {
+                    self.complete_chat_stream_tools_bedrock(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        tool_specs,
+                    )
+                    .await
+                }
+                ProviderKind::OpenRouter => {
+                    self.complete_chat_stream_tools_openrouter(
+                        user_prompt,
+                        system_prompt,
+                        history,
+                        tool_specs,
+                    )
+                    .await
+                }
             }
         })
         .await
@@ -310,6 +575,18 @@ impl Provider {
                 }
                 ProviderKind::Anthropic => {
                     self.complete_chat_stream_anthropic(user_prompt, system_prompt, history)
+                        .await
+                }
+                ProviderKind::Azure => {
+                    self.complete_chat_stream_azure(user_prompt, system_prompt, history)
+                        .await
+                }
+                ProviderKind::Bedrock => {
+                    self.complete_chat_stream_bedrock(user_prompt, system_prompt, history)
+                        .await
+                }
+                ProviderKind::OpenRouter => {
+                    self.complete_chat_stream_openrouter(user_prompt, system_prompt, history)
                         .await
                 }
             }
@@ -344,9 +621,6 @@ impl Provider {
         anyhow!("{} API failed ({}): {}", provider, status, err_msg)
     }
 
-    const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
-    const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-
     /// Core streaming loop: reads SSE bytes, buffers partial lines, yields each line
     /// to the provided callback. The callback receives the trimmed line and a mutable
     /// output buffer. Return `Ok(true)` from the callback to continue, `Ok(false)` to
@@ -364,7 +638,7 @@ impl Provider {
             if STREAM_CANCELLED.load(Ordering::SeqCst) {
                 break;
             }
-            let chunk = match timeout(Self::STREAM_CHUNK_TIMEOUT, stream.next()).await {
+            let chunk = match timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
                 Ok(Some(Ok(c))) => c,
                 Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
                 Ok(None) => break,
@@ -405,10 +679,10 @@ impl Provider {
                         .and_then(|c| c.delta.content.as_deref())
                     {
                         full.push_str(content);
-                        if full.len() > Self::MAX_RESPONSE_BYTES {
+                        if full.len() > MAX_RESPONSE_BYTES {
                             return Err(anyhow!(
                                 "response too large ({} bytes)",
-                                Self::MAX_RESPONSE_BYTES
+                                MAX_RESPONSE_BYTES
                             ));
                         }
                     }
@@ -420,7 +694,7 @@ impl Provider {
     }
 
     async fn stream_anthropic_sse(&self, resp: reqwest::Response) -> Result<String> {
-        Self::stream_lines(resp, |trimmed, full| {
+        let result = Self::stream_lines(resp, |trimmed, full| {
             if trimmed.starts_with("event: ") {
                 return Ok(true);
             }
@@ -437,19 +711,43 @@ impl Provider {
                                 full.push_str(&text);
                             }
                         }
+                        Some("message_start") => {
+                            if let Some(usage) = chunk.message.and_then(|m| m.usage) {
+                                let mut last = crate::provider::anthropic::LAST_USAGE
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                if let Some(t) = usage.input_tokens {
+                                    last.input_tokens = t;
+                                }
+                                if let Some(t) = usage.cache_creation_input_tokens {
+                                    last.cache_creation_input_tokens = t;
+                                }
+                                if let Some(t) = usage.cache_read_input_tokens {
+                                    last.cache_read_input_tokens = t;
+                                }
+                            }
+                        }
+                        Some("message_delta") => {
+                            if let Some(usage) = chunk.usage {
+                                let mut last = crate::provider::anthropic::LAST_USAGE
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                if let Some(t) = usage.output_tokens {
+                                    last.output_tokens = t;
+                                }
+                            }
+                        }
                         _ => {}
                     }
-                    if full.len() > Self::MAX_RESPONSE_BYTES {
-                        return Err(anyhow!(
-                            "response too large ({} bytes)",
-                            Self::MAX_RESPONSE_BYTES
-                        ));
+                    if full.len() > MAX_RESPONSE_BYTES {
+                        return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
                     }
                 }
             }
             Ok(true)
         })
-        .await
+        .await;
+        result
     }
 
     async fn handle_ollama_error(&self, resp: reqwest::Response, url: &str) -> Result<String> {
@@ -508,10 +806,10 @@ impl Provider {
                         .and_then(|p| p.text)
                     {
                         full.push_str(&text);
-                        if full.len() > Self::MAX_RESPONSE_BYTES {
+                        if full.len() > MAX_RESPONSE_BYTES {
                             return Err(anyhow!(
                                 "response too large ({} bytes)",
-                                Self::MAX_RESPONSE_BYTES
+                                MAX_RESPONSE_BYTES
                             ));
                         }
                     }

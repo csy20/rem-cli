@@ -340,6 +340,39 @@ pub(crate) fn handle_tokens(session: &ChatSession) {
             ui::theme::paint_dim(&t, "empty (no history)")
         );
     }
+
+    let usage = crate::provider::anthropic::last_anthropic_usage();
+    if usage.input_tokens > 0 || usage.output_tokens > 0 {
+        println!(
+            "{}   {:<18} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "input tokens:"),
+            ui::theme::paint_dim(&t, &usage.input_tokens.to_string())
+        );
+        println!(
+            "{}   {:<18} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "output tokens:"),
+            ui::theme::paint_dim(&t, &usage.output_tokens.to_string())
+        );
+        if usage.cache_creation_input_tokens > 0 {
+            println!(
+                "{}   {:<18} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_bright(&t, "cache created:"),
+                ui::theme::paint_dim(&t, &format!("{} tokens", usage.cache_creation_input_tokens))
+            );
+        }
+        if usage.cache_read_input_tokens > 0 {
+            println!(
+                "{}   {:<18} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_bright(&t, "cache read:"),
+                ui::theme::paint_dim(&t, &format!("{} tokens", usage.cache_read_input_tokens))
+            );
+        }
+    }
+
     println!("{}", ui::theme::paint_rail_empty(&t));
 }
 

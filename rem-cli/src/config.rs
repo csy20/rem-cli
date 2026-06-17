@@ -140,7 +140,7 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
         .and_then(|p| p.api_key.clone())
         .or_else(|| cfg.api_key.clone());
 
-    match kind {
+    let mut provider = match kind {
         ProviderKind::OpenAI => {
             let base_url = api_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string());
             let key =
@@ -151,14 +151,7 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
                     ui::theme::paint_warning(&ui::theme::active(), "warning:"),
                 );
             }
-            Ok(Provider::new_openai(
-                base_url,
-                model,
-                timeout_s,
-                system_prompt,
-                key,
-                model_ctx,
-            ))
+            Provider::new_openai(base_url, model, timeout_s, system_prompt, key, model_ctx)
         }
         ProviderKind::Gemini => {
             let key =
@@ -174,13 +167,7 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
             } else {
                 model
             };
-            Ok(Provider::new_gemini(
-                key,
-                model,
-                timeout_s,
-                system_prompt,
-                model_ctx,
-            ))
+            Provider::new_gemini(key, model, timeout_s, system_prompt, model_ctx)
         }
         ProviderKind::Anthropic => {
             let key =
@@ -196,25 +183,65 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
             } else {
                 model
             };
-            Ok(Provider::new_anthropic(
-                key,
-                model,
-                timeout_s,
-                system_prompt,
-                model_ctx,
-            ))
+            Provider::new_anthropic(key, model, timeout_s, system_prompt, model_ctx)
         }
-        _ => {
+        ProviderKind::Azure => {
+            let base_url = api_url.unwrap_or_else(|| {
+                std::env::var("AZURE_OPENAI_ENDPOINT")
+                    .unwrap_or_else(|_| "https://api.openai.azure.com".to_string())
+            });
+            let key = api_key.unwrap_or_else(|| {
+                std::env::var("AZURE_OPENAI_API_KEY")
+                    .or_else(|_| std::env::var("AZURE_OPENAI_KEY"))
+                    .unwrap_or_default()
+            });
+            if key.is_empty() {
+                eprintln!(
+                    "{} provider 'azure' requires --api-key or AZURE_OPENAI_API_KEY env var",
+                    ui::theme::paint_warning(&ui::theme::active(), "warning:"),
+                );
+            }
+            Provider::new_azure(base_url, model, timeout_s, system_prompt, key, model_ctx)
+        }
+        ProviderKind::Bedrock => {
+            let model = if model == "rem-coder:latest" || model == "rem-coder" {
+                "anthropic.claude-sonnet-4-20250514".to_string()
+            } else {
+                model
+            };
+            let key =
+                api_key.unwrap_or_else(|| std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default());
+            Provider::new_bedrock(model, timeout_s, system_prompt, key, model_ctx)
+        }
+        ProviderKind::OpenRouter => {
+            let key =
+                api_key.unwrap_or_else(|| std::env::var("OPENROUTER_API_KEY").unwrap_or_default());
+            if key.is_empty() {
+                eprintln!(
+                    "{} provider 'openrouter' requires --api-key or OPENROUTER_API_KEY env var",
+                    ui::theme::paint_warning(&ui::theme::active(), "warning:"),
+                );
+            }
+            let model = if model == "rem-coder:latest" || model == "rem-coder" {
+                "openai/gpt-4o".to_string()
+            } else {
+                model
+            };
+            Provider::new_openrouter(model, timeout_s, system_prompt, key, model_ctx)
+        }
+        ProviderKind::Ollama => {
             let base_url = api_url.unwrap_or_else(|| cfg.ollama_url.clone());
-            Ok(Provider::new_ollama(
-                base_url,
-                model,
-                timeout_s,
-                system_prompt,
-                model_ctx,
-            ))
+            Provider::new_ollama(base_url, model, timeout_s, system_prompt, model_ctx)
         }
+    };
+    if let Some(effort) = &cfg.reasoning_effort {
+        provider.reasoning_config.effort = crate::reasoning::ReasoningEffort::from_str(effort);
+        provider.reasoning_config.enabled = true;
     }
+    if let Some(budget) = cfg.thinking_budget {
+        provider.reasoning_config.thinking_budget = budget;
+    }
+    Ok(provider)
 }
 
 /// Loads the system prompt from file, falling back to the built-in default.
@@ -241,7 +268,16 @@ pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
 /// Returns the (possibly adjusted) config.
 pub(crate) fn validate_config(cfg: &AppConfig) {
     let t = ui::theme::active();
-    let known_providers = ["ollama", "openai", "vllm", "anthropic", "gemini"];
+    let known_providers = [
+        "ollama",
+        "openai",
+        "vllm",
+        "anthropic",
+        "gemini",
+        "azure",
+        "bedrock",
+        "openrouter",
+    ];
     if !known_providers.contains(&cfg.provider.as_str()) {
         eprintln!(
             "{} unknown provider '{}'. Known: {}",
@@ -278,6 +314,26 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
         if !has_key {
             eprintln!(
                 "{} provider 'gemini' may need --api-key or GEMINI_API_KEY",
+                ui::theme::paint_warning(&t, "warning:"),
+            );
+        }
+    }
+    if cfg.provider == "azure" {
+        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
+            || std::env::var("AZURE_OPENAI_API_KEY").is_ok_and(|k| !k.is_empty());
+        if !has_key {
+            eprintln!(
+                "{} provider 'azure' may need --api-key or AZURE_OPENAI_API_KEY",
+                ui::theme::paint_warning(&t, "warning:"),
+            );
+        }
+    }
+    if cfg.provider == "openrouter" {
+        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
+            || std::env::var("OPENROUTER_API_KEY").is_ok_and(|k| !k.is_empty());
+        if !has_key {
+            eprintln!(
+                "{} provider 'openrouter' may need --api-key or OPENROUTER_API_KEY",
                 ui::theme::paint_warning(&t, "warning:"),
             );
         }
@@ -389,7 +445,16 @@ mod tests {
 
     #[test]
     fn validate_config_accepts_known_providers() {
-        for provider in &["ollama", "openai", "vllm", "anthropic", "gemini"] {
+        for provider in &[
+            "ollama",
+            "openai",
+            "vllm",
+            "anthropic",
+            "gemini",
+            "azure",
+            "bedrock",
+            "openrouter",
+        ] {
             let mut cfg = AppConfig::default();
             cfg.provider = provider.to_string();
             validate_config(&cfg);

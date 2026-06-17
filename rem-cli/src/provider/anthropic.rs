@@ -2,9 +2,35 @@
 //! Contains Anthropic-specific request/response types and API methods
 //! (`chat_completion`, `chat_completion_stream`, `models`, `health`).
 
+use std::sync::Mutex;
+
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
+
+use super::tools::{ToolCall, ToolResponse, ToolSpec};
+use super::STREAM_CANCELLED;
+use std::sync::atomic::Ordering;
+
+/// Tracks usage metadata from Anthropic stream responses.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AnthropicUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub cache_creation_input_tokens: u32,
+    pub cache_read_input_tokens: u32,
+}
+
+pub(crate) static LAST_USAGE: Mutex<AnthropicUsage> = Mutex::new(AnthropicUsage {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+});
+
+pub(crate) fn last_anthropic_usage() -> AnthropicUsage {
+    LAST_USAGE.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct AnthropicResponse {
@@ -14,6 +40,15 @@ pub struct AnthropicResponse {
 #[derive(Debug, Deserialize)]
 pub struct AnthropicContentBlock {
     pub text: Option<String>,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    pub block_type: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -22,11 +57,36 @@ pub struct AnthropicStreamChunk {
     pub chunk_type: Option<String>,
     pub delta: Option<AnthropicDelta>,
     pub content_block: Option<AnthropicContentBlock>,
+    pub index: Option<u32>,
+    #[serde(default)]
+    pub usage: Option<AnthropicStreamUsage>,
+    #[serde(default)]
+    pub message: Option<AnthropicStreamMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnthropicStreamUsage {
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AnthropicStreamMessage {
+    pub usage: Option<AnthropicStreamUsage>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AnthropicDelta {
     pub text: Option<String>,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    pub delta_type: Option<String>,
+    #[serde(default)]
+    pub partial_json: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +142,64 @@ impl super::Provider {
         Ok(())
     }
 
+    pub(super) async fn complete_chat_vision_anthropic(
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        mime_type: &str,
+        base64_data: &str,
+    ) -> Result<String> {
+        let key = self.api_key.as_deref().unwrap_or("");
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{}/v1/messages", base);
+
+        let mut content_blocks: Vec<serde_json::Value> = vec![];
+        if !history.is_empty() {
+            content_blocks.push(json!({"type": "text", "text": format!("[Previous conversation]:\n{}", history), "cache_control": {"type": "ephemeral"}}));
+        }
+        content_blocks.push(json!({"type": "text", "text": user_prompt}));
+        content_blocks.push(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": base64_data
+            }
+        }));
+
+        let system_with_cache = json!([
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+        ]);
+
+        let payload = json!({
+            "model": self.model,
+            "system": system_with_cache,
+            "messages": [
+                {"role": "user", "content": content_blocks}
+            ],
+            "max_tokens": 4096,
+            "stream": true
+        });
+
+        let resp = self
+            .client
+            .post(url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Anthropic vision API")?;
+
+        if !resp.status().is_success() {
+            return Err(self.parse_api_error("Anthropic", resp).await);
+        }
+
+        self.stream_anthropic_sse(resp).await
+    }
+
     pub(super) async fn complete_json_anthropic(
         &self,
         user_prompt: &str,
@@ -89,9 +207,14 @@ impl super::Provider {
         let key = self.api_key.as_deref().unwrap_or("");
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{}/v1/messages", base);
+
+        let system_with_cache = json!([
+            {"type": "text", "text": self.system_prompt.clone(), "cache_control": {"type": "ephemeral"}}
+        ]);
+
         let payload = json!({
             "model": self.model,
-            "system": self.system_prompt,
+            "system": system_with_cache,
             "messages": [
                 {"role": "user", "content": format!("{}\n\nReturn JSON only. Respond with a valid JSON object.", user_prompt)}
             ],
@@ -134,17 +257,32 @@ impl super::Provider {
 
         let mut messages: Vec<serde_json::Value> = vec![];
         if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": format!("[Previous conversation]:\n{}", history)}));
+            messages.push(json!({"role": "user", "content": [
+                {"type": "text", "text": format!("[Previous conversation]:\n{}", history), "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": user_prompt}
+            ]}));
+        } else {
+            messages.push(json!({"role": "user", "content": user_prompt}));
         }
-        messages.push(json!({"role": "user", "content": user_prompt}));
 
-        let payload = json!({
+        let system_with_cache = json!([
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+        ]);
+
+        let mut payload = json!({
             "model": self.model,
-            "system": system_prompt,
+            "system": system_with_cache,
             "messages": messages,
             "max_tokens": 4096,
             "stream": true
         });
+
+        if self.reasoning_config.enabled && crate::reasoning::is_reasoning_model(&self.model) {
+            payload["thinking"] = json!({
+                "type": "enabled",
+                "budget_tokens": self.reasoning_config.thinking_budget
+            });
+        }
 
         let resp = self
             .client
@@ -162,5 +300,172 @@ impl super::Provider {
         }
 
         self.stream_anthropic_sse(resp).await
+    }
+
+    pub(super) async fn complete_chat_stream_tools_anthropic(
+        &self,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        tool_specs: &[ToolSpec],
+    ) -> Result<ToolResponse> {
+        let key = self.api_key.as_deref().unwrap_or("");
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{}/v1/messages", base);
+
+        let mut messages: Vec<serde_json::Value> = vec![];
+        if !history.is_empty() {
+            messages.push(json!({"role": "user", "content": [
+                {"type": "text", "text": format!("[Previous conversation]:\n{}", history), "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": user_prompt}
+            ]}));
+        } else {
+            messages.push(json!({"role": "user", "content": user_prompt}));
+        }
+
+        let tools: Vec<serde_json::Value> =
+            tool_specs.iter().map(|t| t.to_anthropic_tool()).collect();
+
+        let system_with_cache = json!([
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
+        ]);
+
+        let mut payload = json!({
+            "model": self.model,
+            "system": system_with_cache,
+            "messages": messages,
+            "max_tokens": 4096,
+            "stream": true
+        });
+        if !tools.is_empty() {
+            payload["tools"] = json!(tools);
+        }
+
+        let resp = self
+            .client
+            .post(url)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Anthropic API")?;
+
+        if !resp.status().is_success() {
+            return Err(self.parse_api_error("Anthropic", resp).await);
+        }
+
+        // Stream and collect text + tool calls from Anthropic SSE
+        let mut full_text = String::with_capacity(4096);
+        let mut tool_calls: Vec<(u32, String, String, String)> = Vec::new(); // (index, id, name, args_buffer)
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::with_capacity(4096);
+        let mut cursor = 0usize;
+
+        loop {
+            if STREAM_CANCELLED.load(Ordering::SeqCst) {
+                break;
+            }
+            use futures_util::StreamExt;
+            let chunk =
+                match tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await
+                {
+                    Ok(Some(Ok(c))) => c,
+                    Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
+                    Ok(None) => break,
+                    Err(_) => return Err(anyhow!("stream timed out")),
+                };
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            loop {
+                let tail = &buf[cursor..];
+                match tail.find('\n') {
+                    Some(pos) => {
+                        let line = &tail[..pos];
+                        cursor += pos + 1;
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if trimmed.starts_with("event: ") {
+                            continue;
+                        }
+                        if let Some(data) = trimmed.strip_prefix("data: ") {
+                            if let Ok(chunk) =
+                                serde_json::from_str::<super::anthropic::AnthropicStreamChunk>(data)
+                            {
+                                let ct = chunk.chunk_type.as_deref().unwrap_or("");
+                                match ct {
+                                    "content_block_start" => {
+                                        if let Some(ref block) = chunk.content_block {
+                                            if block.block_type.as_deref() == Some("tool_use") {
+                                                let idx = chunk.index.unwrap_or(0);
+                                                let id = block.id.clone().unwrap_or_default();
+                                                let name = block.name.clone().unwrap_or_default();
+                                                // Find or insert at index
+                                                if let Some(pos) = tool_calls
+                                                    .iter()
+                                                    .position(|(i, _, _, _)| *i == idx)
+                                                {
+                                                    tool_calls[pos].1 = id;
+                                                    tool_calls[pos].2 = name;
+                                                } else {
+                                                    tool_calls.push((idx, id, name, String::new()));
+                                                }
+                                            } else if block.block_type.as_deref() == Some("text") {
+                                                if let Some(ref text) = block.text {
+                                                    full_text.push_str(text);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "content_block_delta" => {
+                                        if let Some(ref delta) = chunk.delta {
+                                            if delta.delta_type.as_deref()
+                                                == Some("input_json_delta")
+                                            {
+                                                let idx = chunk.index.unwrap_or(0);
+                                                if let Some(ref partial) = delta.partial_json {
+                                                    if let Some(pos) = tool_calls
+                                                        .iter()
+                                                        .position(|(i, _, _, _)| *i == idx)
+                                                    {
+                                                        tool_calls[pos].3.push_str(partial);
+                                                    }
+                                                }
+                                            } else if let Some(ref text) = delta.text {
+                                                full_text.push_str(text);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if full_text.len() > super::MAX_RESPONSE_BYTES {
+                return Err(anyhow!(
+                    "response too large ({} bytes)",
+                    super::MAX_RESPONSE_BYTES
+                ));
+            }
+        }
+
+        if !tool_calls.is_empty() {
+            let calls: Vec<ToolCall> = tool_calls
+                .into_iter()
+                .map(|(_, id, name, args_str)| ToolCall {
+                    id,
+                    name,
+                    arguments: serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null),
+                })
+                .collect();
+            Ok(ToolResponse::ToolCalls(calls))
+        } else {
+            Ok(ToolResponse::Text(full_text))
+        }
     }
 }

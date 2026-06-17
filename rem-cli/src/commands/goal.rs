@@ -13,6 +13,7 @@ use crate::agentic::{
 use crate::chat::ChatSession;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
+use crate::tool_executor;
 use crate::ui;
 use crate::{extract_code_blocks_with_names, CHAT_SYSTEM_PROMPT_CODE};
 
@@ -39,6 +40,50 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         ui::theme::paint_dim(&t, "REM will work until goal is met. Ctrl+C to stop."),
     );
     println!("{}", ui::theme::paint_rail_empty(&t));
+
+    // Auto-detect: use native tool calling if provider supports it
+    if client.supports_tools() {
+        println!(
+            "{} {} using native tool calling",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "\u{26A1}")
+        );
+        let result = tool_executor::run_tool_loop(
+            client,
+            condition,
+            "[MODE: CODE] Use tools to achieve the goal. When done, explain what was accomplished.",
+            "",
+        )
+        .await;
+        match result {
+            Ok(text) => {
+                println!("\n{}", text);
+                println!("{}", ui::theme::paint_rail_empty(&t));
+                println!(
+                    "{} {} goal completed",
+                    ui::theme::paint_success_label(&t, "\u{258C}"),
+                    ui::theme::paint_success_label(&t, "\u{2713}")
+                );
+
+                let files = extract_code_blocks_with_names(&text);
+                if !files.is_empty() {
+                    session.last_files = files.clone();
+                    crate::commands::auto_write_files(session, &files);
+                }
+                session.history.push((format!("/goal {}", condition), text));
+            }
+            Err(e) => {
+                println!(
+                    "{} {} tool loop failed: {}",
+                    ui::theme::paint_error_label(&t, "\u{258C}"),
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
+                    e
+                );
+            }
+        }
+        println!("{}", ui::theme::paint_rail_empty(&t));
+        return;
+    }
 
     let goal_prompt_text = format!(
         "GOAL: {}\n\nYour task is to achieve this goal. You may need to:\n\

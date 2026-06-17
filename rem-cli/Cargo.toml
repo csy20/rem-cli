@@ -25,6 +25,8 @@ walkdir = "2.5"
 rayon = "1.10"
 ignore = "0.4"
 similar = "2.5"
+aws-sdk-bedrockruntime = "1"
+aws-config = "1"
 
 [dev-dependencies]
 wiremock = "0.6"

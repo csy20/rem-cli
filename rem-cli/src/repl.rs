@@ -13,9 +13,10 @@ use crate::commands::{
     auto_write_files, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy,
     handle_diff, handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint,
     handle_list_files, handle_memory, handle_memory_set, handle_mode, handle_model, handle_plan,
-    handle_provider, handle_refactor, handle_reset, handle_resume_session, handle_review,
-    handle_save_session, handle_search, handle_test, handle_theme, handle_tokens, handle_undo,
-    handle_why, handle_write, print_chat_help, print_last_files, prompt_for_path,
+    handle_provider, handle_reasoning, handle_refactor, handle_reset, handle_resume_session,
+    handle_review, handle_save_session, handle_search, handle_test, handle_theme, handle_tokens,
+    handle_undo, handle_vision, handle_why, handle_write, print_chat_help, print_last_files,
+    prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskIntent};
@@ -243,6 +244,10 @@ async fn dispatch_slash_command(
             handle_why(session);
             return false;
         }
+        "/reasoning" => {
+            handle_reasoning(client, cfg, if args.is_empty() { None } else { Some(args) });
+            return false;
+        }
         "/resume" => {
             handle_resume_session(session);
             return false;
@@ -337,6 +342,10 @@ async fn dispatch_slash_command(
         }
         "/goal" => {
             handle_goal(client, session, args).await;
+            false
+        }
+        "/vision" => {
+            handle_vision(client, session, args).await;
             false
         }
         _ => false,

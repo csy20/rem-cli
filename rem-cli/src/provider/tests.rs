@@ -64,6 +64,7 @@ async fn test_ollama_list_models() {
         system_prompt: String::new(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let models = provider.list_models_ollama().await.unwrap();
@@ -89,6 +90,7 @@ async fn test_ollama_healthcheck_success() {
         system_prompt: String::new(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     assert!(provider.healthcheck_ollama().await.is_ok());
@@ -113,6 +115,7 @@ async fn test_ollama_healthcheck_no_models() {
         system_prompt: String::new(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     assert!(provider.healthcheck_ollama().await.is_err());
@@ -145,6 +148,7 @@ async fn test_ollama_complete_json() {
         system_prompt: "You are REM.".to_string(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let reply = provider.complete_json_ollama("write hello").await.unwrap();
@@ -171,6 +175,7 @@ async fn test_ollama_complete_json_fallback() {
         system_prompt: String::new(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let reply = provider.complete_json_ollama("hello").await.unwrap();
@@ -196,6 +201,7 @@ async fn test_ollama_model_not_found() {
         system_prompt: String::new(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let err = provider.complete_json_ollama("hello").await.unwrap_err();
@@ -223,6 +229,7 @@ async fn test_ollama_chat_stream() {
         system_prompt: String::new(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let result = provider
@@ -253,6 +260,7 @@ async fn test_openai_list_models() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let models = provider.list_models_openai().await.unwrap();
@@ -279,6 +287,7 @@ async fn test_openai_complete_json() {
         system_prompt: "Be helpful.".to_string(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let reply = provider.complete_json_openai("write code").await.unwrap();
@@ -305,6 +314,7 @@ async fn test_openai_chat_stream() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let result = provider
@@ -333,6 +343,7 @@ async fn test_openai_api_error() {
         system_prompt: String::new(),
         api_key: Some("bad-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let err = provider.complete_json_openai("hello").await.unwrap_err();
@@ -353,6 +364,7 @@ async fn test_gemini_healthcheck_no_key() {
         system_prompt: String::new(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     assert!(provider.healthcheck_gemini().await.is_err());
@@ -379,6 +391,7 @@ async fn test_gemini_list_models() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let models = provider.list_models_gemini().await.unwrap();
@@ -409,6 +422,7 @@ async fn test_gemini_complete_json() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let reply = provider.complete_json_gemini("hello").await.unwrap();
@@ -433,6 +447,7 @@ async fn test_gemini_chat_stream() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let result = provider
@@ -454,6 +469,7 @@ async fn test_anthropic_healthcheck_no_key() {
         system_prompt: String::new(),
         api_key: None,
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     assert!(provider.healthcheck_anthropic().await.is_err());
@@ -480,6 +496,7 @@ async fn test_anthropic_list_models() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let models = provider.list_models_anthropic().await.unwrap();
@@ -506,6 +523,7 @@ async fn test_anthropic_complete_json() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let reply = provider.complete_json_anthropic("hello").await.unwrap();
@@ -530,6 +548,7 @@ async fn test_anthropic_chat_stream() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let result = provider
@@ -557,6 +576,7 @@ async fn test_anthropic_api_error() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let err = provider.complete_json_anthropic("hello").await.unwrap_err();
@@ -585,6 +605,7 @@ async fn test_openai_healthcheck_success() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     assert!(provider.healthcheck_openai().await.is_ok());
@@ -609,6 +630,7 @@ async fn test_openai_healthcheck_empty_models() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     assert!(provider.healthcheck_openai().await.is_ok());
@@ -634,6 +656,7 @@ async fn test_gemini_healthcheck_success() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     assert!(provider.healthcheck_gemini().await.is_ok());
@@ -659,6 +682,7 @@ async fn test_anthropic_healthcheck_success() {
         system_prompt: String::new(),
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     assert!(provider.healthcheck_anthropic().await.is_ok());
@@ -682,6 +706,7 @@ async fn test_gemini_api_error() {
         system_prompt: String::new(),
         api_key: Some("bad-key".to_string()),
         model_ctx: 4096,
+        reasoning_config: Default::default(),
     };
 
     let err = provider.complete_json_gemini("hello").await.unwrap_err();

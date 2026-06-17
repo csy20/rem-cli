@@ -96,17 +96,20 @@ pub(crate) fn registry() -> CommandRegistry {
         ("/review", CommandInfo { is_async: true }),
         ("/compact", CommandInfo { is_async: true }),
         ("/goal", CommandInfo { is_async: true }),
+        ("/vision", CommandInfo { is_async: true }),
+        ("/reasoning", CommandInfo { is_async: false }),
     ])
 }
 
+pub(crate) use crate::vision::handle_vision;
 pub(crate) use files::{
     auto_write_files, handle_copy, handle_undo, handle_write, print_last_files, prompt_for_path,
 };
 pub(crate) use goal::handle_goal;
 pub(crate) use help::print_chat_help;
 pub(crate) use repl::{
-    handle_clear, handle_mode, handle_model, handle_plan, handle_provider, handle_reset,
-    handle_theme, handle_why,
+    handle_clear, handle_mode, handle_model, handle_plan, handle_provider, handle_reasoning,
+    handle_reset, handle_theme, handle_why,
 };
 pub(crate) use review::{handle_diff, handle_review};
 pub(crate) use session::{
