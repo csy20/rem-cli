@@ -3,23 +3,6 @@
 
 use std::collections::BTreeMap;
 
-pub(crate) const BLOCKED_COMMAND_PATTERNS: [&str; 14] = [
-    "rm -rf /",
-    "rm -rf --no-preserve-root",
-    "rm -rf /*",
-    "mkfs",
-    "dd if=",
-    ":(){:|:&};:",
-    "shutdown",
-    "reboot",
-    "> /dev/sda",
-    "> /dev/nvme",
-    "chmod 777 /",
-    "wget http://",
-    "curl http://",
-    "sudo dd",
-];
-
 /// Normalizes a command string to catch obfuscation attempts.
 /// Strips extra whitespace, shell escapes, and common tricks.
 fn normalize_cmd(cmd: &str) -> String {
@@ -131,24 +114,6 @@ pub(crate) fn sanitize_commands(cmds: &[String]) -> Vec<&str> {
         out.push(cmd.trim());
     }
     out
-}
-
-/// Masks sensitive strings (e.g., API keys) for safe display.
-/// Shows only the first 4 and last 4 characters.
-pub(crate) fn mask_sensitive(s: &str) -> String {
-    if s.len() <= 8 {
-        return "****".to_string();
-    }
-    let prefix: String = s.chars().take(4).collect();
-    let suffix: String = s
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{}...{}", prefix, suffix)
 }
 
 #[cfg(test)]

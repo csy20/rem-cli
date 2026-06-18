@@ -69,12 +69,13 @@ pub struct IndexChunk {
     pub(crate) path_lower: String,
 }
 
-/// Try to load an index for the given project dir.
+/// Try to load an index for the given project dir, returning the full `CodebaseIndex`
+/// (with inverted_index, doc_freqs, and pre-lowercased chunk fields).
 /// Conventional locations (in order):
 ///   <project>/.rem/codebase_index.json
 ///   <project>/models/codebase_index.json   (legacy)
 /// Returns None if not present or unreadable.
-pub fn load_codebase_index(project_dir: &Path) -> Option<Vec<IndexChunk>> {
+pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
     let candidates = [
         project_dir.join(".rem/codebase_index.json"),
         project_dir.join("models/codebase_index.json"),
@@ -82,31 +83,47 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<Vec<IndexChunk>> {
     for p in &candidates {
         if let Ok(text) = fs::read_to_string(p) {
             // Try v2 format first (CodebaseIndex with inverted_index)
-            if let Ok(index) = serde_json::from_str::<CodebaseIndex>(&text) {
+            if let Ok(mut index) = serde_json::from_str::<CodebaseIndex>(&text) {
                 if !index.chunks.is_empty() {
-                    let mut chunks = index.chunks;
-                    for chunk in &mut chunks {
+                    for chunk in &mut index.chunks {
                         chunk.content_lower = chunk.content.to_lowercase();
                         chunk.name_lower = chunk.name.to_lowercase();
                         chunk.path_lower = chunk.path.to_lowercase();
                     }
-                    return Some(chunks);
+                    // Rebuild inverted index if missing (e.g. migrated from v1)
+                    if index.inverted_index.is_empty() {
+                        index.inverted_index =
+                            build_inverted_index(&index.chunks, &mut index.doc_freqs);
+                        index.num_chunks = index.chunks.len();
+                    }
+                    return Some(index);
                 }
             }
             // Fallback: try v1 flat format
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
                 if let Some(arr) = data.get("chunks").and_then(|v| v.as_array()) {
-                    let mut out = Vec::new();
+                    let mut chunks = Vec::new();
                     for item in arr {
                         if let Ok(mut chunk) = serde_json::from_value::<IndexChunk>(item.clone()) {
                             chunk.content_lower = chunk.content.to_lowercase();
                             chunk.name_lower = chunk.name.to_lowercase();
                             chunk.path_lower = chunk.path.to_lowercase();
-                            out.push(chunk);
+                            chunks.push(chunk);
                         }
                     }
-                    if !out.is_empty() {
-                        return Some(out);
+                    if !chunks.is_empty() {
+                        let num_chunks = chunks.len();
+                        let mut doc_freqs = HashMap::new();
+                        let inverted_index = build_inverted_index(&chunks, &mut doc_freqs);
+                        return Some(CodebaseIndex {
+                            version: INDEX_VERSION,
+                            generated_at: String::new(),
+                            file_mtimes: HashMap::new(),
+                            chunks,
+                            inverted_index,
+                            doc_freqs,
+                            num_chunks,
+                        });
                     }
                 }
             }
@@ -115,38 +132,13 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<Vec<IndexChunk>> {
     None
 }
 
-/// Loads the full CodebaseIndex structure (with inverted index) for BM25 retrieval.
-/// Falls back to building one on-the-fly from raw chunks if only v1 format exists.
-pub fn load_full_index(project_dir: &Path) -> Option<CodebaseIndex> {
-    let candidates = [
-        project_dir.join(".rem/codebase_index.json"),
-        project_dir.join("models/codebase_index.json"),
-    ];
-    for p in &candidates {
-        if let Ok(text) = fs::read_to_string(p) {
-            if let Ok(mut index) = serde_json::from_str::<CodebaseIndex>(&text) {
-                // Ensure lowercase fields are populated
-                for chunk in &mut index.chunks {
-                    chunk.content_lower = chunk.content.to_lowercase();
-                    chunk.name_lower = chunk.name.to_lowercase();
-                    chunk.path_lower = chunk.path.to_lowercase();
-                }
-                // Rebuild inverted index if missing (e.g. migrated from v1)
-                if index.inverted_index.is_empty() && !index.chunks.is_empty() {
-                    rebuild_inverted_index(&mut index);
-                }
-                return Some(index);
-            }
-        }
-    }
-    None
-}
-
-/// Builds the inverted index and computes doc frequencies for BM25.
-fn rebuild_inverted_index(index: &mut CodebaseIndex) {
+/// Builds the inverted index and computes document frequencies from chunks.
+fn build_inverted_index(
+    chunks: &[IndexChunk],
+    doc_freqs: &mut HashMap<String, u32>,
+) -> HashMap<String, Vec<usize>> {
     let mut inverted: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut doc_freqs: HashMap<String, u32> = HashMap::new();
-    for (i, chunk) in index.chunks.iter().enumerate() {
+    for (i, chunk) in chunks.iter().enumerate() {
         let mut seen_in_chunk: HashSet<String> = HashSet::new();
         for w in tokenize(&chunk.content_lower) {
             inverted.entry(w.clone()).or_default().push(i);
@@ -155,9 +147,7 @@ fn rebuild_inverted_index(index: &mut CodebaseIndex) {
             }
         }
     }
-    index.inverted_index = inverted;
-    index.doc_freqs = doc_freqs;
-    index.num_chunks = index.chunks.len();
+    inverted
 }
 
 /// Tokenizes text into lowercase alphanumeric tokens (min 3 chars).
@@ -168,45 +158,53 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// BM25 retrieval using the pre-built inverted index.
-/// Falls back to the original additive scoring if no inverted index is available.
+/// BM25 retrieval using `doc_freqs` from the pre-built index for correct IDF computation.
+/// Still scans all chunks to include name/path/chunk-type bonuses even on zero-BM25 chunks.
 pub fn retrieve_relevant_chunks<'a>(
-    index: &'a [IndexChunk],
+    index: &'a CodebaseIndex,
     query: &str,
     top_k: usize,
     max_chars: usize,
 ) -> Vec<&'a IndexChunk> {
-    if index.is_empty() || query.trim().is_empty() {
+    if index.chunks.is_empty() || query.trim().is_empty() {
         return vec![];
     }
     let q_words = tokenize(query);
+    if q_words.is_empty() {
+        return vec![];
+    }
 
-    // BM25 parameters
     const K1: f64 = 1.5;
     const B: f64 = 0.75;
-    let n = index.len() as f64;
+    let n = index.chunks.len() as f64;
     let avg_dl: f64 = if n > 0.0 {
-        index.iter().map(|c| c.content.len() as f64).sum::<f64>() / n
+        index
+            .chunks
+            .iter()
+            .map(|c| c.content.len() as f64)
+            .sum::<f64>()
+            / n
     } else {
         1.0
     };
 
-    let has_any_embedding = index.iter().any(|c| c.embedding.is_some());
+    let has_any_embedding = index.chunks.iter().any(|c| c.embedding.is_some());
 
     let mut scored: Vec<(f64, &IndexChunk)> = index
+        .chunks
         .iter()
-        .map(|c| {
+        .filter_map(|c| {
             let mut score = 0.0f64;
             let dl = c.content.len() as f64;
 
             for w in &q_words {
-                let tf = count_occurrences(&c.content_lower, w) as f64;
-                if tf == 0.0 {
+                let tf_val = count_occurrences(&c.content_lower, w);
+                if tf_val == 0 {
                     continue;
                 }
+                let tf = tf_val as f64;
                 let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg_dl)));
-
-                let df = c.content_lower.matches(w).count() as f64;
+                let df = index.doc_freqs.get(w).copied().unwrap_or(1) as f64;
                 let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
 
                 score += tf_norm * idf;
@@ -224,10 +222,13 @@ pub fn retrieve_relevant_chunks<'a>(
                 score += 0.5;
             }
 
+            if score <= 0.0 {
+                return None;
+            }
+
             // Semantic score from embeddings (if available)
             if has_any_embedding {
                 if let Some(ref emb) = c.embedding {
-                    // Simple query embedding approximation: normalize query presence
                     let query_emb: Vec<f32> = q_words
                         .iter()
                         .map(|w| {
@@ -240,14 +241,13 @@ pub fn retrieve_relevant_chunks<'a>(
                         .collect();
                     if !query_emb.is_empty() && query_emb.len() == emb.len() {
                         let sim = cosine_similarity(emb, &query_emb);
-                        score += sim * 3.0; // up to +3.0 boost
+                        score += sim * 3.0;
                     }
                 }
             }
 
-            (score, c)
+            Some((score, c))
         })
-        .filter(|(s, _)| *s > 0.0)
         .collect();
 
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -265,15 +265,15 @@ pub fn retrieve_relevant_chunks<'a>(
     chosen
 }
 
-/// Counts occurrences of a word in text (simple substring counting on word boundaries).
+/// Counts occurrences of `word` in lowercased `text`.
+/// Both `text` and `word` are expected to be pre-lowercased.
 fn count_occurrences(text: &str, word: &str) -> usize {
-    if word.is_empty() {
+    if word.is_empty() || text.is_empty() {
         return 0;
     }
-    let lower = text.to_lowercase();
     let mut count = 0;
     let mut start = 0;
-    while let Some(pos) = lower[start..].find(word) {
+    while let Some(pos) = text[start..].find(word) {
         count += 1;
         start += pos + 1;
     }
@@ -415,7 +415,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     // If nothing changed, recycle existing chunks
     if changed_files == 0 && !existing_mtimes.is_empty() {
         if let Some(existing) = load_codebase_index(root) {
-            return Ok((existing, file_mtimes));
+            return Ok((existing.chunks, file_mtimes));
         }
     }
 
@@ -619,12 +619,12 @@ pub fn write_codebase_index(
     fs::create_dir_all(&rem_dir).context("failed to create .rem directory for index")?;
     let out_path = rem_dir.join("codebase_index.json");
 
-    // Build inverted index + doc freqs from chunks
+    // Build inverted index + doc freqs from chunks using pre-lowercased content
     let mut inverted_index: HashMap<String, Vec<usize>> = HashMap::new();
     let mut doc_freqs: HashMap<String, u32> = HashMap::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let mut seen: HashSet<String> = HashSet::new();
-        for w in tokenize(&chunk.content) {
+        for w in tokenize(&chunk.content_lower) {
             inverted_index.entry(w.clone()).or_default().push(i);
             if seen.insert(w.clone()) {
                 *doc_freqs.entry(w).or_insert(0) += 1;
@@ -740,8 +740,8 @@ fn load_existing_mtimes(root: &Path) -> HashMap<String, u64> {
 mod tests {
     use super::*;
 
-    fn sample_chunks() -> Vec<IndexChunk> {
-        vec![
+    fn sample_index() -> CodebaseIndex {
+        let chunks = vec![
             IndexChunk {
                 path: "src/main.rs".into(),
                 name: "main.rs".into(),
@@ -778,40 +778,60 @@ mod tests {
                 end_line: 2,
                 embedding: None,
             },
-        ]
+        ];
+        let mut doc_freqs = HashMap::new();
+        let inverted_index = build_inverted_index(&chunks, &mut doc_freqs);
+        CodebaseIndex {
+            version: INDEX_VERSION,
+            generated_at: String::new(),
+            file_mtimes: HashMap::new(),
+            chunks,
+            inverted_index,
+            doc_freqs,
+            num_chunks: 3,
+        }
     }
 
     #[test]
     fn retrieve_relevant_empty_index() {
-        let result = retrieve_relevant_chunks(&[], "login", 5, 10000);
+        let empty = CodebaseIndex {
+            version: INDEX_VERSION,
+            generated_at: String::new(),
+            file_mtimes: HashMap::new(),
+            chunks: vec![],
+            inverted_index: HashMap::new(),
+            doc_freqs: HashMap::new(),
+            num_chunks: 0,
+        };
+        let result = retrieve_relevant_chunks(&empty, "login", 5, 10000);
         assert!(result.is_empty());
     }
 
     #[test]
     fn retrieve_relevant_empty_query() {
-        let chunks = sample_chunks();
-        let result = retrieve_relevant_chunks(&chunks, "", 5, 10000);
+        let index = sample_index();
+        let result = retrieve_relevant_chunks(&index, "", 5, 10000);
         assert!(result.is_empty());
     }
 
     #[test]
     fn retrieve_relevant_matches_content() {
-        let chunks = sample_chunks();
-        let result = retrieve_relevant_chunks(&chunks, "login", 5, 10000);
+        let index = sample_index();
+        let result = retrieve_relevant_chunks(&index, "login", 5, 10000);
         assert_eq!(result.len(), 2);
     }
 
     #[test]
     fn retrieve_relevant_respects_top_k() {
-        let chunks = sample_chunks();
-        let result = retrieve_relevant_chunks(&chunks, "login auth", 1, 10000);
+        let index = sample_index();
+        let result = retrieve_relevant_chunks(&index, "login auth", 1, 10000);
         assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn retrieve_relevant_respects_max_chars() {
-        let chunks = sample_chunks();
-        let result = retrieve_relevant_chunks(&chunks, "main auth login", 5, 10);
+        let index = sample_index();
+        let result = retrieve_relevant_chunks(&index, "main auth login", 5, 10);
         assert!(result.is_empty());
     }
 
@@ -823,8 +843,8 @@ mod tests {
 
     #[test]
     fn build_retrieved_formats_chunks() {
-        let chunks = sample_chunks();
-        let refs: Vec<&IndexChunk> = chunks.iter().collect();
+        let index = sample_index();
+        let refs: Vec<&IndexChunk> = index.chunks.iter().collect();
         let result = build_retrieved_context(&refs, 10000);
         assert!(result.contains("src/main.rs"));
         assert!(result.contains("fn main()"));
@@ -834,8 +854,8 @@ mod tests {
 
     #[test]
     fn build_retrieved_respects_max_chars() {
-        let chunks = sample_chunks();
-        let refs: Vec<&IndexChunk> = chunks.iter().collect();
+        let index = sample_index();
+        let refs: Vec<&IndexChunk> = index.chunks.iter().collect();
         let result = build_retrieved_context(&refs, 50);
         assert!(result.len() <= 50 || result.contains("[End of retrieved context"));
     }

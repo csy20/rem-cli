@@ -121,11 +121,6 @@ pub(crate) fn is_image_file(path: &Path) -> bool {
     )
 }
 
-/// Builds a data URI for an OpenAI image_url content part.
-pub(crate) fn build_image_data_uri(mime: &str, b64: &str) -> String {
-    format!("data:{};base64,{}", mime, b64)
-}
-
 fn base64_encode(data: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data)
@@ -180,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_build_data_uri() {
-        let uri = build_image_data_uri("image/png", "abc123");
+        let uri = format!("data:{};base64,{}", "image/png", "abc123");
         assert_eq!(uri, "data:image/png;base64,abc123");
     }
 }

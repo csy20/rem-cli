@@ -3,13 +3,10 @@
 //! (`chat_completion`, `chat_completion_stream`, `models`, `health`).
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
-use super::STREAM_CANCELLED;
-use std::sync::atomic::Ordering;
 
 #[derive(Debug, Deserialize)]
 pub struct GeminiResponse {
@@ -96,19 +93,6 @@ impl super::Provider {
             })
             .filter(|n| n.contains("gemini"))
             .collect())
-    }
-
-    pub(super) async fn healthcheck_gemini(&self) -> Result<()> {
-        if self.api_key.as_deref().unwrap_or("").is_empty() {
-            return Err(anyhow!(
-                "Gemini requires --api-key or GEMINI_API_KEY env var"
-            ));
-        }
-        let models = self.list_models_gemini().await?;
-        if models.is_empty() {
-            return Err(anyhow!("No Gemini models available"));
-        }
-        Ok(())
     }
 
     pub(super) async fn complete_json_gemini(
@@ -299,61 +283,33 @@ impl super::Provider {
 
         // Parse SSE stream for text and function calls
         let mut full_text = String::with_capacity(4096);
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::with_capacity(4096);
-        let mut cursor = 0usize;
+        let mut early_tool_response: Option<ToolResponse> = None;
 
-        loop {
-            if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                break;
+        super::Provider::stream_buf(resp, |trimmed| {
+            if trimmed.is_empty() || trimmed.starts_with(':') {
+                return Ok(true);
             }
-            let chunk =
-                match tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await
-                {
-                    Ok(Some(Ok(c))) => c,
-                    Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
-                    Ok(None) => break,
-                    Err(_) => return Err(anyhow!("stream timed out")),
-                };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            loop {
-                let tail = &buf[cursor..];
-                match tail.find('\n') {
-                    Some(pos) => {
-                        let line = &tail[..pos];
-                        cursor += pos + 1;
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() || trimmed.starts_with(':') {
-                            continue;
-                        }
-                        if let Some(data) = trimmed.strip_prefix("data: ") {
-                            if let Ok(chunk) =
-                                serde_json::from_str::<super::gemini::GeminiStreamChunk>(data)
-                            {
-                                if let Some(candidates) = chunk.candidates {
-                                    if let Some(candidate) = candidates.into_iter().next() {
-                                        if let Some(content) = candidate.content {
-                                            if let Some(parts) = content.parts {
-                                                for part in parts {
-                                                    if let Some(text) = part.text {
-                                                        full_text.push_str(&text);
-                                                    }
-                                                    if let Some(fc) = part.function_call {
-                                                        let name = fc.name.unwrap_or_default();
-                                                        let args = fc
-                                                            .args
-                                                            .unwrap_or(serde_json::Value::Null);
-                                                        if !name.is_empty() {
-                                                            return Ok(ToolResponse::ToolCalls(
-                                                                vec![ToolCall {
-                                                                    id: format!("fc_{}", name),
-                                                                    name,
-                                                                    arguments: args,
-                                                                }],
-                                                            ));
-                                                        }
-                                                    }
-                                                }
+            if let Some(data) = trimmed.strip_prefix("data: ") {
+                if let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) {
+                    if let Some(candidates) = chunk.candidates {
+                        if let Some(candidate) = candidates.into_iter().next() {
+                            if let Some(content) = candidate.content {
+                                if let Some(parts) = content.parts {
+                                    for part in parts {
+                                        if let Some(text) = part.text {
+                                            full_text.push_str(&text);
+                                        }
+                                        if let Some(fc) = part.function_call {
+                                            let name = fc.name.unwrap_or_default();
+                                            let args = fc.args.unwrap_or(serde_json::Value::Null);
+                                            if !name.is_empty() {
+                                                early_tool_response =
+                                                    Some(ToolResponse::ToolCalls(vec![ToolCall {
+                                                        id: format!("fc_{}", name),
+                                                        name,
+                                                        arguments: args,
+                                                    }]));
+                                                return Ok(false);
                                             }
                                         }
                                     }
@@ -361,7 +317,6 @@ impl super::Provider {
                             }
                         }
                     }
-                    None => break,
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
@@ -370,8 +325,13 @@ impl super::Provider {
                     super::MAX_RESPONSE_BYTES
                 ));
             }
-        }
+            Ok(true)
+        })
+        .await?;
 
+        if let Some(response) = early_tool_response {
+            return Ok(response);
+        }
         Ok(ToolResponse::Text(full_text))
     }
 }

@@ -267,7 +267,7 @@ pub(crate) fn handle_config_set(session: &mut ChatSession, client: &Provider, ar
 }
 
 /// Shows token usage and speed stats (`/tokens` command).
-pub(crate) fn handle_tokens(session: &ChatSession) {
+pub(crate) fn handle_tokens(session: &ChatSession, client: &Provider) {
     let tokens = session.last_tokens;
     let elapsed = session.last_elapsed.as_secs_f64();
     let history_tokens: usize = session
@@ -341,7 +341,7 @@ pub(crate) fn handle_tokens(session: &ChatSession) {
         );
     }
 
-    let usage = crate::provider::anthropic::last_anthropic_usage();
+    let usage = client.anthropic_usage();
     if usage.input_tokens > 0 || usage.output_tokens > 0 {
         println!(
             "{}   {:<18} {}",

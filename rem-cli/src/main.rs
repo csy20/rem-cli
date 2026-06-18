@@ -206,7 +206,6 @@ async fn main() -> Result<()> {
 
     let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
     let mut client = build_provider(&cfg, system_prompt)?;
-    client.healthcheck().await?;
     let models = client.list_models().await?;
     if !models.iter().any(|m| m == &cfg.model) {
         let fallback = models.first().cloned().unwrap_or_else(|| cfg.model.clone());

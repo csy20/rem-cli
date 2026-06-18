@@ -9,8 +9,6 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
-use super::STREAM_CANCELLED;
-use std::sync::atomic::Ordering;
 
 static NUM_THREADS: LazyLock<usize> = LazyLock::new(|| {
     std::thread::available_parallelism()
@@ -72,16 +70,6 @@ impl super::Provider {
         }
         let parsed: OllamaTagsResponse = resp.json().await.context("invalid tags response")?;
         Ok(parsed.models.into_iter().map(|m| m.name).collect())
-    }
-
-    pub(super) async fn healthcheck_ollama(&self) -> Result<()> {
-        let models = self.list_models_ollama().await?;
-        if models.is_empty() {
-            return Err(anyhow!(
-                "Ollama reachable but no models are installed. Pull one with `ollama pull rem-coder:latest`"
-            ));
-        }
-        Ok(())
     }
 
     pub(super) async fn complete_json_ollama(
@@ -256,64 +244,32 @@ impl super::Provider {
 
         let mut full_text = String::with_capacity(4096);
         let mut tool_calls: Vec<(i64, String, String, String)> = Vec::new();
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::with_capacity(4096);
-        let mut cursor = 0usize;
 
-        loop {
-            if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                break;
-            }
-            use futures_util::StreamExt;
-            let chunk =
-                match tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await
-                {
-                    Ok(Some(Ok(c))) => c,
-                    Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
-                    Ok(None) => break,
-                    Err(_) => return Err(anyhow!("stream timed out")),
-                };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            loop {
-                let tail = &buf[cursor..];
-                match tail.find('\n') {
-                    Some(pos) => {
-                        let line = &tail[..pos];
-                        cursor += pos + 1;
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
-                            if let Some(ref msg) = obj.message {
-                                if let Some(ref content) = msg.content {
-                                    full_text.push_str(content);
-                                }
-                                if let Some(ref calls) = msg.tool_calls {
-                                    for tc in calls {
-                                        let idx = tool_calls.len() as i64;
-                                        let name = tc
-                                            .function
-                                            .as_ref()
-                                            .and_then(|f| f.name.clone())
-                                            .unwrap_or_default();
-                                        let args = tc
-                                            .function
-                                            .as_ref()
-                                            .and_then(|f| {
-                                                f.arguments.as_ref().map(|a| a.to_string())
-                                            })
-                                            .unwrap_or_default();
-                                        tool_calls.push((idx, String::new(), name, args));
-                                    }
-                                }
-                            }
-                            if obj.done == Some(true) {
-                                break;
-                            }
+        super::Provider::stream_buf(resp, |trimmed| {
+            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
+                if let Some(ref msg) = obj.message {
+                    if let Some(ref content) = msg.content {
+                        full_text.push_str(content);
+                    }
+                    if let Some(ref calls) = msg.tool_calls {
+                        for tc in calls {
+                            let idx = tool_calls.len() as i64;
+                            let name = tc
+                                .function
+                                .as_ref()
+                                .and_then(|f| f.name.clone())
+                                .unwrap_or_default();
+                            let args = tc
+                                .function
+                                .as_ref()
+                                .and_then(|f| f.arguments.as_ref().map(|a| a.to_string()))
+                                .unwrap_or_default();
+                            tool_calls.push((idx, String::new(), name, args));
                         }
                     }
-                    None => break,
+                }
+                if obj.done == Some(true) {
+                    return Ok(false);
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
@@ -322,7 +278,9 @@ impl super::Provider {
                     super::MAX_RESPONSE_BYTES
                 ));
             }
-        }
+            Ok(true)
+        })
+        .await?;
 
         if !tool_calls.is_empty() {
             let calls: Vec<ToolCall> = tool_calls

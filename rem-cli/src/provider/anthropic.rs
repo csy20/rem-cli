@@ -2,15 +2,11 @@
 //! Contains Anthropic-specific request/response types and API methods
 //! (`chat_completion`, `chat_completion_stream`, `models`, `health`).
 
-use std::sync::Mutex;
-
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
-use super::STREAM_CANCELLED;
-use std::sync::atomic::Ordering;
 
 /// Tracks usage metadata from Anthropic stream responses.
 #[derive(Debug, Clone, Default)]
@@ -19,17 +15,6 @@ pub(crate) struct AnthropicUsage {
     pub output_tokens: u32,
     pub cache_creation_input_tokens: u32,
     pub cache_read_input_tokens: u32,
-}
-
-pub(crate) static LAST_USAGE: Mutex<AnthropicUsage> = Mutex::new(AnthropicUsage {
-    input_tokens: 0,
-    output_tokens: 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
-});
-
-pub(crate) fn last_anthropic_usage() -> AnthropicUsage {
-    LAST_USAGE.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +33,7 @@ pub struct AnthropicContentBlock {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub input: Option<serde_json::Value>,
 }
 
@@ -127,19 +113,6 @@ impl super::Provider {
             .into_iter()
             .filter_map(|m| m.id)
             .collect())
-    }
-
-    pub(super) async fn healthcheck_anthropic(&self) -> Result<()> {
-        if self.api_key.as_deref().unwrap_or("").is_empty() {
-            return Err(anyhow!(
-                "Anthropic requires --api-key or ANTHROPIC_API_KEY env var"
-            ));
-        }
-        let models = self.list_models_anthropic().await?;
-        if models.is_empty() {
-            return Err(anyhow!("No Anthropic models available"));
-        }
-        Ok(())
     }
 
     pub(super) async fn complete_chat_vision_anthropic(
@@ -359,91 +332,54 @@ impl super::Provider {
         // Stream and collect text + tool calls from Anthropic SSE
         let mut full_text = String::with_capacity(4096);
         let mut tool_calls: Vec<(u32, String, String, String)> = Vec::new(); // (index, id, name, args_buffer)
-        let mut stream = resp.bytes_stream();
-        let mut buf = String::with_capacity(4096);
-        let mut cursor = 0usize;
 
-        loop {
-            if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                break;
+        super::Provider::stream_buf(resp, |trimmed| {
+            if trimmed.starts_with("event: ") {
+                return Ok(true);
             }
-            use futures_util::StreamExt;
-            let chunk =
-                match tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await
-                {
-                    Ok(Some(Ok(c))) => c,
-                    Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
-                    Ok(None) => break,
-                    Err(_) => return Err(anyhow!("stream timed out")),
-                };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
-            loop {
-                let tail = &buf[cursor..];
-                match tail.find('\n') {
-                    Some(pos) => {
-                        let line = &tail[..pos];
-                        cursor += pos + 1;
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if trimmed.starts_with("event: ") {
-                            continue;
-                        }
-                        if let Some(data) = trimmed.strip_prefix("data: ") {
-                            if let Ok(chunk) =
-                                serde_json::from_str::<super::anthropic::AnthropicStreamChunk>(data)
-                            {
-                                let ct = chunk.chunk_type.as_deref().unwrap_or("");
-                                match ct {
-                                    "content_block_start" => {
-                                        if let Some(ref block) = chunk.content_block {
-                                            if block.block_type.as_deref() == Some("tool_use") {
-                                                let idx = chunk.index.unwrap_or(0);
-                                                let id = block.id.clone().unwrap_or_default();
-                                                let name = block.name.clone().unwrap_or_default();
-                                                // Find or insert at index
-                                                if let Some(pos) = tool_calls
-                                                    .iter()
-                                                    .position(|(i, _, _, _)| *i == idx)
-                                                {
-                                                    tool_calls[pos].1 = id;
-                                                    tool_calls[pos].2 = name;
-                                                } else {
-                                                    tool_calls.push((idx, id, name, String::new()));
-                                                }
-                                            } else if block.block_type.as_deref() == Some("text") {
-                                                if let Some(ref text) = block.text {
-                                                    full_text.push_str(text);
-                                                }
-                                            }
-                                        }
+            if let Some(data) = trimmed.strip_prefix("data: ") {
+                if let Ok(chunk) = serde_json::from_str::<AnthropicStreamChunk>(data) {
+                    let ct = chunk.chunk_type.as_deref().unwrap_or("");
+                    match ct {
+                        "content_block_start" => {
+                            if let Some(ref block) = chunk.content_block {
+                                if block.block_type.as_deref() == Some("tool_use") {
+                                    let idx = chunk.index.unwrap_or(0);
+                                    let id = block.id.clone().unwrap_or_default();
+                                    let name = block.name.clone().unwrap_or_default();
+                                    if let Some(pos) =
+                                        tool_calls.iter().position(|(i, _, _, _)| *i == idx)
+                                    {
+                                        tool_calls[pos].1 = id;
+                                        tool_calls[pos].2 = name;
+                                    } else {
+                                        tool_calls.push((idx, id, name, String::new()));
                                     }
-                                    "content_block_delta" => {
-                                        if let Some(ref delta) = chunk.delta {
-                                            if delta.delta_type.as_deref()
-                                                == Some("input_json_delta")
-                                            {
-                                                let idx = chunk.index.unwrap_or(0);
-                                                if let Some(ref partial) = delta.partial_json {
-                                                    if let Some(pos) = tool_calls
-                                                        .iter()
-                                                        .position(|(i, _, _, _)| *i == idx)
-                                                    {
-                                                        tool_calls[pos].3.push_str(partial);
-                                                    }
-                                                }
-                                            } else if let Some(ref text) = delta.text {
-                                                full_text.push_str(text);
-                                            }
-                                        }
+                                } else if block.block_type.as_deref() == Some("text") {
+                                    if let Some(ref text) = block.text {
+                                        full_text.push_str(text);
                                     }
-                                    _ => {}
                                 }
                             }
                         }
+                        "content_block_delta" => {
+                            if let Some(ref delta) = chunk.delta {
+                                if delta.delta_type.as_deref() == Some("input_json_delta") {
+                                    let idx = chunk.index.unwrap_or(0);
+                                    if let Some(ref partial) = delta.partial_json {
+                                        if let Some(pos) =
+                                            tool_calls.iter().position(|(i, _, _, _)| *i == idx)
+                                        {
+                                            tool_calls[pos].3.push_str(partial);
+                                        }
+                                    }
+                                } else if let Some(ref text) = delta.text {
+                                    full_text.push_str(text);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    None => break,
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
@@ -452,7 +388,9 @@ impl super::Provider {
                     super::MAX_RESPONSE_BYTES
                 ));
             }
-        }
+            Ok(true)
+        })
+        .await?;
 
         if !tool_calls.is_empty() {
             let calls: Vec<ToolCall> = tool_calls

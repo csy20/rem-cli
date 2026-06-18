@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::LazyLock;
 
 /// Threshold for auto-paging (lines). Output shorter than this is printed directly.
 const PAGE_THRESHOLD: usize = 50;
@@ -8,7 +9,7 @@ const PAGE_THRESHOLD: usize = 50;
 /// and a pager is available.
 pub fn maybe_page(text: &str) {
     let line_count = text.lines().count();
-    if line_count < PAGE_THRESHOLD || !pager_available() {
+    if line_count < PAGE_THRESHOLD || !*PAGER_AVAILABLE {
         print_direct(text);
         return;
     }
@@ -43,7 +44,8 @@ fn pager_args(cmd: &str) -> Vec<&str> {
     }
 }
 
-fn pager_available() -> bool {
+/// Cached result of checking whether a pager is available on this system.
+static PAGER_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
     let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
     Command::new(&pager_cmd)
         .arg("--version")
@@ -51,7 +53,7 @@ fn pager_available() -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok()
-}
+});
 
 fn print_direct(text: &str) {
     print!("{}", text);

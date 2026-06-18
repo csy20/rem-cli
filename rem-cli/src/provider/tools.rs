@@ -46,15 +46,6 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
-impl ToolCall {
-    pub fn argument_str(&self) -> String {
-        self.arguments
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.arguments.to_string())
-    }
-}
-
 /// Result of executing a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {

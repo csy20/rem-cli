@@ -3,7 +3,9 @@
 //! references, builds system prompts with project context, and manages modes.
 
 use crate::feedback::FeedbackTracker;
-use crate::indexer::{build_retrieved_context, load_codebase_index, retrieve_relevant_chunks};
+use crate::indexer::{
+    build_retrieved_context, load_codebase_index, retrieve_relevant_chunks, CodebaseIndex,
+};
 use crate::intent::TaskIntent;
 use crate::memory::ProjectMemory;
 use crate::search::SearchResult;
@@ -54,6 +56,8 @@ pub(crate) struct ChatSession {
     pub(crate) messages_since_save: usize,
     pub(crate) project_type: Option<String>,
     listing_cache: Option<ProjectListingCache>,
+    /// Cached codebase index to avoid reloading from disk on every turn.
+    cached_index: Option<(PathBuf, CodebaseIndex)>,
 }
 
 impl ChatSession {
@@ -92,6 +96,7 @@ impl ChatSession {
             messages_since_save: 0,
             project_type: None,
             listing_cache: None,
+            cached_index: None,
         })
     }
 
@@ -133,24 +138,40 @@ impl ChatSession {
     /// Falls back to the classic exhaustive (but capped) file listing when no index.
     /// Builds project context for the given query.
     /// Uses codebase index for retrieval when available; falls back to file listing.
+    /// The index is cached in memory to avoid reloading from disk on every turn.
     pub(crate) fn build_relevant_project_context(&mut self, query: &str) -> String {
-        if let Some(ref dir) = self.project_dir.clone() {
-            if let Some(index) = load_codebase_index(dir) {
-                let hits = retrieve_relevant_chunks(&index, query, 8, 4500);
-                if !hits.is_empty() {
-                    return build_retrieved_context(&hits, 4800);
-                }
+        let dir = match self.project_dir.clone() {
+            Some(ref d) => d.clone(),
+            None => return String::new(),
+        };
+
+        // Load/reload index if dir changed or not yet cached
+        let should_reload = self
+            .cached_index
+            .as_ref()
+            .map(|(cached_dir, _)| cached_dir != &dir)
+            .unwrap_or(true);
+        if should_reload {
+            self.cached_index = load_codebase_index(&dir).map(|i| (dir.clone(), i));
+        }
+
+        // Use cached index for BM25 retrieval
+        if let Some((_, idx)) = &self.cached_index {
+            let hits = retrieve_relevant_chunks(idx, query, 8, 4500);
+            if !hits.is_empty() {
+                return build_retrieved_context(&hits, 4800);
             }
-            // No index or no hits: use cached listing
-            if self.listing_cache.is_none() {
-                self.listing_cache = Some(ProjectListingCache {
-                    listing: String::new(),
-                    dir: PathBuf::new(),
-                });
-            }
-            if let Some(ref mut cache) = self.listing_cache {
-                return cache.get_or_build(dir, 6000).to_string();
-            }
+        }
+
+        // No index or no hits: use cached file listing
+        if self.listing_cache.is_none() {
+            self.listing_cache = Some(ProjectListingCache {
+                listing: String::new(),
+                dir: PathBuf::new(),
+            });
+        }
+        if let Some(ref mut cache) = self.listing_cache {
+            return cache.get_or_build(&dir, 6000).to_string();
         }
         String::new()
     }

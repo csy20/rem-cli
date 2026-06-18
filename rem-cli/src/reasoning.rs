@@ -72,27 +72,6 @@ pub fn system_prompt_not_supported(model: &str) -> bool {
     lower.starts_with("o1-") || lower.starts_with("o3-")
 }
 
-/// Strips reasoning content from a DeepSeek response and returns (reasoning, cleaned_text).
-pub fn extract_deepseek_reasoning(text: &str) -> (Option<String>, String) {
-    let mut reasoning = None;
-    if text.contains("reasoning_content") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-            if let Some(rc) = v.get("reasoning_content").and_then(|c| c.as_str()) {
-                reasoning = Some(rc.to_string());
-            }
-        }
-    }
-    // DeepSeek-R1 wraps reasoning in  think tags
-    let cleaned = if text.contains("<｜end▁of▁thinking｜> with <｜begin▁of▁sentence｜>")
-    {
-        // This is a DeepSeek-style response; just return as-is
-        text.to_string()
-    } else {
-        text.to_string()
-    };
-    (reasoning, cleaned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

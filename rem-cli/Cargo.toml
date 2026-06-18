@@ -24,14 +24,19 @@ toml = "0.8"
 walkdir = "2.5"
 rayon = "1.10"
 ignore = "0.4"
+memchr = "2.8"
 similar = "2.5"
-aws-sdk-bedrockruntime = "1"
-aws-config = "1"
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
 base64 = "0.22"
 tiktoken-rs = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 notify = { version = "7", features = ["macos_kqueue"] }
+
+[features]
+default = ["bedrock"]
+bedrock = ["aws-sdk-bedrockruntime", "aws-config"]
 
 [dev-dependencies]
 wiremock = "0.6"
