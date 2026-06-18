@@ -12,11 +12,6 @@ impl super::Provider {
         Ok(vec![self.model.clone()])
     }
 
-    pub(super) async fn healthcheck_bedrock(&self) -> Result<()> {
-        let _client = self.bedrock_client().await?;
-        Ok(())
-    }
-
     pub(super) async fn complete_json_bedrock(
         &self,
         user_prompt: &str,

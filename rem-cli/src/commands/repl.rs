@@ -321,6 +321,31 @@ pub(crate) fn handle_reasoning(client: &mut Provider, cfg: &mut AppConfig, tail:
     let _ = save_config(cfg);
 }
 
+pub(crate) fn handle_watch(session: &ChatSession) {
+    let t = ui::theme::active();
+    let dir = session
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let rail = ui::theme::paint_rail_empty(&t);
+    println!("{rail}");
+    match crate::watcher::watch_and_reindex(&dir) {
+        Ok(_tx) => {
+            let msg = ui::theme::paint_success_label(&t, "file watcher started");
+            let sub = ui::theme::paint_dim(&t, &format!("watching {} for changes", dir.display()));
+            println!("{rail} {msg}");
+            println!("{rail}  {sub}");
+            println!("{rail}");
+        }
+        Err(e) => {
+            let msg =
+                ui::theme::paint_error_label(&t, &format!("failed to start file watcher: {}", e));
+            println!("{rail} {msg}");
+            println!("{rail}");
+        }
+    }
+}
+
 pub(crate) fn handle_why(session: &ChatSession) {
     let t = ui::theme::active();
     let intent_name = match session.last_intent {

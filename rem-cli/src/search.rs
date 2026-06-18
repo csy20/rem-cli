@@ -28,7 +28,6 @@ pub struct SearchResult {
 /// Search provider configuration.
 #[derive(Debug, Clone)]
 pub enum SearchProvider {
-    DuckDuckGo,
     Google { api_key: String, cse_id: String },
     Bing { api_key: String },
 }

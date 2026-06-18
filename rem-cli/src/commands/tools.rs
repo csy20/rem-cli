@@ -3,6 +3,7 @@
 
 use crate::agentic::{format_tool_output, run_lint};
 use crate::chat::ChatSession;
+use crate::cli::AppConfig;
 use crate::find::{find_matches, FindOptions};
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
@@ -13,14 +14,23 @@ use std::fs;
 use std::path::Path;
 
 /// Performs a web search (`/search` command).
-pub(crate) async fn handle_search(client: &Provider, session: &mut ChatSession, query: &str) {
+pub(crate) async fn handle_search(
+    client: &Provider,
+    session: &mut ChatSession,
+    cfg: &AppConfig,
+    query: &str,
+) {
     let t = ui::theme::active();
     println!(
         "{} {} searching the web...",
         ui::theme::paint_rail_empty(&t),
         ui::theme::paint(&t, "accent", "🔍", true)
     );
-    let search_provider = provider_from_config("", "", "");
+    let search_provider = provider_from_config(
+        &cfg.search_provider,
+        cfg.search_api_key.as_deref().unwrap_or(""),
+        cfg.search_cse_id.as_deref().unwrap_or(""),
+    );
     match perform_web_search(&client.client, query, search_provider.as_ref()).await {
         Ok(results) => {
             if results.is_empty() {
@@ -217,6 +227,39 @@ pub(crate) fn handle_lint(_session: &mut ChatSession, path: &str) {
     println!("{}", format_tool_output(&result));
 }
 
+/// Handles `/lint` with automatic fallback to the last written files when no arg is given.
+pub(crate) fn handle_lint_with_fallback(session: &mut ChatSession, args: &str) {
+    let t = ui::theme::active();
+    if args.is_empty() {
+        if session.last_files.is_empty() && session.last_files_written.is_empty() {
+            println!(
+                "{} no files to lint. Generate code first.",
+                ui::theme::paint_warning(&t, "\u{258C}")
+            );
+        } else {
+            let paths: Vec<String> = if !session.last_files_written.is_empty() {
+                session
+                    .last_files_written
+                    .iter()
+                    .map(|p| p.path.display().to_string())
+                    .collect()
+            } else {
+                session
+                    .last_files
+                    .iter()
+                    .filter(|f| !f.path.is_empty())
+                    .map(|f| f.path.clone())
+                    .collect()
+            };
+            for p in paths {
+                handle_lint(session, &p);
+            }
+        }
+    } else {
+        handle_lint(session, args);
+    }
+}
+
 /// Searches for text in project files (`/find` command).
 pub(crate) fn handle_find(session: &ChatSession, query: &str) {
     let t = ui::theme::active();
@@ -226,6 +269,14 @@ pub(crate) fn handle_find(session: &ChatSession, query: &str) {
             "{} {}",
             ui::theme::paint(&t, "accent", "\u{258C}", true),
             ui::theme::paint_bright(&t, "usage: /find <query>")
+        );
+        println!(
+            "{}  {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(
+                &t,
+                "search text inside the project (skips node_modules, target, .git, ...)"
+            )
         );
         println!("{}", ui::theme::paint_rail_empty(&t));
         return;

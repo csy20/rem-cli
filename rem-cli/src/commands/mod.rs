@@ -16,8 +16,9 @@ use std::collections::HashMap;
 /// Metadata about a registered slash command.
 #[derive(Clone, Copy)]
 pub(crate) struct CommandInfo {
-    /// Whether this command needs an async executor (e.g., calls LLM).
-    pub(crate) is_async: bool,
+    /// Human-readable description shown in `/help`.
+    #[allow(dead_code)]
+    pub(crate) description: &'static str,
 }
 
 /// O(1) lookup for command metadata by name.
@@ -40,12 +41,6 @@ impl CommandRegistry {
         self.commands.contains_key(name)
     }
 
-    /// Returns true if the command is async.
-    pub fn is_async(&self, input: &str) -> bool {
-        let name = input.split(' ').next().unwrap_or(input);
-        self.commands.get(name).map(|c| c.is_async).unwrap_or(false)
-    }
-
     /// Returns the command name and argument parts.
     pub fn parse<'a>(&self, input: &'a str) -> (&'a str, &'a str) {
         if let Some(pos) = input.find(' ') {
@@ -59,45 +54,228 @@ impl CommandRegistry {
 /// Builds the static command registry.
 pub(crate) fn registry() -> CommandRegistry {
     CommandRegistry::new(&[
-        // Sync commands
-        ("/help", CommandInfo { is_async: false }),
-        ("help", CommandInfo { is_async: false }),
-        ("exit", CommandInfo { is_async: false }),
-        ("quit", CommandInfo { is_async: false }),
-        ("/theme", CommandInfo { is_async: false }),
-        ("/model", CommandInfo { is_async: false }),
-        ("/provider", CommandInfo { is_async: false }),
-        ("/mode", CommandInfo { is_async: false }),
-        ("/plan", CommandInfo { is_async: false }),
-        ("/clear", CommandInfo { is_async: false }),
-        ("/reset", CommandInfo { is_async: false }),
-        ("/why", CommandInfo { is_async: false }),
-        ("/code", CommandInfo { is_async: false }),
-        ("/undo", CommandInfo { is_async: false }),
-        ("/files", CommandInfo { is_async: false }),
-        ("/diff", CommandInfo { is_async: false }),
-        ("/tokens", CommandInfo { is_async: false }),
-        ("/memory", CommandInfo { is_async: false }),
-        ("/init", CommandInfo { is_async: false }),
-        ("/config", CommandInfo { is_async: false }),
-        ("/lint", CommandInfo { is_async: false }),
-        ("/find", CommandInfo { is_async: false }),
-        ("/write", CommandInfo { is_async: false }),
-        ("/save", CommandInfo { is_async: false }),
-        ("/dir", CommandInfo { is_async: false }),
-        ("/copy", CommandInfo { is_async: false }),
-        ("/save", CommandInfo { is_async: false }),
-        ("/resume", CommandInfo { is_async: false }),
-        // Async commands (LLM calls)
-        ("/search", CommandInfo { is_async: true }),
-        ("/explain", CommandInfo { is_async: true }),
-        ("/test", CommandInfo { is_async: true }),
-        ("/refactor", CommandInfo { is_async: true }),
-        ("/review", CommandInfo { is_async: true }),
-        ("/compact", CommandInfo { is_async: true }),
-        ("/goal", CommandInfo { is_async: true }),
-        ("/vision", CommandInfo { is_async: true }),
-        ("/reasoning", CommandInfo { is_async: false }),
+        (
+            "/help",
+            CommandInfo {
+                description: "Show this help message",
+            },
+        ),
+        (
+            "help",
+            CommandInfo {
+                description: "Show this help message",
+            },
+        ),
+        (
+            "exit",
+            CommandInfo {
+                description: "Exit the REPL",
+            },
+        ),
+        (
+            "quit",
+            CommandInfo {
+                description: "Exit the REPL",
+            },
+        ),
+        (
+            "/theme",
+            CommandInfo {
+                description: "Change the color theme",
+            },
+        ),
+        (
+            "/model",
+            CommandInfo {
+                description: "Show or change the active model",
+            },
+        ),
+        (
+            "/provider",
+            CommandInfo {
+                description: "Show or change the LLM provider",
+            },
+        ),
+        (
+            "/mode",
+            CommandInfo {
+                description: "Switch between chat and code mode",
+            },
+        ),
+        (
+            "/plan",
+            CommandInfo {
+                description: "Switch to plan mode for structured output",
+            },
+        ),
+        (
+            "/clear",
+            CommandInfo {
+                description: "Clear the chat history",
+            },
+        ),
+        (
+            "/reset",
+            CommandInfo {
+                description: "Reset the session",
+            },
+        ),
+        (
+            "/why",
+            CommandInfo {
+                description: "Explain the last response",
+            },
+        ),
+        (
+            "/code",
+            CommandInfo {
+                description: "Show last generated files",
+            },
+        ),
+        (
+            "/undo",
+            CommandInfo {
+                description: "Undo last file write",
+            },
+        ),
+        (
+            "/files",
+            CommandInfo {
+                description: "List all project files",
+            },
+        ),
+        (
+            "/diff",
+            CommandInfo {
+                description: "Show diff of last changes",
+            },
+        ),
+        (
+            "/tokens",
+            CommandInfo {
+                description: "Show token usage statistics",
+            },
+        ),
+        (
+            "/memory",
+            CommandInfo {
+                description: "View or update project memory",
+            },
+        ),
+        (
+            "/init",
+            CommandInfo {
+                description: "Initialize project scaffolding",
+            },
+        ),
+        (
+            "/config",
+            CommandInfo {
+                description: "Show or update configuration",
+            },
+        ),
+        (
+            "/lint",
+            CommandInfo {
+                description: "Lint the last written files or a specific path",
+            },
+        ),
+        (
+            "/find",
+            CommandInfo {
+                description: "Search text inside the project",
+            },
+        ),
+        (
+            "/write",
+            CommandInfo {
+                description: "Write content to a file",
+            },
+        ),
+        (
+            "/save",
+            CommandInfo {
+                description: "Save the session or write content to a file",
+            },
+        ),
+        (
+            "/dir",
+            CommandInfo {
+                description: "Change the project directory",
+            },
+        ),
+        (
+            "/copy",
+            CommandInfo {
+                description: "Copy last N files to clipboard",
+            },
+        ),
+        (
+            "/resume",
+            CommandInfo {
+                description: "Resume a saved session",
+            },
+        ),
+        (
+            "/compact",
+            CommandInfo {
+                description: "Compact the chat context",
+            },
+        ),
+        (
+            "/search",
+            CommandInfo {
+                description: "Search the web",
+            },
+        ),
+        (
+            "/explain",
+            CommandInfo {
+                description: "Explain the selected code",
+            },
+        ),
+        (
+            "/test",
+            CommandInfo {
+                description: "Generate tests for the selected code",
+            },
+        ),
+        (
+            "/refactor",
+            CommandInfo {
+                description: "Refactor the selected code",
+            },
+        ),
+        (
+            "/review",
+            CommandInfo {
+                description: "Review changes for quality issues",
+            },
+        ),
+        (
+            "/goal",
+            CommandInfo {
+                description: "Run autonomous goal-driven loop",
+            },
+        ),
+        (
+            "/vision",
+            CommandInfo {
+                description: "Analyze an image with the LLM",
+            },
+        ),
+        (
+            "/reasoning",
+            CommandInfo {
+                description: "Configure reasoning/thinking mode",
+            },
+        ),
+        (
+            "/watch",
+            CommandInfo {
+                description: "Watch files for changes and auto-retry",
+            },
+        ),
     ])
 }
 
@@ -109,7 +287,7 @@ pub(crate) use goal::handle_goal;
 pub(crate) use help::print_chat_help;
 pub(crate) use repl::{
     handle_clear, handle_mode, handle_model, handle_plan, handle_provider, handle_reasoning,
-    handle_reset, handle_theme, handle_why,
+    handle_reset, handle_theme, handle_watch, handle_why,
 };
 pub(crate) use review::{handle_diff, handle_review};
 pub(crate) use session::{
@@ -117,5 +295,6 @@ pub(crate) use session::{
     handle_memory, handle_memory_set, handle_resume_session, handle_save_session, handle_tokens,
 };
 pub(crate) use tools::{
-    handle_explain, handle_find, handle_lint, handle_refactor, handle_search, handle_test,
+    handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search,
+    handle_test,
 };

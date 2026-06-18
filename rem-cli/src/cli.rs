@@ -158,6 +158,12 @@ pub struct AppConfig {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub thinking_budget: Option<u32>,
+    #[serde(default = "default_search_provider")]
+    pub search_provider: String,
+    #[serde(default)]
+    pub search_api_key: Option<String>,
+    #[serde(default)]
+    pub search_cse_id: Option<String>,
 }
 
 fn default_theme_name() -> String {
@@ -168,6 +174,9 @@ fn default_mode_name() -> String {
 }
 fn default_provider() -> String {
     "ollama".to_string()
+}
+fn default_search_provider() -> String {
+    "ddg".to_string()
 }
 
 impl Default for AppConfig {
@@ -188,6 +197,9 @@ impl Default for AppConfig {
             providers: HashMap::new(),
             reasoning_effort: None,
             thinking_budget: None,
+            search_provider: "ddg".to_string(),
+            search_api_key: None,
+            search_cse_id: None,
         }
     }
 }
@@ -211,6 +223,9 @@ pub struct PartialConfig {
     pub providers: Option<HashMap<String, ProviderSettings>>,
     pub reasoning_effort: Option<String>,
     pub thinking_budget: Option<u32>,
+    pub search_provider: Option<String>,
+    pub search_api_key: Option<String>,
+    pub search_cse_id: Option<String>,
 }
 
 impl AppConfig {
@@ -260,6 +275,15 @@ impl AppConfig {
         }
         if let Some(v) = part.thinking_budget {
             self.thinking_budget = Some(v);
+        }
+        if let Some(v) = part.search_provider {
+            self.search_provider = v;
+        }
+        if let Some(v) = part.search_api_key {
+            self.search_api_key = Some(v);
+        }
+        if let Some(v) = part.search_cse_id {
+            self.search_cse_id = Some(v);
         }
     }
 }

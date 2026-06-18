@@ -3,6 +3,7 @@
 //! logic. Provider-specific response types and API methods live in submodules.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use std::future::Future;
 
@@ -14,6 +15,7 @@ use tokio::time::{sleep, timeout, Duration};
 
 pub mod anthropic;
 pub mod azure;
+#[cfg(feature = "bedrock")]
 pub mod bedrock;
 pub mod gemini;
 pub mod ollama;
@@ -66,6 +68,9 @@ impl std::fmt::Display for LlmErrorBody {
 
 /// Set to `true` by the global Ctrl+C handler to cancel an in-flight stream.
 pub(crate) static STREAM_CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// Set to `true` during LLM calls to stream tokens to stdout as they arrive.
+pub(crate) static STREAM_TOKENS: AtomicBool = AtomicBool::new(false);
 
 pub(crate) const STREAM_CHUNK_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
@@ -131,6 +136,8 @@ pub struct Provider {
     api_key: Option<String>,
     pub model_ctx: usize,
     pub reasoning_config: crate::reasoning::ReasoningConfig,
+    /// Tracks token usage from the last Anthropic API call.
+    pub(crate) last_usage: Mutex<crate::provider::anthropic::AnthropicUsage>,
 }
 
 impl Provider {
@@ -159,6 +166,7 @@ impl Provider {
             api_key: None,
             model_ctx,
             reasoning_config: Default::default(),
+            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
         }
     }
 
@@ -180,6 +188,7 @@ impl Provider {
             api_key: Some(api_key),
             model_ctx,
             reasoning_config: Default::default(),
+            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
         }
     }
 
@@ -200,6 +209,7 @@ impl Provider {
             api_key: Some(api_key),
             model_ctx,
             reasoning_config: Default::default(),
+            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
         }
     }
 
@@ -220,6 +230,7 @@ impl Provider {
             api_key: Some(api_key),
             model_ctx,
             reasoning_config: Default::default(),
+            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
         }
     }
 
@@ -241,10 +252,12 @@ impl Provider {
             api_key: Some(api_key),
             model_ctx,
             reasoning_config: Default::default(),
+            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
         }
     }
 
     /// Creates a new AWS Bedrock provider instance.
+    #[cfg(feature = "bedrock")]
     pub fn new_bedrock(
         model: String,
         timeout_s: u64,
@@ -261,6 +274,7 @@ impl Provider {
             api_key: Some(api_key),
             model_ctx,
             reasoning_config: Default::default(),
+            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
         }
     }
 
@@ -281,6 +295,7 @@ impl Provider {
             api_key: Some(api_key),
             model_ctx,
             reasoning_config: Default::default(),
+            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
         }
     }
 
@@ -347,24 +362,13 @@ impl Provider {
                 ProviderKind::Gemini => self.list_models_gemini().await,
                 ProviderKind::Anthropic => self.list_models_anthropic().await,
                 ProviderKind::Azure => self.list_models_azure().await,
+                #[cfg(feature = "bedrock")]
                 ProviderKind::Bedrock => self.list_models_bedrock().await,
+                #[cfg(not(feature = "bedrock"))]
+                ProviderKind::Bedrock => Err(anyhow!(
+                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
+                )),
                 ProviderKind::OpenRouter => self.list_models_openrouter().await,
-            }
-        })
-        .await
-    }
-
-    /// Checks if the provider is reachable and the API is healthy.
-    pub async fn healthcheck(&self) -> Result<()> {
-        Self::with_retry(|| async {
-            match self.kind {
-                ProviderKind::Ollama => self.healthcheck_ollama().await,
-                ProviderKind::OpenAI => self.healthcheck_openai().await,
-                ProviderKind::Gemini => self.healthcheck_gemini().await,
-                ProviderKind::Anthropic => self.healthcheck_anthropic().await,
-                ProviderKind::Azure => self.healthcheck_azure().await,
-                ProviderKind::Bedrock => self.healthcheck_bedrock().await,
-                ProviderKind::OpenRouter => self.healthcheck_openrouter().await,
             }
         })
         .await
@@ -379,7 +383,12 @@ impl Provider {
                 ProviderKind::Gemini => self.complete_json_gemini(user_prompt).await,
                 ProviderKind::Anthropic => self.complete_json_anthropic(user_prompt).await,
                 ProviderKind::Azure => self.complete_json_azure(user_prompt).await,
+                #[cfg(feature = "bedrock")]
                 ProviderKind::Bedrock => self.complete_json_bedrock(user_prompt).await,
+                #[cfg(not(feature = "bedrock"))]
+                ProviderKind::Bedrock => Err(anyhow!(
+                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
+                )),
                 ProviderKind::OpenRouter => self.complete_json_openrouter(user_prompt).await,
             }
         })
@@ -448,6 +457,7 @@ impl Provider {
                     )
                     .await
                 }
+                #[cfg(feature = "bedrock")]
                 ProviderKind::Bedrock => {
                     self.complete_chat_vision_bedrock(
                         user_prompt,
@@ -458,6 +468,10 @@ impl Provider {
                     )
                     .await
                 }
+                #[cfg(not(feature = "bedrock"))]
+                ProviderKind::Bedrock => Err(anyhow!(
+                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
+                )),
                 ProviderKind::OpenRouter => {
                     self.complete_chat_vision_openrouter(
                         user_prompt,
@@ -529,6 +543,7 @@ impl Provider {
                     )
                     .await
                 }
+                #[cfg(feature = "bedrock")]
                 ProviderKind::Bedrock => {
                     self.complete_chat_stream_tools_bedrock(
                         user_prompt,
@@ -538,6 +553,10 @@ impl Provider {
                     )
                     .await
                 }
+                #[cfg(not(feature = "bedrock"))]
+                ProviderKind::Bedrock => Err(anyhow!(
+                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
+                )),
                 ProviderKind::OpenRouter => {
                     self.complete_chat_stream_tools_openrouter(
                         user_prompt,
@@ -581,10 +600,15 @@ impl Provider {
                     self.complete_chat_stream_azure(user_prompt, system_prompt, history)
                         .await
                 }
+                #[cfg(feature = "bedrock")]
                 ProviderKind::Bedrock => {
                     self.complete_chat_stream_bedrock(user_prompt, system_prompt, history)
                         .await
                 }
+                #[cfg(not(feature = "bedrock"))]
+                ProviderKind::Bedrock => Err(anyhow!(
+                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
+                )),
                 ProviderKind::OpenRouter => {
                     self.complete_chat_stream_openrouter(user_prompt, system_prompt, history)
                         .await
@@ -594,19 +618,51 @@ impl Provider {
         .await
     }
 
+    pub(crate) fn anthropic_usage(&self) -> anthropic::AnthropicUsage {
+        self.last_usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn api_key_str(&self) -> &str {
         self.api_key.as_deref().unwrap_or("")
+    }
+
+    /// Builds the chat completions URL, applying Azure's api-version suffix when needed.
+    fn openai_chat_url(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        match self.kind {
+            ProviderKind::Azure => {
+                format!("{}/chat/completions?api-version=2024-02-15-preview", base)
+            }
+            _ => format!("{}/chat/completions", base),
+        }
+    }
+
+    /// Builds the models listing URL.
+    fn openai_models_url(&self) -> String {
+        format!("{}/models", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Adds the appropriate auth header to an OpenAI-compatible request.
+    fn add_openai_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.kind {
+            ProviderKind::Azure => {
+                req.header("api-key", self.api_key.as_deref().unwrap_or_default())
+            }
+            _ => req.header(
+                "Authorization",
+                format!("Bearer {}", self.api_key.as_deref().unwrap_or_default()),
+            ),
+        }
     }
 
     fn parse_json_fallback(text: &str) -> Result<crate::ModelReply> {
         match serde_json::from_str::<crate::ModelReply>(text.trim()) {
             Ok(parsed) => Ok(parsed),
             Err(e) => {
-                eprintln!(
-                    "  {} JSON parse: {} — falling back",
-                    crate::ui::theme::paint_warning(&crate::ui::theme::active(), "!"),
-                    e
-                );
+                tracing::warn!("JSON parse failed — falling back: {}", e);
                 Ok(crate::ModelReply::fallback(text.trim()))
             }
         }
@@ -621,16 +677,23 @@ impl Provider {
         anyhow!("{} API failed ({}): {}", provider, status, err_msg)
     }
 
-    /// Core streaming loop: reads SSE bytes, buffers partial lines, yields each line
-    /// to the provided callback. The callback receives the trimmed line and a mutable
-    /// output buffer. Return `Ok(true)` from the callback to continue, `Ok(false)` to
-    /// stop early with the current output, or `Err` to abort.
-    async fn stream_lines<F>(resp: reqwest::Response, mut on_line: F) -> Result<String>
+    /// Prints a token to stdout when live streaming is enabled.
+    fn emit_token(text: &str) {
+        if STREAM_TOKENS.load(Ordering::SeqCst) {
+            use std::io::Write;
+            let _ = std::io::stdout().write(text.as_bytes());
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    /// Core byte-buffering loop: reads chunks from the response stream, reassembles
+    /// complete lines, and calls `on_line` for each non-empty trimmed line.
+    /// The callback returns `Ok(true)` to continue or `Ok(false)` to stop early.
+    pub(crate) async fn stream_buf<F>(resp: reqwest::Response, mut on_line: F) -> Result<()>
     where
-        F: FnMut(&str, &mut String) -> Result<bool>,
+        F: FnMut(&str) -> Result<bool>,
     {
         let mut stream = resp.bytes_stream();
-        let mut full = String::with_capacity(4096);
         let mut buf = String::with_capacity(4096);
         let mut cursor = 0usize;
 
@@ -655,14 +718,31 @@ impl Provider {
                         if trimmed.is_empty() {
                             continue;
                         }
-                        if !on_line(trimmed, &mut full)? {
-                            return Ok(full);
+                        if !on_line(trimmed)? {
+                            return Ok(());
                         }
                     }
                     None => break,
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Accumulates lines into a full response string. Wraps [`stream_buf`] with
+    /// a text-accumulation callback.
+    async fn stream_lines<F>(resp: reqwest::Response, mut on_line: F) -> Result<String>
+    where
+        F: FnMut(&str, &mut String) -> Result<bool>,
+    {
+        let mut full = String::with_capacity(4096);
+        Self::stream_buf(resp, |trimmed| {
+            if !on_line(trimmed, &mut full)? {
+                return Ok(false);
+            }
+            Ok(true)
+        })
+        .await?;
         Ok(full)
     }
 
@@ -679,6 +759,7 @@ impl Provider {
                         .and_then(|c| c.delta.content.as_deref())
                     {
                         full.push_str(content);
+                        Self::emit_token(content);
                         if full.len() > MAX_RESPONSE_BYTES {
                             return Err(anyhow!(
                                 "response too large ({} bytes)",
@@ -704,36 +785,36 @@ impl Provider {
                         Some("content_block_delta") => {
                             if let Some(text) = chunk.delta.and_then(|d| d.text) {
                                 full.push_str(&text);
+                                Self::emit_token(&text);
                             }
                         }
                         Some("content_block_start") => {
                             if let Some(text) = chunk.content_block.and_then(|b| b.text) {
                                 full.push_str(&text);
+                                Self::emit_token(&text);
                             }
                         }
                         Some("message_start") => {
                             if let Some(usage) = chunk.message.and_then(|m| m.usage) {
-                                let mut last = crate::provider::anthropic::LAST_USAGE
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner());
+                                let mut last_usage =
+                                    self.last_usage.lock().unwrap_or_else(|e| e.into_inner());
                                 if let Some(t) = usage.input_tokens {
-                                    last.input_tokens = t;
+                                    last_usage.input_tokens = t;
                                 }
                                 if let Some(t) = usage.cache_creation_input_tokens {
-                                    last.cache_creation_input_tokens = t;
+                                    last_usage.cache_creation_input_tokens = t;
                                 }
                                 if let Some(t) = usage.cache_read_input_tokens {
-                                    last.cache_read_input_tokens = t;
+                                    last_usage.cache_read_input_tokens = t;
                                 }
                             }
                         }
                         Some("message_delta") => {
                             if let Some(usage) = chunk.usage {
-                                let mut last = crate::provider::anthropic::LAST_USAGE
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner());
+                                let mut last_usage =
+                                    self.last_usage.lock().unwrap_or_else(|e| e.into_inner());
                                 if let Some(t) = usage.output_tokens {
-                                    last.output_tokens = t;
+                                    last_usage.output_tokens = t;
                                 }
                             }
                         }
@@ -780,6 +861,7 @@ impl Provider {
             if let Ok(obj) = serde_json::from_str::<ollama::OllamaStreamLine>(trimmed) {
                 if let Some(token) = obj.response {
                     full.push_str(&token);
+                    Self::emit_token(&token);
                 }
                 if obj.done == Some(true) {
                     return Ok(false);
@@ -806,6 +888,7 @@ impl Provider {
                         .and_then(|p| p.text)
                     {
                         full.push_str(&text);
+                        Self::emit_token(&text);
                         if full.len() > MAX_RESPONSE_BYTES {
                             return Err(anyhow!(
                                 "response too large ({} bytes)",
@@ -818,5 +901,51 @@ impl Provider {
             Ok(true)
         })
         .await
+    }
+
+    /// Shared tool streaming loop for OpenAI-compatible providers (OpenAI, Azure, OpenRouter).
+    /// Handles SSE buffering, timeout, cancellation, text + tool call accumulation.
+    pub(crate) async fn stream_openai_tool_response(
+        resp: reqwest::Response,
+    ) -> Result<tools::ToolResponse> {
+        let mut full_text = String::with_capacity(4096);
+        let mut tool_acc = openai::AccumulatedToolCalls::default();
+
+        Self::stream_buf(resp, |trimmed| {
+            if !trimmed.starts_with("data: ") {
+                return Ok(true);
+            }
+            let data = &trimmed[6..];
+            if data == "[DONE]" {
+                return Ok(false);
+            }
+            if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
+                if let Some(content) = chunk
+                    .choices
+                    .first()
+                    .and_then(|c| c.delta.content.as_deref())
+                {
+                    full_text.push_str(content);
+                }
+                if let Some(tool_calls) = chunk
+                    .choices
+                    .first()
+                    .and_then(|c| c.delta.tool_calls.as_ref())
+                {
+                    tool_acc.absorb_chunk(tool_calls);
+                }
+            }
+            if full_text.len() > MAX_RESPONSE_BYTES {
+                return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
+            }
+            Ok(true)
+        })
+        .await?;
+
+        if !tool_acc.is_empty() {
+            Ok(tools::ToolResponse::ToolCalls(tool_acc.to_tool_calls()))
+        } else {
+            Ok(tools::ToolResponse::Text(full_text))
+        }
     }
 }

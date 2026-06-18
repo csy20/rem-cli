@@ -11,12 +11,12 @@ use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
 use crate::commands::{
     auto_write_files, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy,
-    handle_diff, handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint,
-    handle_list_files, handle_memory, handle_memory_set, handle_mode, handle_model, handle_plan,
-    handle_provider, handle_reasoning, handle_refactor, handle_reset, handle_resume_session,
-    handle_review, handle_save_session, handle_search, handle_test, handle_theme, handle_tokens,
-    handle_undo, handle_vision, handle_why, handle_write, print_chat_help, print_last_files,
-    prompt_for_path,
+    handle_diff, handle_dir, handle_explain, handle_find, handle_goal, handle_init,
+    handle_lint_with_fallback, handle_list_files, handle_memory, handle_memory_set, handle_mode,
+    handle_model, handle_plan, handle_provider, handle_reasoning, handle_refactor, handle_reset,
+    handle_resume_session, handle_review, handle_save_session, handle_search, handle_test,
+    handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why,
+    handle_write, print_chat_help, print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskIntent};
@@ -240,10 +240,6 @@ async fn dispatch_slash_command(
             handle_write(session, args);
             return false;
         }
-        "/save" if !args.is_empty() => {
-            handle_write(session, args);
-            return false;
-        }
         "/dir" => {
             handle_dir(session, args);
             return false;
@@ -285,7 +281,7 @@ async fn dispatch_slash_command(
             return false;
         }
         "/tokens" => {
-            handle_tokens(session);
+            handle_tokens(session, client);
             return false;
         }
         "/memory" => {
@@ -312,6 +308,10 @@ async fn dispatch_slash_command(
             handle_reasoning(client, cfg, if args.is_empty() { None } else { Some(args) });
             return false;
         }
+        "/watch" => {
+            handle_watch(session);
+            return false;
+        }
         "/resume" => {
             handle_resume_session(session);
             return false;
@@ -322,66 +322,28 @@ async fn dispatch_slash_command(
             return false;
         }
         "/lint" => {
-            if args.is_empty() {
-                if session.last_files.is_empty() && session.last_files_written.is_empty() {
-                    println!(
-                        "{} no files to lint. Generate code first.",
-                        ui::theme::paint_warning(t, "│")
-                    );
-                } else {
-                    let paths: Vec<String> = if !session.last_files_written.is_empty() {
-                        session
-                            .last_files_written
-                            .iter()
-                            .map(|p| p.path.display().to_string())
-                            .collect()
-                    } else {
-                        session
-                            .last_files
-                            .iter()
-                            .filter(|f| !f.path.is_empty())
-                            .map(|f| f.path.clone())
-                            .collect()
-                    };
-                    for p in paths {
-                        handle_lint(session, &p);
-                    }
-                }
-            } else {
-                handle_lint(session, args);
-            }
+            handle_lint_with_fallback(session, args);
             return false;
         }
         "/find" => {
+            handle_find(session, args);
+            return false;
+        }
+        "/save" => {
             if args.is_empty() {
-                let rail = ui::theme::paint_rail_empty(t);
-                let usage = ui::theme::paint_bright(t, "usage: /find <query>");
-                let detail = ui::theme::paint_dim(
-                    t,
-                    "search text inside the project (skips node_modules, target, .git, ...)",
-                );
-                println!("{rail}");
-                println!("{rail} {usage}");
-                println!("{rail}  {detail}");
-                println!("{rail}");
+                handle_save_session(session);
             } else {
-                handle_find(session, args);
+                handle_write(session, args);
             }
             return false;
         }
         _ => {}
     }
 
-    // `/save` (no args) — save session
-    if name == "/save" {
-        handle_save_session(session);
-        return false;
-    }
-
     // Async commands (require .await)
     match name {
         "/search" => {
-            handle_search(client, session, args).await;
+            handle_search(client, session, cfg, args).await;
             false
         }
         "/explain" => {

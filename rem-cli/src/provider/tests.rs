@@ -1,5 +1,6 @@
 use super::*;
 use crate::ModelReply;
+use std::sync::Mutex;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -65,60 +66,11 @@ async fn test_ollama_list_models() {
         api_key: None,
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let models = provider.list_models_ollama().await.unwrap();
     assert_eq!(models, vec!["rem-coder:latest", "llama3:8b"]);
-}
-
-#[tokio::test]
-async fn test_ollama_healthcheck_success() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/tags"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "models": [{"name": "rem-coder:latest"}]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = Provider {
-        kind: ProviderKind::Ollama,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "rem-coder:latest".to_string(),
-        system_prompt: String::new(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-    };
-
-    assert!(provider.healthcheck_ollama().await.is_ok());
-}
-
-#[tokio::test]
-async fn test_ollama_healthcheck_no_models() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/tags"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "models": []
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = Provider {
-        kind: ProviderKind::Ollama,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "rem-coder:latest".to_string(),
-        system_prompt: String::new(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-    };
-
-    assert!(provider.healthcheck_ollama().await.is_err());
 }
 
 #[tokio::test]
@@ -149,6 +101,7 @@ async fn test_ollama_complete_json() {
         api_key: None,
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let reply = provider.complete_json_ollama("write hello").await.unwrap();
@@ -176,6 +129,7 @@ async fn test_ollama_complete_json_fallback() {
         api_key: None,
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let reply = provider.complete_json_ollama("hello").await.unwrap();
@@ -202,6 +156,7 @@ async fn test_ollama_model_not_found() {
         api_key: None,
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let err = provider.complete_json_ollama("hello").await.unwrap_err();
@@ -230,6 +185,7 @@ async fn test_ollama_chat_stream() {
         api_key: None,
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let result = provider
@@ -261,6 +217,7 @@ async fn test_openai_list_models() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let models = provider.list_models_openai().await.unwrap();
@@ -288,6 +245,7 @@ async fn test_openai_complete_json() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let reply = provider.complete_json_openai("write code").await.unwrap();
@@ -315,6 +273,7 @@ async fn test_openai_chat_stream() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let result = provider
@@ -344,6 +303,7 @@ async fn test_openai_api_error() {
         api_key: Some("bad-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let err = provider.complete_json_openai("hello").await.unwrap_err();
@@ -353,22 +313,6 @@ async fn test_openai_api_error() {
 }
 
 // ── Gemini ────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_gemini_healthcheck_no_key() {
-    let provider = Provider {
-        kind: ProviderKind::Gemini,
-        client: Client::new(),
-        base_url: "https://generativelanguage.googleapis.com".to_string(),
-        model: "gemini-2.0-flash".to_string(),
-        system_prompt: String::new(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-    };
-
-    assert!(provider.healthcheck_gemini().await.is_err());
-}
 
 #[tokio::test]
 async fn test_gemini_list_models() {
@@ -392,6 +336,7 @@ async fn test_gemini_list_models() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let models = provider.list_models_gemini().await.unwrap();
@@ -423,6 +368,7 @@ async fn test_gemini_complete_json() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let reply = provider.complete_json_gemini("hello").await.unwrap();
@@ -448,6 +394,7 @@ async fn test_gemini_chat_stream() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let result = provider
@@ -458,22 +405,6 @@ async fn test_gemini_chat_stream() {
 }
 
 // ── Anthropic ─────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_anthropic_healthcheck_no_key() {
-    let provider = Provider {
-        kind: ProviderKind::Anthropic,
-        client: Client::new(),
-        base_url: "https://api.anthropic.com".to_string(),
-        model: "claude-sonnet-4-20250514".to_string(),
-        system_prompt: String::new(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-    };
-
-    assert!(provider.healthcheck_anthropic().await.is_err());
-}
 
 #[tokio::test]
 async fn test_anthropic_list_models() {
@@ -497,6 +428,7 @@ async fn test_anthropic_list_models() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let models = provider.list_models_anthropic().await.unwrap();
@@ -524,6 +456,7 @@ async fn test_anthropic_complete_json() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let reply = provider.complete_json_anthropic("hello").await.unwrap();
@@ -549,6 +482,7 @@ async fn test_anthropic_chat_stream() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let result = provider
@@ -577,115 +511,12 @@ async fn test_anthropic_api_error() {
         api_key: Some("test-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let err = provider.complete_json_anthropic("hello").await.unwrap_err();
     let msg = format!("{}", err);
     assert!(msg.contains("Anthropic"));
-}
-
-// ── Additional healthcheck tests ──────────────────────────────────────
-
-#[tokio::test]
-async fn test_openai_healthcheck_success() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/models"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "data": [{"id": "gpt-4"}, {"id": "gpt-3.5-turbo"}]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = Provider {
-        kind: ProviderKind::OpenAI,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gpt-4".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-    };
-
-    assert!(provider.healthcheck_openai().await.is_ok());
-}
-
-#[tokio::test]
-async fn test_openai_healthcheck_empty_models() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/models"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "data": []
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = Provider {
-        kind: ProviderKind::OpenAI,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gpt-4".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-    };
-
-    assert!(provider.healthcheck_openai().await.is_ok());
-}
-
-#[tokio::test]
-async fn test_gemini_healthcheck_success() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "models": [
-                {"name": "models/gemini-2.0-flash", "display_name": "Gemini 2.0 Flash"}
-            ]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = Provider {
-        kind: ProviderKind::Gemini,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gemini-2.0-flash".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-    };
-
-    assert!(provider.healthcheck_gemini().await.is_ok());
-}
-
-#[tokio::test]
-async fn test_anthropic_healthcheck_success() {
-    let mock_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "data": [
-                {"type": "model", "id": "claude-sonnet-4-20250514"}
-            ]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let provider = Provider {
-        kind: ProviderKind::Anthropic,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "claude-sonnet-4-20250514".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-    };
-
-    assert!(provider.healthcheck_anthropic().await.is_ok());
 }
 
 #[tokio::test]
@@ -707,6 +538,7 @@ async fn test_gemini_api_error() {
         api_key: Some("bad-key".to_string()),
         model_ctx: 4096,
         reasoning_config: Default::default(),
+        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
     };
 
     let err = provider.complete_json_gemini("hello").await.unwrap_err();

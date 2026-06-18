@@ -213,14 +213,27 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
             Provider::new_azure(base_url, model, timeout_s, system_prompt, key, model_ctx)
         }
         ProviderKind::Bedrock => {
-            let model = if model == "rem-coder:latest" || model == "rem-coder" {
-                "anthropic.claude-sonnet-4-20250514".to_string()
-            } else {
-                model
-            };
-            let key =
-                api_key.unwrap_or_else(|| std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default());
-            Provider::new_bedrock(model, timeout_s, system_prompt, key, model_ctx)
+            #[cfg(feature = "bedrock")]
+            {
+                let model = if model == "rem-coder:latest" || model == "rem-coder" {
+                    "anthropic.claude-sonnet-4-20250514".to_string()
+                } else {
+                    model
+                };
+                let key = api_key
+                    .unwrap_or_else(|| std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default());
+                return Ok(Provider::new_bedrock(
+                    model,
+                    timeout_s,
+                    system_prompt,
+                    key,
+                    model_ctx,
+                ));
+            }
+            #[cfg(not(feature = "bedrock"))]
+            return Err(anyhow::anyhow!(
+                "AWS Bedrock support not enabled at compile time. Rebuild with 'bedrock' feature."
+            ));
         }
         ProviderKind::OpenRouter => {
             let key =
@@ -273,9 +286,19 @@ pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
     crate::DEFAULT_SYSTEM_PROMPT.to_string()
 }
 
+fn warn_missing_api_key(cfg: &AppConfig, env_var: &str) {
+    let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
+        || std::env::var(env_var).is_ok_and(|k| !k.is_empty());
+    if !has_key {
+        warn!(
+            "provider '{}' may need --api-key or {}",
+            cfg.provider, env_var
+        );
+    }
+}
+
 /// Validates config at startup, printing warnings for common issues.
 pub(crate) fn validate_config(cfg: &AppConfig) {
-    let t = ui::theme::active();
     let known_providers = [
         "ollama",
         "openai",
@@ -287,92 +310,38 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
         "openrouter",
     ];
     if !known_providers.contains(&cfg.provider.as_str()) {
-        warn!(
+        let msg = format!(
             "unknown provider '{}'. Known: {}",
             cfg.provider,
             known_providers.join(", ")
         );
-        eprintln!(
-            "{} unknown provider '{}'. Known: {}",
-            ui::theme::paint_warning(&t, "warning:"),
-            cfg.provider,
-            known_providers.join(", ")
-        );
+        warn!("{}", msg);
     }
 
-    if cfg.provider == "openai" || cfg.provider == "vllm" {
-        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
-            || std::env::var("OPENAI_API_KEY").is_ok_and(|k| !k.is_empty());
-        if !has_key {
-            eprintln!(
-                "{} provider '{}' may need --api-key or OPENAI_API_KEY",
-                ui::theme::paint_warning(&t, "warning:"),
-                cfg.provider
-            );
-        }
-    }
-    if cfg.provider == "anthropic" {
-        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
-            || std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.is_empty());
-        if !has_key {
-            eprintln!(
-                "{} provider 'anthropic' may need --api-key or ANTHROPIC_API_KEY",
-                ui::theme::paint_warning(&t, "warning:"),
-            );
-        }
-    }
-    if cfg.provider == "gemini" {
-        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
-            || std::env::var("GEMINI_API_KEY").is_ok_and(|k| !k.is_empty());
-        if !has_key {
-            eprintln!(
-                "{} provider 'gemini' may need --api-key or GEMINI_API_KEY",
-                ui::theme::paint_warning(&t, "warning:"),
-            );
-        }
-    }
-    if cfg.provider == "azure" {
-        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
-            || std::env::var("AZURE_OPENAI_API_KEY").is_ok_and(|k| !k.is_empty());
-        if !has_key {
-            eprintln!(
-                "{} provider 'azure' may need --api-key or AZURE_OPENAI_API_KEY",
-                ui::theme::paint_warning(&t, "warning:"),
-            );
-        }
-    }
-    if cfg.provider == "openrouter" {
-        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
-            || std::env::var("OPENROUTER_API_KEY").is_ok_and(|k| !k.is_empty());
-        if !has_key {
-            eprintln!(
-                "{} provider 'openrouter' may need --api-key or OPENROUTER_API_KEY",
-                ui::theme::paint_warning(&t, "warning:"),
-            );
-        }
+    match cfg.provider.as_str() {
+        "openai" | "vllm" => warn_missing_api_key(cfg, "OPENAI_API_KEY"),
+        "anthropic" => warn_missing_api_key(cfg, "ANTHROPIC_API_KEY"),
+        "gemini" => warn_missing_api_key(cfg, "GEMINI_API_KEY"),
+        "azure" => warn_missing_api_key(cfg, "AZURE_OPENAI_API_KEY"),
+        "openrouter" => warn_missing_api_key(cfg, "OPENROUTER_API_KEY"),
+        _ => {}
     }
 
     let mode = cfg.mode.to_uppercase();
     if !["CHAT", "CODE", "PLAN"].contains(&mode.as_str()) {
-        eprintln!(
-            "{} unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.",
-            ui::theme::paint_warning(&t, "warning:"),
+        warn!(
+            "unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.",
             cfg.mode
         );
     }
 
     if cfg.timeout_s < 5 || cfg.timeout_s > 600 {
-        eprintln!(
-            "{} timeout_s={} seems unusual (expected 5-600)",
-            ui::theme::paint_warning(&t, "warning:"),
-            cfg.timeout_s
-        );
+        warn!("timeout_s={} seems unusual (expected 5-600)", cfg.timeout_s);
     }
 
     if cfg.model_ctx < 512 {
-        eprintln!(
-            "{} model_ctx={} is very low (< 512). Responses may be truncated.",
-            ui::theme::paint_warning(&t, "warning:"),
+        warn!(
+            "model_ctx={} is very low (< 512). Responses may be truncated.",
             cfg.model_ctx
         );
     }
