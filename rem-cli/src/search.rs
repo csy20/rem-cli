@@ -1,6 +1,6 @@
-//! Web search via DuckDuckGo HTML API.
-//! Performs searches by scraping DuckDuckGo's HTML results page and
-//! parsing titles, snippets, and URLs from the response.
+//! Web search with configurable backends (DuckDuckGo, Google, Bing).
+//! When an API key is configured for Google or Bing, uses the proper search API;
+//! otherwise falls back to DuckDuckGo HTML scraping.
 
 use crate::ui;
 use anyhow::{Context, Result};
@@ -25,8 +25,94 @@ pub struct SearchResult {
     pub url: String,
 }
 
-/// Performs a web search via DuckDuckGo HTML API.
-pub(crate) async fn perform_web_search(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
+/// Search provider configuration.
+#[derive(Debug, Clone)]
+pub enum SearchProvider {
+    DuckDuckGo,
+    Google { api_key: String, cse_id: String },
+    Bing { api_key: String },
+}
+
+/// Performs a web search using the configured provider.
+pub(crate) async fn perform_web_search(
+    client: &Client,
+    query: &str,
+    provider: Option<&SearchProvider>,
+) -> Result<Vec<SearchResult>> {
+    match provider {
+        Some(SearchProvider::Google { api_key, cse_id }) => {
+            search_google(client, query, api_key, cse_id).await
+        }
+        Some(SearchProvider::Bing { api_key }) => search_bing(client, query, api_key).await,
+        _ => search_ddg(client, query).await,
+    }
+}
+
+async fn search_google(
+    client: &Client,
+    query: &str,
+    api_key: &str,
+    cse_id: &str,
+) -> Result<Vec<SearchResult>> {
+    let resp = client
+        .get("https://www.googleapis.com/customsearch/v1")
+        .query(&[("key", api_key), ("cx", cse_id), ("q", query), ("num", "8")])
+        .send()
+        .await
+        .context("Google search request failed")?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse Google search response")?;
+    let mut results = Vec::new();
+    if let Some(items) = body["items"].as_array() {
+        for item in items {
+            let title = item["title"].as_str().unwrap_or("").to_string();
+            let snippet = item["snippet"].as_str().unwrap_or("").to_string();
+            let url = item["link"].as_str().unwrap_or("").to_string();
+            if !title.is_empty() {
+                results.push(SearchResult {
+                    title,
+                    snippet,
+                    url,
+                });
+            }
+        }
+    }
+    Ok(results)
+}
+
+async fn search_bing(client: &Client, query: &str, api_key: &str) -> Result<Vec<SearchResult>> {
+    let resp = client
+        .get("https://api.bing.microsoft.com/v7.0/search")
+        .header("Ocp-Apim-Subscription-Key", api_key)
+        .query(&[("q", query), ("count", "8")])
+        .send()
+        .await
+        .context("Bing search request failed")?;
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse Bing search response")?;
+    let mut results = Vec::new();
+    if let Some(web_pages) = body["webPages"]["value"].as_array() {
+        for item in web_pages {
+            let title = item["name"].as_str().unwrap_or("").to_string();
+            let snippet = item["snippet"].as_str().unwrap_or("").to_string();
+            let url = item["url"].as_str().unwrap_or("").to_string();
+            if !title.is_empty() {
+                results.push(SearchResult {
+                    title,
+                    snippet,
+                    url,
+                });
+            }
+        }
+    }
+    Ok(results)
+}
+
+async fn search_ddg(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
     let resp = client
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", query)])
@@ -115,8 +201,7 @@ fn strip_html(input: &str) -> String {
             _ => out.push(c),
         }
     }
-    let trimmed = out.trim().to_string();
-    trimmed
+    out.trim().to_string()
 }
 
 /// Prints styled search results to the terminal.
@@ -146,6 +231,26 @@ pub fn print_search_results(results: &[SearchResult]) {
             );
         }
         println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+    }
+}
+
+/// Builds a SearchProvider from config fields.
+pub(crate) fn provider_from_config(
+    provider_name: &str,
+    api_key: &str,
+    search_cse_id: &str,
+) -> Option<SearchProvider> {
+    match provider_name.to_lowercase().as_str() {
+        "google" if !api_key.is_empty() && !search_cse_id.is_empty() => {
+            Some(SearchProvider::Google {
+                api_key: api_key.to_string(),
+                cse_id: search_cse_id.to_string(),
+            })
+        }
+        "bing" if !api_key.is_empty() => Some(SearchProvider::Bing {
+            api_key: api_key.to_string(),
+        }),
+        _ => None,
     }
 }
 
@@ -179,5 +284,15 @@ mod tests {
     #[test]
     fn strip_html_handles_empty() {
         assert_eq!(strip_html(""), "");
+    }
+
+    #[test]
+    fn provider_from_config_ddg_returns_none() {
+        assert!(provider_from_config("ddg", "", "").is_none());
+    }
+
+    #[test]
+    fn provider_from_config_google_missing_key() {
+        assert!(provider_from_config("google", "", "").is_none());
     }
 }

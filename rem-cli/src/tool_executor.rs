@@ -169,7 +169,8 @@ fn execute_web_search_sync(tool_call: &ToolCall) -> ToolCallResult {
     let rt = tokio::runtime::Runtime::new();
     match rt {
         Ok(runtime) => {
-            let results = runtime.block_on(perform_web_search(&reqwest::Client::new(), &query));
+            let results =
+                runtime.block_on(perform_web_search(&reqwest::Client::new(), &query, None));
             match results {
                 Ok(results) => {
                     let mut content = String::new();

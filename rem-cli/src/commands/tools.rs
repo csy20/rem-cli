@@ -6,7 +6,7 @@ use crate::chat::ChatSession;
 use crate::find::{find_matches, FindOptions};
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
-use crate::search::{perform_web_search, print_search_results};
+use crate::search::{perform_web_search, print_search_results, provider_from_config};
 use crate::truncate_to_lines;
 use crate::ui;
 use std::fs;
@@ -20,7 +20,8 @@ pub(crate) async fn handle_search(client: &Provider, session: &mut ChatSession, 
         ui::theme::paint_rail_empty(&t),
         ui::theme::paint(&t, "accent", "🔍", true)
     );
-    match perform_web_search(&client.client, query).await {
+    let search_provider = provider_from_config("", "", "");
+    match perform_web_search(&client.client, query, search_provider.as_ref()).await {
         Ok(results) => {
             if results.is_empty() {
                 println!(

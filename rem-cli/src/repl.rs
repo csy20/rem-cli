@@ -68,21 +68,78 @@ fn initialize_session(client: &Provider, cfg: &mut AppConfig) -> Result<ChatSess
     Ok(session)
 }
 
-/// Reads a single line of input from the user with Ctrl+C handling and error recovery.
-/// Returns `None` if the user double-pressed Ctrl+C (signals exit).
+/// Returns true if the input has unbalanced brackets that need continuation.
+fn needs_continuation(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if trimmed.ends_with('\\') {
+        return true;
+    }
+    let mut opens: Vec<char> = Vec::new();
+    for c in trimmed.chars() {
+        match c {
+            '{' | '(' | '[' => opens.push(c),
+            '}' => {
+                if opens.last() == Some(&'{') {
+                    opens.pop();
+                }
+            }
+            ')' => {
+                if opens.last() == Some(&'(') {
+                    opens.pop();
+                }
+            }
+            ']' => {
+                if opens.last() == Some(&'[') {
+                    opens.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    !opens.is_empty()
+}
+
+/// Reads user input with multi-line support.
 fn read_user_input(
     session: &mut ChatSession,
     prompt: &str,
     t: &crate::ui::theme::Theme,
 ) -> Option<String> {
     let mut error_count = 0u8;
+    let mut lines: Vec<String> = Vec::new();
+
     loop {
-        let line = session.readline(prompt);
+        let current_prompt = if lines.is_empty() {
+            prompt.to_string()
+        } else {
+            format!(
+                "\x01{}\x02...> \x01\x1b[0m\x02",
+                ui::theme::paint_dim(t, "\u{2502}")
+            )
+        };
+
+        let line = session.readline(&current_prompt);
         match line {
             Ok(s) => {
                 crate::CTRL_C_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
                 crate::SHOULD_EXIT.store(false, std::sync::atomic::Ordering::SeqCst);
-                return Some(s);
+
+                let trimmed = s.trim_end().to_string();
+
+                // Slash commands don't get multi-line treatment
+                if lines.is_empty() && (trimmed.starts_with('/') || trimmed.is_empty()) {
+                    return Some(trimmed);
+                }
+
+                lines.push(trimmed);
+
+                // Check if we need more input
+                let combined = lines.join("\n");
+                if needs_continuation(&combined) {
+                    continue;
+                }
+
+                return Some(combined);
             }
             Err(e) => {
                 if e.kind() == io::ErrorKind::Interrupted
@@ -102,10 +159,17 @@ fn read_user_input(
                     }
                     crate::provider::STREAM_CANCELLED
                         .store(true, std::sync::atomic::Ordering::SeqCst);
-                    println!(
-                        "  {} press Ctrl+C again to exit",
-                        ui::theme::paint_dim(t, "!")
-                    );
+
+                    if lines.is_empty() {
+                        println!(
+                            "  {} press Ctrl+C again to exit",
+                            ui::theme::paint_dim(t, "!")
+                        );
+                        continue;
+                    }
+                    // Cancel multi-line input on first Ctrl+C during continuation
+                    lines.clear();
+                    println!("  {} input cancelled", ui::theme::paint_dim(t, "!"));
                     continue;
                 }
                 eprintln!(

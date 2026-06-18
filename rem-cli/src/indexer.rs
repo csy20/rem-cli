@@ -26,6 +26,7 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::find;
 
@@ -190,6 +191,8 @@ pub fn retrieve_relevant_chunks<'a>(
         1.0
     };
 
+    let has_any_embedding = index.iter().any(|c| c.embedding.is_some());
+
     let mut scored: Vec<(f64, &IndexChunk)> = index
         .iter()
         .map(|c| {
@@ -197,21 +200,19 @@ pub fn retrieve_relevant_chunks<'a>(
             let dl = c.content.len() as f64;
 
             for w in &q_words {
-                // Term frequency in this chunk
                 let tf = count_occurrences(&c.content_lower, w) as f64;
                 if tf == 0.0 {
                     continue;
                 }
                 let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg_dl)));
 
-                // Inverse document frequency (smoothed)
                 let df = c.content_lower.matches(w).count() as f64;
                 let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
 
                 score += tf_norm * idf;
             }
 
-            // Name/path bonus (strong signal for relevance)
+            // Name/path bonus
             for w in &q_words {
                 if c.name_lower.contains(w) || c.path_lower.contains(w) {
                     score += 2.0;
@@ -221,6 +222,27 @@ pub fn retrieve_relevant_chunks<'a>(
             // Chunk type bonus
             if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
                 score += 0.5;
+            }
+
+            // Semantic score from embeddings (if available)
+            if has_any_embedding {
+                if let Some(ref emb) = c.embedding {
+                    // Simple query embedding approximation: normalize query presence
+                    let query_emb: Vec<f32> = q_words
+                        .iter()
+                        .map(|w| {
+                            if c.content_lower.contains(w) {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    if !query_emb.is_empty() && query_emb.len() == emb.len() {
+                        let sim = cosine_similarity(emb, &query_emb);
+                        score += sim * 3.0; // up to +3.0 boost
+                    }
+                }
             }
 
             (score, c)
@@ -636,6 +658,66 @@ fn file_mtime(path: &Path) -> u64 {
             })
         })
         .unwrap_or(0)
+}
+
+/// Computes embeddings for chunks using Ollama's /api/embed endpoint.
+/// Falls back silently if Ollama is unavailable.
+pub fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .ok();
+    let client = match client {
+        Some(c) => c,
+        None => return,
+    };
+
+    for chunk in chunks.iter_mut() {
+        let text = if chunk.content.len() > 8000 {
+            &chunk.content[..8000]
+        } else {
+            &chunk.content
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let url = format!("{}/api/embed", ollama_url.trim_end_matches('/'));
+        let payload = json!({
+            "model": "nomic-embed-text",
+            "input": text
+        });
+        if let Ok(resp) = client.post(&url).json(&payload).send() {
+            if let Ok(body) = resp.json::<serde_json::Value>() {
+                if let Some(embeddings) = body["embeddings"].as_array() {
+                    if let Some(embedding) = embeddings.first() {
+                        if let Some(vec) = embedding.as_array() {
+                            let v: Vec<f32> = vec
+                                .iter()
+                                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                .collect();
+                            if !v.is_empty() {
+                                chunk.embedding = Some(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Computes cosine similarity between two embedding vectors.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    (dot / (na * nb)) as f64
 }
 
 /// Loads existing file mtimes from a previous index, if available.

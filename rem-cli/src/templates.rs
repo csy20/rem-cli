@@ -1,11 +1,57 @@
 //! Project scaffolding templates.
-//! Provides template generators for `rem new` subcommand, producing
-//! starter files for various project types (bare, portfolio, blog, etc.).
+//! Loads templates from `~/.config/rem-cli/templates/<type>/` directory,
+//! falling back to built-in hardcoded templates.
+
+use std::fs;
+use std::path::PathBuf;
 
 use crate::FileEntry;
 
+fn templates_dir() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        let dir = PathBuf::from(xdg).join("rem-cli/templates");
+        return Some(dir);
+    }
+    dirs::home_dir().map(|h| h.join(".config/rem-cli/templates"))
+}
+
+fn load_template_from_disk(template_type: &str) -> Option<Vec<FileEntry>> {
+    let dir = templates_dir()?.join(template_type);
+    if !dir.is_dir() {
+        return None;
+    }
+    let mut files = Vec::new();
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let rel = path
+                    .strip_prefix(&dir)
+                    .ok()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !rel.is_empty() && !content.is_empty() {
+                    files.push(FileEntry { path: rel, content });
+                }
+            }
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    Some(files)
+}
+
 /// Generates a bare-bones HTML/CSS/JS project scaffold.
 pub fn template_bare(name: &str) -> Vec<FileEntry> {
+    if let Some(files) = load_template_from_disk("bare") {
+        return resolve_template(files, name);
+    }
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
         FileEntry {
@@ -94,6 +140,9 @@ document.querySelectorAll('nav a').forEach(link => {
 
 /// Generates a Rust project scaffold with Cargo.toml and src/main.rs.
 pub fn template_rust(name: &str) -> Vec<FileEntry> {
+    if let Some(files) = load_template_from_disk("rust") {
+        return resolve_template(files, name);
+    }
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
         FileEntry {
@@ -132,6 +181,9 @@ mod tests {
 
 /// Generates a Python project scaffold with main.py and requirements.txt.
 pub fn template_python(_name: &str) -> Vec<FileEntry> {
+    if let Some(files) = load_template_from_disk("python") {
+        return resolve_template(files, _name);
+    }
     vec![
         FileEntry {
             path: "main.py".into(),
@@ -153,6 +205,9 @@ if __name__ == "__main__":
 
 /// Generates a Go project scaffold with go.mod and main.go.
 pub fn template_go(name: &str) -> Vec<FileEntry> {
+    if let Some(files) = load_template_from_disk("go") {
+        return resolve_template(files, name);
+    }
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
         FileEntry {
@@ -182,6 +237,9 @@ func main() {
 
 /// Generates a JavaScript/Node.js scaffold with package.json and index.js.
 pub fn template_javascript(name: &str) -> Vec<FileEntry> {
+    if let Some(files) = load_template_from_disk("javascript") {
+        return resolve_template(files, name);
+    }
     vec![
         FileEntry {
             path: "package.json".into(),
@@ -207,8 +265,11 @@ pub fn template_javascript(name: &str) -> Vec<FileEntry> {
     ]
 }
 
-/// Generates a portfolio website scaffold with about, projects, and contact sections.
+/// Generates a portfolio website scaffold.
 pub fn template_portfolio(name: &str) -> Vec<FileEntry> {
+    if let Some(files) = load_template_from_disk("portfolio") {
+        return resolve_template(files, name);
+    }
     let title = name.rsplit('/').next().unwrap_or(name);
     let mut files = template_bare(name);
     files.push(FileEntry {
@@ -344,8 +405,11 @@ footer { background: #f5f5f5; text-align: center; padding: 1rem; color: #888; fo
     files
 }
 
-/// Generates a marketing landing page scaffold with hero, features, and CTA.
+/// Generates a marketing landing page scaffold.
 pub fn template_landing(name: &str) -> Vec<FileEntry> {
+    if let Some(files) = load_template_from_disk("landing") {
+        return resolve_template(files, name);
+    }
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
         FileEntry {
@@ -449,8 +513,11 @@ document.querySelectorAll('a[href^="#"]').forEach(anchor => {
     ]
 }
 
-/// Generates a blog scaffold with post listing and individual post pages.
+/// Generates a blog scaffold.
 pub fn template_blog(name: &str) -> Vec<FileEntry> {
+    if let Some(files) = load_template_from_disk("blog") {
+        return resolve_template(files, name);
+    }
     let title = name.rsplit('/').next().unwrap_or(name);
     vec![
         FileEntry {
@@ -532,6 +599,18 @@ footer { padding: 2rem 0; text-align: center; color: #a0aec0; font-family: syste
 "##.into(),
         },
     ]
+}
+
+/// Replaces `{{name}}` placeholders in template content with the project name.
+fn resolve_template(files: Vec<FileEntry>, name: &str) -> Vec<FileEntry> {
+    let title = name.rsplit('/').next().unwrap_or(name);
+    files
+        .into_iter()
+        .map(|f| FileEntry {
+            path: f.path.replace("{{name}}", title),
+            content: f.content.replace("{{name}}", title),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -654,5 +733,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn resolve_template_replaces_name() {
+        let files = vec![FileEntry {
+            path: "{{name}}.txt".into(),
+            content: "Hello {{name}}".into(),
+        }];
+        let resolved = resolve_template(files, "my-project");
+        assert_eq!(resolved[0].path, "my-project.txt");
+        assert_eq!(resolved[0].content, "Hello my-project");
     }
 }

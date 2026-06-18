@@ -8,7 +8,9 @@ use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::tools::{ToolResponse, ToolSpec};
+use super::tools::{ToolCall, ToolResponse, ToolSpec};
+use super::STREAM_CANCELLED;
+use std::sync::atomic::Ordering;
 
 static NUM_THREADS: LazyLock<usize> = LazyLock::new(|| {
     std::thread::available_parallelism()
@@ -35,6 +37,30 @@ pub struct OllamaJsonResponse {
 pub struct OllamaStreamLine {
     pub response: Option<String>,
     pub done: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaChatStreamLine {
+    pub message: Option<OllamaChatMessage>,
+    pub done: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaChatMessage {
+    pub content: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Option<Vec<OllamaToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaToolCall {
+    pub function: Option<OllamaToolCallFunction>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OllamaToolCallFunction {
+    pub name: Option<String>,
+    pub arguments: Option<serde_json::Value>,
 }
 
 impl super::Provider {
@@ -189,14 +215,127 @@ impl super::Provider {
         user_prompt: &str,
         system_prompt: &str,
         history: &str,
-        _tool_specs: &[ToolSpec],
+        tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        // Ollama doesn't natively support tool calling in the /api/generate endpoint.
-        // For Ollama >=0.5 we could use /api/chat with OpenAI-compatible format,
-        // but for now fall back to plain text streaming.
-        let text = self
-            .complete_chat_stream_ollama(user_prompt, system_prompt, history)
-            .await?;
-        Ok(ToolResponse::Text(text))
+        let url = super::api_url(&self.base_url, "chat");
+
+        let mut messages: Vec<serde_json::Value> = vec![];
+        messages.push(json!({"role": "system", "content": system_prompt}));
+        if !history.is_empty() {
+            messages.push(json!({"role": "user", "content": history}));
+        }
+        messages.push(json!({"role": "user", "content": user_prompt}));
+
+        let tools: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
+
+        let mut payload = json!({
+            "model": self.model,
+            "messages": messages,
+            "stream": true,
+            "options": { "num_predict": 4096, "num_ctx": self.model_ctx, "num_thread": *NUM_THREADS }
+        });
+        if !tools.is_empty() {
+            payload["tools"] = json!(tools);
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Ollama chat API")?;
+
+        if !resp.status().is_success() {
+            // If tool calling not supported, fall back to plain text
+            let text = self
+                .complete_chat_stream_ollama(user_prompt, system_prompt, history)
+                .await?;
+            return Ok(ToolResponse::Text(text));
+        }
+
+        let mut full_text = String::with_capacity(4096);
+        let mut tool_calls: Vec<(i64, String, String, String)> = Vec::new();
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::with_capacity(4096);
+        let mut cursor = 0usize;
+
+        loop {
+            if STREAM_CANCELLED.load(Ordering::SeqCst) {
+                break;
+            }
+            use futures_util::StreamExt;
+            let chunk =
+                match tokio::time::timeout(std::time::Duration::from_secs(60), stream.next()).await
+                {
+                    Ok(Some(Ok(c))) => c,
+                    Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {}", e)),
+                    Ok(None) => break,
+                    Err(_) => return Err(anyhow!("stream timed out")),
+                };
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            loop {
+                let tail = &buf[cursor..];
+                match tail.find('\n') {
+                    Some(pos) => {
+                        let line = &tail[..pos];
+                        cursor += pos + 1;
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
+                            if let Some(ref msg) = obj.message {
+                                if let Some(ref content) = msg.content {
+                                    full_text.push_str(content);
+                                }
+                                if let Some(ref calls) = msg.tool_calls {
+                                    for tc in calls {
+                                        let idx = tool_calls.len() as i64;
+                                        let name = tc
+                                            .function
+                                            .as_ref()
+                                            .and_then(|f| f.name.clone())
+                                            .unwrap_or_default();
+                                        let args = tc
+                                            .function
+                                            .as_ref()
+                                            .and_then(|f| {
+                                                f.arguments.as_ref().map(|a| a.to_string())
+                                            })
+                                            .unwrap_or_default();
+                                        tool_calls.push((idx, String::new(), name, args));
+                                    }
+                                }
+                            }
+                            if obj.done == Some(true) {
+                                break;
+                            }
+                        }
+                    }
+                    None => break,
+                }
+            }
+            if full_text.len() > super::MAX_RESPONSE_BYTES {
+                return Err(anyhow!(
+                    "response too large ({} bytes)",
+                    super::MAX_RESPONSE_BYTES
+                ));
+            }
+        }
+
+        if !tool_calls.is_empty() {
+            let calls: Vec<ToolCall> = tool_calls
+                .into_iter()
+                .map(|(_, id, name, args_str)| ToolCall {
+                    id,
+                    name,
+                    arguments: serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null),
+                })
+                .collect();
+            Ok(ToolResponse::ToolCalls(calls))
+        } else {
+            Ok(ToolResponse::Text(full_text))
+        }
     }
 }

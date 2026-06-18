@@ -32,6 +32,7 @@ pub(crate) fn check_system_resources() {
 }
 
 fn detect_system_ram_gb() -> u64 {
+    // Linux: /proc/meminfo
     if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
         for line in content.lines() {
             if line.starts_with("MemTotal:") {
@@ -44,6 +45,19 @@ fn detect_system_ram_gb() -> u64 {
             }
         }
     }
+
+    // macOS: sysctl hw.memsize
+    if let Ok(output) = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+    {
+        if let Ok(s) = String::from_utf8(output.stdout) {
+            if let Ok(bytes) = s.trim().parse::<u64>() {
+                return bytes / 1024 / 1024 / 1024;
+            }
+        }
+    }
+
     0
 }
 

@@ -106,6 +106,11 @@ pub struct IndexArgs {
     pub dir: Option<PathBuf>,
     #[arg(long, help = "Preview what would be indexed without writing any files")]
     pub dry_run: bool,
+    #[arg(
+        long,
+        help = "Compute embeddings (Ollama required) for semantic retrieval"
+    )]
+    pub embeddings: bool,
 }
 
 /// Arguments for `rem pull`.

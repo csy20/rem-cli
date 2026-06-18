@@ -1,11 +1,16 @@
-/// Estimates token count using a byte-pair heuristic tuned for code.
-/// For English + code: ~1 token per 3.5 characters on average.
-/// For CJK: ~1 token per character (overcounted by ratio = 2.5).
-/// This is within ~20% of real tokenizers for most code.
+/// Estimates token count, using tiktoken-rs if available, falling back to heuristic.
 pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
+    if let Ok(bpe) = tiktoken_rs::cl100k_base() {
+        let tokens = bpe.encode_with_special_tokens(text);
+        return tokens.len().max(1);
+    }
+    estimate_tokens_heuristic(text)
+}
+
+fn estimate_tokens_heuristic(text: &str) -> usize {
     let bytes = text.len();
     let mut cjk_chars = 0usize;
     let mut other_unicode = 0usize;
@@ -28,12 +33,7 @@ pub fn estimate_tokens(text: &str) -> usize {
         }
     }
 
-    // Each CJK char is roughly 1 token (but we account for byte ratio)
-    // Non-CJK unicode: ~2 tokens per char
-    // ASCII: ~1 token per 3.5 bytes
-    let ascii_bytes = bytes
-        - cjk_chars * 3       // CJK chars are 3 bytes in UTF-8
-        - other_unicode * 2; // Other unicode: ~2 bytes avg
+    let ascii_bytes = bytes - cjk_chars * 3 - other_unicode * 2;
     let ascii_tokens = if ascii_bytes > 0 {
         (ascii_bytes as f64 / 3.5).round() as usize
     } else {

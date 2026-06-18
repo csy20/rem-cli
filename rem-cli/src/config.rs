@@ -9,11 +9,20 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use tracing::warn;
 
-/// Saves config to `~/.config/rem-cli/config.toml`.
+/// Returns the config directory path, checking XDG_CONFIG_HOME first.
+fn config_dir() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        let dir = std::path::PathBuf::from(xdg).join("rem-cli");
+        return Some(dir);
+    }
+    dirs::home_dir().map(|h| h.join(".config/rem-cli"))
+}
+
+/// Saves config to XDG config dir or `~/.config/rem-cli/config.toml`.
 pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
-    if let Some(home) = dirs::home_dir() {
-        let dir = home.join(".config/rem-cli");
+    if let Some(dir) = config_dir() {
         fs::create_dir_all(&dir)?;
         let path = dir.join("config.toml");
         let text = toml::to_string_pretty(cfg).context("failed to serialize config")?;
@@ -99,11 +108,11 @@ pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
     Ok(Some(dir))
 }
 
-/// Loads and merges global (`~/.config/rem-cli/config.toml`) and local (`.remcli.toml`) config.
+/// Loads and merges global (XDG_CONFIG_HOME or `~/.config/rem-cli/config.toml`) and local (`.remcli.toml`) config.
 pub(crate) fn load_config() -> Result<AppConfig> {
     let mut cfg = AppConfig::default();
-    if let Some(home) = dirs::home_dir() {
-        let path = home.join(".config/rem-cli/config.toml");
+    if let Some(dir) = config_dir() {
+        let path = dir.join("config.toml");
         if path.exists() {
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
@@ -265,7 +274,6 @@ pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
 }
 
 /// Validates config at startup, printing warnings for common issues.
-/// Returns the (possibly adjusted) config.
 pub(crate) fn validate_config(cfg: &AppConfig) {
     let t = ui::theme::active();
     let known_providers = [
@@ -279,6 +287,11 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
         "openrouter",
     ];
     if !known_providers.contains(&cfg.provider.as_str()) {
+        warn!(
+            "unknown provider '{}'. Known: {}",
+            cfg.provider,
+            known_providers.join(", ")
+        );
         eprintln!(
             "{} unknown provider '{}'. Known: {}",
             ui::theme::paint_warning(&t, "warning:"),

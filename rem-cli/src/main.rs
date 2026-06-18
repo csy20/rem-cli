@@ -41,6 +41,7 @@ mod tool_executor;
 mod types;
 mod ui;
 mod vision;
+mod watcher;
 
 use crate::config::{build_provider, load_config, load_system_prompt, validate_config};
 use crate::intent::{classify_intent, TaskIntent};
@@ -159,8 +160,19 @@ RULES — follow strictly:
 
 // ── Entry point ────────────────────────────────────────────────────────────
 
+fn init_tracing() {
+    use tracing_subscriber::filter::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .compact()
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    init_tracing();
     setup_global_ctrlc_handler();
 
     let cli = Cli::parse();
@@ -537,7 +549,7 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     );
 
     let refreshing = load_codebase_index(&dir).is_some();
-    let (chunks, file_mtimes) = generate_codebase_index(&dir)?;
+    let (mut chunks, file_mtimes) = generate_codebase_index(&dir)?;
     if chunks.is_empty() {
         println!(
             "{} {} no indexable files found (after skips)",
@@ -545,6 +557,22 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
             ui::theme::paint_warning(&t, "⚠")
         );
         return Ok(());
+    }
+
+    if args.embeddings {
+        println!(
+            "{} {} computing embeddings (nomic-embed-text via Ollama)...",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "\u{2699}")
+        );
+        indexer::compute_embeddings(&mut chunks, &cfg.ollama_url);
+        let embedded = chunks.iter().filter(|c| c.embedding.is_some()).count();
+        println!(
+            "{} {} {} chunks embedded",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_success_label(&t, "\u{2713}"),
+            embedded
+        );
     }
 
     if args.dry_run {

@@ -207,5 +207,6 @@ pub fn provider_supports_tools(kind: &super::ProviderKind) -> bool {
             | super::ProviderKind::Gemini
             | super::ProviderKind::Azure
             | super::ProviderKind::OpenRouter
+            | super::ProviderKind::Ollama
     )
 }

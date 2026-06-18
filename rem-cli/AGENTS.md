@@ -4,7 +4,7 @@
 
 - **Language:** Rust (edition 2021)
 - **Build:** `cargo build`
-- **Test:** `cargo test` (153 unit + 17 integration + 12 intent_parsing tests)
+- **Test:** `cargo test` (178 unit + 17 integration + 12 intent_parsing tests = 207 total)
 - **Lint:** `cargo clippy` (zero warnings target)
 - **Run:** `cargo run -- [args]` or `./target/debug/rem`
 
@@ -14,30 +14,41 @@
 src/
 ├── main.rs          — Entry point, CLI dispatch, REPL loop, Ctrl+C handler
 ├── cli.rs           — Clap argument parsing, AppConfig & PartialConfig
-├── config.rs        — Config loading/saving, provider construction
+├── config.rs        — Config loading/saving (XDG support), provider construction
 ├── chat.rs          — ChatSession (history, state, serialization)
-├── repl.rs          — Interactive REPL loop
-├── provider/        — LLM providers (Ollama, OpenAI, Anthropic, Gemini)
+├── repl.rs          — Interactive REPL loop (multi-line input support)
+├── provider/        — LLM providers (Ollama, OpenAI, Anthropic, Gemini, Azure, Bedrock, OpenRouter)
 │   ├── mod.rs       — Provider enum, shared Client, stream handlers
-│   └── gemini.rs    — Gemini-specific streaming
-├── indexer.rs       — Codebase indexing (rem index) + keyword retrieval
+│   ├── ollama.rs    — Ollama-native tool calling via /api/chat
+│   ├── openai.rs    — OpenAI-compatible streaming
+│   ├── anthropic.rs — Anthropic Claude streaming + tool calls
+│   ├── gemini.rs    — Google Gemini streaming
+│   ├── azure.rs     — Azure OpenAI streaming
+│   ├── bedrock.rs   — AWS Bedrock streaming
+│   ├── openrouter.rs— OpenRouter streaming
+│   └── tools.rs     — Shared ToolCall type + provider tool support matrix
+├── indexer.rs       — Codebase indexing (rem index), BM25 + embedding retrieval
 ├── intent.rs        — Query intent classification
 ├── commands/        — REPL slash command handlers
-│   ├── mod.rs
+│   ├── mod.rs       — CommandRegistry with O(1) lookup
 │   ├── files.rs     — /write, /undo, /copy
-│   ├── session.rs   — /dir, /config, /memory, /save
+│   ├── session.rs   — /dir, /config, /memory, /save, /init, /tokens
 │   ├── tools.rs     — /search, /explain, /test, /refactor, /lint, /find
 │   ├── goal.rs      — /goal autonomous loop
 │   ├── review.rs    — /diff, /review
 │   └── help.rs      — /help
-├── templates.rs     — Project scaffolding templates
-├── token_count.rs   — Token estimation
+├── templates.rs     — Project scaffolding templates (disk + fallback)
+├── token_count.rs   — Token estimation (tiktoken-rs with heuristic fallback)
 ├── types.rs         — Shared types (FileEntry, ModelReply, resolve_safe_path)
 ├── find.rs          — Filesystem text search
-├── search.rs        — Web search (DuckDuckGo)
+├── search.rs        — Web search (DuckDuckGo, Google, Bing) with provider_from_config
 ├── parsing.rs       — Code fence extraction
 ├── agentic.rs       — Agentic loop (goal orchestration)
 ├── memory.rs        — Project memory persistence
+├── vision.rs        — Image encoding + /vision command handler
+├── reasoning.rs     — DeepSeek reasoning extraction
+├── blocklist.rs     — Command sanitization and blocking
+├── watcher.rs       — Live file watcher with debounce for auto-reindex
 ├── pager.rs         — Pager output
 ├── highlight.rs     — Syntax highlighting
 ├── feedback.rs      — User feedback
@@ -71,3 +82,5 @@ cargo check                   # Fast type-check only
 - Import style: `use crate::` for internal, grouped by module
 - Tests: `#[cfg(test)] mod tests { use super::*; }` at end of source file
 - New features must keep all tests passing and clippy clean
+- Logging: `tracing::warn!()` / `tracing::info!()` via `EnvFilter`, never raw `eprintln!`
+- Watcher: background thread with `mpsc::Sender<()>` for stop signal; 1-second debounce window
