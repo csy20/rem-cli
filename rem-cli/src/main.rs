@@ -590,21 +590,22 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
         return Ok(());
     }
 
-    write_codebase_index(&dir, &chunks, file_mtimes)?;
-
-    let out_path = dir.join(".rem/codebase_index.json");
+    let num_chunks = chunks.len();
     let unique_files = chunks
         .iter()
         .map(|c| &c.path)
         .collect::<std::collections::HashSet<_>>()
         .len();
+    write_codebase_index(&dir, chunks, file_mtimes)?;
+
+    let out_path = dir.join(".rem/codebase_index.json");
     let action = if refreshing { "refreshed" } else { "created" };
     println!(
         "{} {} {} {} chunks from {} files",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         ui::theme::paint_success_label(&t, "✓"),
         action,
-        chunks.len(),
+        num_chunks,
         unique_files
     );
     println!(

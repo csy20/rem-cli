@@ -1,6 +1,5 @@
 use super::*;
 use crate::ModelReply;
-use std::sync::Mutex;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -57,19 +56,17 @@ async fn test_ollama_list_models() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Ollama,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "rem-coder:latest".to_string(),
-        system_prompt: String::new(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Ollama,
+        mock_server.uri(),
+        "rem-coder:latest".to_string(),
+        30,
+        String::new(),
+        None,
+        4096,
+    );
 
-    let models = provider.list_models_ollama().await.unwrap();
+    let models = provider.list_models().await.unwrap();
     assert_eq!(models, vec!["rem-coder:latest", "llama3:8b"]);
 }
 
@@ -92,19 +89,17 @@ async fn test_ollama_complete_json() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Ollama,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "rem-coder:latest".to_string(),
-        system_prompt: "You are REM.".to_string(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Ollama,
+        mock_server.uri(),
+        "rem-coder:latest".to_string(),
+        30,
+        "You are REM.".to_string(),
+        None,
+        4096,
+    );
 
-    let reply = provider.complete_json_ollama("write hello").await.unwrap();
+    let reply = provider.complete_json("write hello").await.unwrap();
     assert_eq!(reply.explanation, "test");
     assert_eq!(reply.code, "fn main() {}");
 }
@@ -120,19 +115,17 @@ async fn test_ollama_complete_json_fallback() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Ollama,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "rem-coder:latest".to_string(),
-        system_prompt: String::new(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Ollama,
+        mock_server.uri(),
+        "rem-coder:latest".to_string(),
+        30,
+        String::new(),
+        None,
+        4096,
+    );
 
-    let reply = provider.complete_json_ollama("hello").await.unwrap();
+    let reply = provider.complete_json("hello").await.unwrap();
     assert_eq!(reply.explanation, "this is not valid json");
 }
 
@@ -147,19 +140,17 @@ async fn test_ollama_model_not_found() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Ollama,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "unknown".to_string(),
-        system_prompt: String::new(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Ollama,
+        mock_server.uri(),
+        "unknown".to_string(),
+        30,
+        String::new(),
+        None,
+        4096,
+    );
 
-    let err = provider.complete_json_ollama("hello").await.unwrap_err();
+    let err = provider.complete_json("hello").await.unwrap_err();
     let msg = format!("{}", err);
     assert!(msg.contains("not found"));
     assert!(msg.contains("ollama pull"));
@@ -176,22 +167,17 @@ async fn test_ollama_chat_stream() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Ollama,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "rem-coder:latest".to_string(),
-        system_prompt: String::new(),
-        api_key: None,
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Ollama,
+        mock_server.uri(),
+        "rem-coder:latest".to_string(),
+        30,
+        String::new(),
+        None,
+        4096,
+    );
 
-    let result = provider
-        .complete_chat_stream_ollama("hi", "", "")
-        .await
-        .unwrap();
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
     assert_eq!(result, "Hello World");
 }
 
@@ -208,19 +194,17 @@ async fn test_openai_list_models() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::OpenAI,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gpt-4".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::OpenAI,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let models = provider.list_models_openai().await.unwrap();
+    let models = provider.list_models().await.unwrap();
     assert_eq!(models, vec!["gpt-4", "gpt-3.5-turbo"]);
 }
 
@@ -236,19 +220,17 @@ async fn test_openai_complete_json() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::OpenAI,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gpt-4".to_string(),
-        system_prompt: "Be helpful.".to_string(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::OpenAI,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        "Be helpful.".to_string(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let reply = provider.complete_json_openai("write code").await.unwrap();
+    let reply = provider.complete_json("write code").await.unwrap();
     assert_eq!(reply.explanation, "test");
     assert_eq!(reply.code, "print('hello')");
 }
@@ -264,22 +246,17 @@ async fn test_openai_chat_stream() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::OpenAI,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gpt-4".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::OpenAI,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let result = provider
-        .complete_chat_stream_openai("hi", "", "")
-        .await
-        .unwrap();
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
     assert_eq!(result, "Hello World");
 }
 
@@ -294,19 +271,17 @@ async fn test_openai_api_error() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::OpenAI,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gpt-4".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("bad-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::OpenAI,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        String::new(),
+        Some("bad-key".to_string()),
+        4096,
+    );
 
-    let err = provider.complete_json_openai("hello").await.unwrap_err();
+    let err = provider.complete_json("hello").await.unwrap_err();
     let msg = format!("{}", err);
     assert!(msg.contains("OpenAI"));
     assert!(msg.contains("401"));
@@ -327,19 +302,17 @@ async fn test_gemini_list_models() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Gemini,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gemini-2.0-flash".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Gemini,
+        mock_server.uri(),
+        "gemini-2.0-flash".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let models = provider.list_models_gemini().await.unwrap();
+    let models = provider.list_models().await.unwrap();
     assert!(models.contains(&"gemini-2.0-flash".to_string()));
 }
 
@@ -359,19 +332,17 @@ async fn test_gemini_complete_json() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Gemini,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gemini-2.0-flash".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Gemini,
+        mock_server.uri(),
+        "gemini-2.0-flash".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let reply = provider.complete_json_gemini("hello").await.unwrap();
+    let reply = provider.complete_json("hello").await.unwrap();
     assert_eq!(reply.explanation, "test");
 }
 
@@ -385,22 +356,17 @@ async fn test_gemini_chat_stream() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Gemini,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gemini-2.0-flash".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Gemini,
+        mock_server.uri(),
+        "gemini-2.0-flash".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let result = provider
-        .complete_chat_stream_gemini("hi", "", "")
-        .await
-        .unwrap();
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
     assert_eq!(result, "Hello World");
 }
 
@@ -419,19 +385,17 @@ async fn test_anthropic_list_models() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Anthropic,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "claude-sonnet-4-20250514".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Anthropic,
+        mock_server.uri(),
+        "claude-sonnet-4-20250514".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let models = provider.list_models_anthropic().await.unwrap();
+    let models = provider.list_models().await.unwrap();
     assert!(models.contains(&"claude-sonnet-4-20250514".to_string()));
 }
 
@@ -447,19 +411,17 @@ async fn test_anthropic_complete_json() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Anthropic,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "claude-sonnet-4-20250514".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Anthropic,
+        mock_server.uri(),
+        "claude-sonnet-4-20250514".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let reply = provider.complete_json_anthropic("hello").await.unwrap();
+    let reply = provider.complete_json("hello").await.unwrap();
     assert_eq!(reply.explanation, "test");
 }
 
@@ -473,22 +435,17 @@ async fn test_anthropic_chat_stream() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Anthropic,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "claude-sonnet-4-20250514".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Anthropic,
+        mock_server.uri(),
+        "claude-sonnet-4-20250514".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let result = provider
-        .complete_chat_stream_anthropic("hi", "", "")
-        .await
-        .unwrap();
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
     assert_eq!(result, "Hello World");
 }
 
@@ -502,19 +459,17 @@ async fn test_anthropic_api_error() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Anthropic,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "claude-sonnet-4-20250514".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("test-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Anthropic,
+        mock_server.uri(),
+        "claude-sonnet-4-20250514".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
 
-    let err = provider.complete_json_anthropic("hello").await.unwrap_err();
+    let err = provider.complete_json("hello").await.unwrap_err();
     let msg = format!("{}", err);
     assert!(msg.contains("Anthropic"));
 }
@@ -529,19 +484,17 @@ async fn test_gemini_api_error() {
         .mount(&mock_server)
         .await;
 
-    let provider = Provider {
-        kind: ProviderKind::Gemini,
-        client: Client::new(),
-        base_url: mock_server.uri(),
-        model: "gemini-2.0-flash".to_string(),
-        system_prompt: String::new(),
-        api_key: Some("bad-key".to_string()),
-        model_ctx: 4096,
-        reasoning_config: Default::default(),
-        last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-    };
+    let provider = Provider::new(
+        ProviderKind::Gemini,
+        mock_server.uri(),
+        "gemini-2.0-flash".to_string(),
+        30,
+        String::new(),
+        Some("bad-key".to_string()),
+        4096,
+    );
 
-    let err = provider.complete_json_gemini("hello").await.unwrap_err();
+    let err = provider.complete_json("hello").await.unwrap_err();
     let msg = format!("{}", err);
     assert!(msg.contains("Gemini"));
 }

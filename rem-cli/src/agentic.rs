@@ -84,8 +84,8 @@ pub fn run_lint(path: &str) -> ToolResult {
 
     match Command::new(cmd).args(&args).output() {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             ToolResult {
                 tool_name: name.into(),
                 success: output.status.success(),
@@ -134,8 +134,8 @@ pub fn run_test(path: &str) -> ToolResult {
 
     match result {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let combined = if stdout.len() > 2000 {
                 format!("{}...\n[truncated to 2000 chars]", &stdout[..2000])
             } else {

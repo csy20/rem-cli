@@ -3,8 +3,6 @@
 //! debounces them (batches within 1 second), and triggers index regeneration.
 //!
 //! These functions are ready for CLI integration (e.g., via a `/watch` REPL command).
-//! Dead-code is allowed because the watcher is opt-in at runtime.
-#![allow(dead_code)]
 
 use std::path::Path;
 use std::sync::mpsc;
@@ -84,6 +82,7 @@ where
 }
 
 /// Determines whether a file event should trigger re-indexing.
+#[allow(dead_code)]
 pub fn should_reindex(event: &Event) -> bool {
     matches!(
         event.kind,
@@ -108,7 +107,7 @@ pub fn watch_and_reindex(root: &Path) -> Result<mpsc::Sender<()>> {
 fn auto_reindex(root: &Path) -> Result<()> {
     let (chunks, file_mtimes) = crate::indexer::generate_codebase_index(root)?;
     if !chunks.is_empty() {
-        crate::indexer::write_codebase_index(root, &chunks, file_mtimes)?;
+        crate::indexer::write_codebase_index(root, chunks, file_mtimes)?;
     }
     Ok(())
 }

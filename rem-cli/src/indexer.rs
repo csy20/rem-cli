@@ -141,10 +141,10 @@ fn build_inverted_index(
     for (i, chunk) in chunks.iter().enumerate() {
         let mut seen_in_chunk: HashSet<String> = HashSet::new();
         for w in tokenize(&chunk.content_lower) {
-            inverted.entry(w.clone()).or_default().push(i);
             if seen_in_chunk.insert(w.clone()) {
-                *doc_freqs.entry(w).or_insert(0) += 1;
+                *doc_freqs.entry(w.clone()).or_insert(0) += 1;
             }
+            inverted.entry(w).or_default().push(i);
         }
     }
     inverted
@@ -152,10 +152,14 @@ fn build_inverted_index(
 
 /// Tokenizes text into lowercase alphanumeric tokens (min 3 chars).
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() > 2)
-        .map(|w| w.to_lowercase())
-        .collect()
+    let estimated = text.len() / 20;
+    let mut tokens = Vec::with_capacity(estimated.max(16));
+    tokens.extend(
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2)
+            .map(|w| w.to_lowercase()),
+    );
+    tokens
 }
 
 /// BM25 retrieval using `doc_freqs` from the pre-built index for correct IDF computation.
@@ -482,8 +486,7 @@ fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, St
         let line_len = line.len() + 1;
         if buf.len() + line_len > target && !buf.trim().is_empty() {
             let end_l = cur_line.saturating_sub(1).max(cur_start_line);
-            out.push((cur_start_line, end_l, buf.clone()));
-            buf.clear();
+            out.push((cur_start_line, end_l, std::mem::take(&mut buf)));
             cur_start_line = cur_line;
         }
         buf.push_str(line);
@@ -502,9 +505,9 @@ fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, St
         while start < big.len() {
             let end = (start + target).min(big.len());
             let end = big.floor_char_boundary(end);
-            let piece = &big[start..end];
+            let piece = big[start..end].to_string();
             let piece_lines = piece.lines().count().max(1);
-            out.push((lnum, lnum + piece_lines - 1, piece.to_string()));
+            out.push((lnum, lnum + piece_lines - 1, piece));
             lnum += piece_lines;
             start = end;
             if start < big.len() && big.as_bytes().get(start) == Some(&b'\n') {
@@ -612,7 +615,7 @@ fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
 /// Writes the codebase index to `.rem/codebase_index.json` with inverted index and mtimes.
 pub fn write_codebase_index(
     root: &Path,
-    chunks: &[IndexChunk],
+    chunks: Vec<IndexChunk>,
     file_mtimes: HashMap<String, u64>,
 ) -> Result<()> {
     let rem_dir = root.join(".rem");
@@ -625,21 +628,22 @@ pub fn write_codebase_index(
     for (i, chunk) in chunks.iter().enumerate() {
         let mut seen: HashSet<String> = HashSet::new();
         for w in tokenize(&chunk.content_lower) {
-            inverted_index.entry(w.clone()).or_default().push(i);
             if seen.insert(w.clone()) {
-                *doc_freqs.entry(w).or_insert(0) += 1;
+                *doc_freqs.entry(w.clone()).or_insert(0) += 1;
             }
+            inverted_index.entry(w).or_default().push(i);
         }
     }
 
+    let num_chunks = chunks.len();
     let index = CodebaseIndex {
         version: INDEX_VERSION,
         generated_at: crate::format_timestamp(),
         file_mtimes,
-        chunks: chunks.to_vec(),
+        chunks,
         inverted_index,
         doc_freqs,
-        num_chunks: chunks.len(),
+        num_chunks,
     };
 
     let text = serde_json::to_string_pretty(&index).context("failed to serialize index")?;

@@ -238,11 +238,15 @@ impl ChatSession {
     pub(crate) fn auto_save_session(&self) {
         let dir = self.session_dir();
         let session_file = dir.join(".rem/session.json");
-        let _ = std::fs::create_dir_all(dir.join(".rem"));
-        let _ = std::fs::write(
+        if let Err(e) = std::fs::create_dir_all(dir.join(".rem")) {
+            tracing::warn!("failed to create session dir: {}", e);
+        }
+        if let Err(e) = std::fs::write(
             &session_file,
             serde_json::to_string_pretty(&self.to_session_json()).unwrap_or_default(),
-        );
+        ) {
+            tracing::warn!("failed to auto-save session: {}", e);
+        }
     }
 
     /// Resolves `@<path>` references in user input to file contents.

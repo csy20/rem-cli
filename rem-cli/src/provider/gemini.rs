@@ -1,12 +1,10 @@
-//! Google Gemini provider implementation.
-//! Contains Gemini-specific request/response types and API methods
-//! (`chat_completion`, `chat_completion_stream`, `models`, `health`).
-
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
 
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
+use super::{Provider, ProviderBackend};
 
 #[derive(Debug, Deserialize)]
 pub struct GeminiResponse {
@@ -64,17 +62,22 @@ pub struct GeminiModelEntry {
     pub display_name: Option<String>,
 }
 
-impl super::Provider {
-    fn gemini_url(&self, path: &str) -> String {
-        format!("{}/v1beta{}", self.base_url.trim_end_matches('/'), path)
-    }
+pub(super) struct GeminiBackend;
 
-    pub(super) async fn list_models_gemini(&self) -> Result<Vec<String>> {
-        let url = self.gemini_url("/models");
-        let resp = self
+impl GeminiBackend {
+    fn gemini_url(&self, provider: &Provider, path: &str) -> String {
+        format!("{}/v1beta{}", provider.base_url.trim_end_matches('/'), path)
+    }
+}
+
+#[async_trait]
+impl ProviderBackend for GeminiBackend {
+    async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
+        let url = self.gemini_url(provider, "/models");
+        let resp = provider
             .client
             .get(&url)
-            .header("x-goog-api-key", self.api_key_str())
+            .header("x-goog-api-key", provider.api_key_str())
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -95,28 +98,32 @@ impl super::Provider {
             .collect())
     }
 
-    pub(super) async fn complete_json_gemini(
+    async fn complete_json(
         &self,
+        provider: &Provider,
         user_prompt: &str,
     ) -> Result<crate::ModelReply> {
-        let url = self.gemini_url(&format!("/models/{}:generateContent", self.model));
+        let url = self.gemini_url(
+            provider,
+            &format!("/models/{}:generateContent", provider.model),
+        );
         let payload = json!({
-            "contents": [{"parts": [{"text": format!("{}\n\nUser request:\n{}\n\nReturn JSON only.", self.system_prompt, user_prompt)}]}],
+            "contents": [{"parts": [{"text": format!("{}\n\nUser request:\n{}\n\nReturn JSON only.", provider.system_prompt, user_prompt)}]}],
             "generationConfig": {
                 "temperature": 0.3,
                 "maxOutputTokens": 512
             }
         });
 
-        let resp = self
+        let resp = provider
             .client
             .post(&url)
-            .header("x-goog-api-key", self.api_key_str())
+            .header("x-goog-api-key", provider.api_key_str())
             .json(&payload)
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(self.parse_api_error("Gemini", resp).await);
+            return Err(provider.parse_api_error("Gemini", resp).await);
         }
 
         let parsed: GeminiResponse = resp.json().await.context("invalid Gemini response")?;
@@ -129,19 +136,20 @@ impl super::Provider {
             .and_then(|p| p.text)
             .unwrap_or_default();
 
-        Self::parse_json_fallback(&text)
+        Provider::parse_json_fallback(&text)
     }
 
-    pub(super) async fn complete_chat_stream_gemini(
+    async fn complete_chat_stream(
         &self,
+        provider: &Provider,
         user_prompt: &str,
         system_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = self.gemini_url(&format!(
-            "/models/{}:streamGenerateContent?alt=sse",
-            self.model
-        ));
+        let url = self.gemini_url(
+            provider,
+            &format!("/models/{}:streamGenerateContent?alt=sse", provider.model),
+        );
 
         let mut contents = vec![];
         if !history.is_empty() {
@@ -161,34 +169,35 @@ impl super::Provider {
             payload["systemInstruction"] = json!({"parts": [{"text": system_prompt}]});
         }
 
-        let resp = self
+        let resp = provider
             .client
             .post(&url)
-            .header("x-goog-api-key", self.api_key_str())
+            .header("x-goog-api-key", provider.api_key_str())
             .json(&payload)
             .send()
             .await
             .context("failed to call Gemini API")?;
 
         if !resp.status().is_success() {
-            return Err(self.parse_api_error("Gemini", resp).await);
+            return Err(provider.parse_api_error("Gemini", resp).await);
         }
 
-        self.stream_gemini_sse(resp).await
+        provider.stream_gemini_sse(resp).await
     }
 
-    pub(super) async fn complete_chat_vision_gemini(
+    async fn complete_chat_stream_with_vision(
         &self,
+        provider: &Provider,
         user_prompt: &str,
         system_prompt: &str,
         history: &str,
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        let url = self.gemini_url(&format!(
-            "/models/{}:streamGenerateContent?alt=sse",
-            self.model
-        ));
+        let url = self.gemini_url(
+            provider,
+            &format!("/models/{}:streamGenerateContent?alt=sse", provider.model),
+        );
 
         let mut parts: Vec<serde_json::Value> = vec![];
         if !history.is_empty() {
@@ -214,33 +223,34 @@ impl super::Provider {
             payload["systemInstruction"] = json!({"parts": [{"text": system_prompt}]});
         }
 
-        let resp = self
+        let resp = provider
             .client
             .post(&url)
-            .header("x-goog-api-key", self.api_key_str())
+            .header("x-goog-api-key", provider.api_key_str())
             .json(&payload)
             .send()
             .await
             .context("failed to call Gemini vision API")?;
 
         if !resp.status().is_success() {
-            return Err(self.parse_api_error("Gemini", resp).await);
+            return Err(provider.parse_api_error("Gemini", resp).await);
         }
 
-        self.stream_gemini_sse(resp).await
+        provider.stream_gemini_sse(resp).await
     }
 
-    pub(super) async fn complete_chat_stream_tools_gemini(
+    async fn complete_chat_stream_with_tools(
         &self,
+        provider: &Provider,
         user_prompt: &str,
         system_prompt: &str,
         history: &str,
         tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        let url = self.gemini_url(&format!(
-            "/models/{}:streamGenerateContent?alt=sse",
-            self.model
-        ));
+        let url = self.gemini_url(
+            provider,
+            &format!("/models/{}:streamGenerateContent?alt=sse", provider.model),
+        );
 
         let mut contents = vec![];
         if !history.is_empty() {
@@ -268,24 +278,23 @@ impl super::Provider {
             payload["tools"] = json!([{"function_declarations": declarations}]);
         }
 
-        let resp = self
+        let resp = provider
             .client
             .post(&url)
-            .header("x-goog-api-key", self.api_key_str())
+            .header("x-goog-api-key", provider.api_key_str())
             .json(&payload)
             .send()
             .await
             .context("failed to call Gemini API")?;
 
         if !resp.status().is_success() {
-            return Err(self.parse_api_error("Gemini", resp).await);
+            return Err(provider.parse_api_error("Gemini", resp).await);
         }
 
-        // Parse SSE stream for text and function calls
         let mut full_text = String::with_capacity(4096);
         let mut early_tool_response: Option<ToolResponse> = None;
 
-        super::Provider::stream_buf(resp, |trimmed| {
+        Provider::stream_buf(resp, |trimmed| {
             if trimmed.is_empty() || trimmed.starts_with(':') {
                 return Ok(true);
             }

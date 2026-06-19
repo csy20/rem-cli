@@ -1,24 +1,32 @@
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 
 use super::tools::{ToolResponse, ToolSpec};
+use super::{Provider, ProviderBackend};
 
-impl super::Provider {
+pub(super) struct BedrockBackend;
+
+impl BedrockBackend {
     async fn bedrock_client(&self) -> Result<aws_sdk_bedrockruntime::Client> {
         let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         Ok(aws_sdk_bedrockruntime::Client::new(&config))
     }
+}
 
-    pub(super) async fn list_models_bedrock(&self) -> Result<Vec<String>> {
-        Ok(vec![self.model.clone()])
+#[async_trait]
+impl ProviderBackend for BedrockBackend {
+    async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
+        Ok(vec![provider.model.clone()])
     }
 
-    pub(super) async fn complete_json_bedrock(
+    async fn complete_json(
         &self,
+        provider: &Provider,
         user_prompt: &str,
     ) -> Result<crate::ModelReply> {
         let client = self.bedrock_client().await?;
         let system_content =
-            aws_sdk_bedrockruntime::types::SystemContentBlock::Text(self.system_prompt.clone());
+            aws_sdk_bedrockruntime::types::SystemContentBlock::Text(provider.system_prompt.clone());
         let content = aws_sdk_bedrockruntime::types::ContentBlock::Text(format!(
             "{}\n\nReturn JSON only. Respond with a valid JSON object.",
             user_prompt
@@ -32,7 +40,7 @@ impl super::Provider {
 
         let resp = client
             .converse()
-            .model_id(&self.model)
+            .model_id(&provider.model)
             .system(system_content)
             .messages(msg)
             .inference_config(
@@ -66,11 +74,12 @@ impl super::Provider {
             .unwrap_or("")
             .to_string();
 
-        Self::parse_json_fallback(&text)
+        Provider::parse_json_fallback(&text)
     }
 
-    pub(super) async fn complete_chat_stream_bedrock(
+    async fn complete_chat_stream(
         &self,
+        provider: &Provider,
         user_prompt: &str,
         system_prompt: &str,
         history: &str,
@@ -94,7 +103,7 @@ impl super::Provider {
 
         let output = client
             .converse_stream()
-            .model_id(&self.model)
+            .model_id(&provider.model)
             .system(system_content)
             .messages(msg)
             .inference_config(
@@ -137,8 +146,9 @@ impl super::Provider {
         Ok(full_text)
     }
 
-    pub(super) async fn complete_chat_vision_bedrock(
+    async fn complete_chat_stream_with_vision(
         &self,
+        _provider: &Provider,
         _user_prompt: &str,
         _system_prompt: &str,
         _history: &str,
@@ -148,8 +158,9 @@ impl super::Provider {
         Err(anyhow!("Vision not yet supported for AWS Bedrock"))
     }
 
-    pub(super) async fn complete_chat_stream_tools_bedrock(
+    async fn complete_chat_stream_with_tools(
         &self,
+        _provider: &Provider,
         _user_prompt: &str,
         _system_prompt: &str,
         _history: &str,

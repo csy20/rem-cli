@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::agentic::{run_lint, run_test};
 use crate::find::{find_matches, FindOptions};
@@ -7,6 +8,14 @@ use crate::provider::tools::{builtin_tools, ToolCall, ToolResponse, ToolResult a
 use crate::provider::Provider;
 use crate::search::perform_web_search;
 use crate::ui;
+
+/// Lazily initialized tokio runtime reused for web search tool calls.
+fn web_search_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Runtime::new().expect("failed to create tokio runtime for web search")
+    })
+}
 
 /// Maximum tool call rounds before forcing a text response.
 const MAX_TOOL_ROUNDS: usize = 10;
@@ -165,32 +174,25 @@ fn execute_web_search_sync(tool_call: &ToolCall) -> ToolCallResult {
         Some(q) => q,
         None => return err_result(tool_call, "missing 'query' argument"),
     };
-    // Use tokio runtime to run async search
-    let rt = tokio::runtime::Runtime::new();
-    match rt {
-        Ok(runtime) => {
-            let results =
-                runtime.block_on(perform_web_search(&reqwest::Client::new(), &query, None));
-            match results {
-                Ok(results) => {
-                    let mut content = String::new();
-                    for (i, r) in results.iter().enumerate().take(5) {
-                        content.push_str(&format!("{}. {}: {}\n", i + 1, r.title, r.snippet));
-                    }
-                    if results.is_empty() {
-                        content = "No web search results found.".to_string();
-                    }
-                    ToolCallResult {
-                        call_id: tool_call.id.clone(),
-                        name: "web_search".into(),
-                        content,
-                        is_error: false,
-                    }
-                }
-                Err(e) => err_result(tool_call, &format!("web search failed: {}", e)),
+    let runtime = web_search_runtime();
+    let results = runtime.block_on(perform_web_search(&reqwest::Client::new(), &query, None));
+    match results {
+        Ok(results) => {
+            let mut content = String::new();
+            for (i, r) in results.iter().enumerate().take(5) {
+                content.push_str(&format!("{}. {}: {}\n", i + 1, r.title, r.snippet));
+            }
+            if results.is_empty() {
+                content = "No web search results found.".to_string();
+            }
+            ToolCallResult {
+                call_id: tool_call.id.clone(),
+                name: "web_search".into(),
+                content,
+                is_error: false,
             }
         }
-        Err(e) => err_result(tool_call, &format!("runtime error: {}", e)),
+        Err(e) => err_result(tool_call, &format!("web search failed: {}", e)),
     }
 }
 
@@ -249,8 +251,8 @@ fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> T
         .output()
     {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let mut content = String::new();
             if !stdout.is_empty() {
                 content.push_str(&format!(

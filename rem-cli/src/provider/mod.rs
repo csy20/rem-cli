@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use std::future::Future;
 
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
@@ -87,7 +88,7 @@ pub fn api_url(base_url: &str, endpoint: &str) -> String {
 }
 
 /// Supported LLM provider backends.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ProviderKind {
     Ollama,
     OpenAI,
@@ -126,6 +127,43 @@ impl ProviderKind {
     }
 }
 
+/// Backend trait implemented by each provider submodule.
+/// Each method receives the full `Provider` so implementations can access
+/// shared infrastructure (client, auth helpers, SSE parsers, etc.).
+#[async_trait]
+pub(crate) trait ProviderBackend: Send + Sync {
+    async fn list_models(&self, provider: &Provider) -> Result<Vec<String>>;
+    async fn complete_json(
+        &self,
+        provider: &Provider,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply>;
+    async fn complete_chat_stream(
+        &self,
+        provider: &Provider,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+    ) -> Result<String>;
+    async fn complete_chat_stream_with_vision(
+        &self,
+        provider: &Provider,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        mime_type: &str,
+        base64_data: &str,
+    ) -> Result<String>;
+    async fn complete_chat_stream_with_tools(
+        &self,
+        provider: &Provider,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        tool_specs: &[tools::ToolSpec],
+    ) -> Result<tools::ToolResponse>;
+}
+
 /// An LLM provider client with routing to the appropriate backend.
 pub struct Provider {
     pub kind: ProviderKind,
@@ -138,6 +176,123 @@ pub struct Provider {
     pub reasoning_config: crate::reasoning::ReasoningConfig,
     /// Tracks token usage from the last Anthropic API call.
     pub(crate) last_usage: Mutex<crate::provider::anthropic::AnthropicUsage>,
+    backend: Box<dyn ProviderBackend>,
+}
+
+/// Default base URLs for providers that have well-known endpoints.
+const DEFAULT_BASE_URLS: &[(ProviderKind, &str)] = &[
+    (ProviderKind::Ollama, "http://localhost:11434"),
+    (ProviderKind::OpenAI, "https://api.openai.com/v1"),
+    (
+        ProviderKind::Gemini,
+        "https://generativelanguage.googleapis.com",
+    ),
+    (ProviderKind::Anthropic, "https://api.anthropic.com"),
+    (ProviderKind::Azure, ""),
+    (ProviderKind::Bedrock, ""),
+    (ProviderKind::OpenRouter, "https://openrouter.ai/api/v1"),
+];
+
+/// Default model fallback for providers that have well-known models.
+pub(crate) const DEFAULT_MODELS: &[(ProviderKind, &str)] = &[
+    (ProviderKind::Gemini, "gemini-2.0-flash"),
+    (ProviderKind::Anthropic, "claude-sonnet-4-20250514"),
+    (ProviderKind::Bedrock, "anthropic.claude-sonnet-4-20250514"),
+    (ProviderKind::OpenRouter, "openai/gpt-4o"),
+];
+
+/// Returns the default base URL for a provider kind.
+pub(crate) fn default_base_url(kind: ProviderKind) -> String {
+    DEFAULT_BASE_URLS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, url)| url.to_string())
+        .unwrap_or_default()
+}
+
+/// Returns the default model for a provider kind, if any.
+pub(crate) fn default_model(kind: ProviderKind) -> Option<&'static str> {
+    DEFAULT_MODELS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, m)| *m)
+}
+
+/// API key environment variable names per provider kind.
+pub(crate) const API_KEY_ENV_VARS: &[(ProviderKind, &str)] = &[
+    (ProviderKind::OpenAI, "OPENAI_API_KEY"),
+    (ProviderKind::Gemini, "GEMINI_API_KEY"),
+    (ProviderKind::Anthropic, "ANTHROPIC_API_KEY"),
+    (ProviderKind::Azure, "AZURE_OPENAI_API_KEY"),
+    (ProviderKind::Bedrock, "AWS_ACCESS_KEY_ID"),
+    (ProviderKind::OpenRouter, "OPENROUTER_API_KEY"),
+];
+
+/// Returns the env var name for a provider's API key, if known.
+pub(crate) fn api_key_env_var(kind: ProviderKind) -> Option<&'static str> {
+    API_KEY_ENV_VARS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, e)| *e)
+}
+
+/// Fallback backend returned when a feature-gated provider is not compiled.
+#[cfg(not(feature = "bedrock"))]
+struct UnsupportedBackend;
+
+#[cfg(not(feature = "bedrock"))]
+#[async_trait]
+impl ProviderBackend for UnsupportedBackend {
+    async fn list_models(&self, _provider: &Provider) -> Result<Vec<String>> {
+        Err(anyhow!(
+            "AWS Bedrock not compiled (enable 'bedrock' feature)"
+        ))
+    }
+    async fn complete_json(
+        &self,
+        _provider: &Provider,
+        _user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
+        Err(anyhow!(
+            "AWS Bedrock not compiled (enable 'bedrock' feature)"
+        ))
+    }
+    async fn complete_chat_stream(
+        &self,
+        _provider: &Provider,
+        _user_prompt: &str,
+        _system_prompt: &str,
+        _history: &str,
+    ) -> Result<String> {
+        Err(anyhow!(
+            "AWS Bedrock not compiled (enable 'bedrock' feature)"
+        ))
+    }
+    async fn complete_chat_stream_with_vision(
+        &self,
+        _provider: &Provider,
+        _user_prompt: &str,
+        _system_prompt: &str,
+        _history: &str,
+        _mime_type: &str,
+        _base64_data: &str,
+    ) -> Result<String> {
+        Err(anyhow!(
+            "AWS Bedrock not compiled (enable 'bedrock' feature)"
+        ))
+    }
+    async fn complete_chat_stream_with_tools(
+        &self,
+        _provider: &Provider,
+        _user_prompt: &str,
+        _system_prompt: &str,
+        _history: &str,
+        _tool_specs: &[tools::ToolSpec],
+    ) -> Result<tools::ToolResponse> {
+        Err(anyhow!(
+            "AWS Bedrock not compiled (enable 'bedrock' feature)"
+        ))
+    }
 }
 
 impl Provider {
@@ -149,153 +304,40 @@ impl Provider {
             .unwrap_or_else(|_| Client::new())
     }
 
-    /// Creates a new Ollama provider instance.
-    pub fn new_ollama(
+    /// Creates a new provider instance with the given kind and configuration.
+    pub fn new(
+        kind: ProviderKind,
         base_url: String,
         model: String,
         timeout_s: u64,
         system_prompt: String,
+        api_key: Option<String>,
         model_ctx: usize,
     ) -> Self {
+        let client = Self::build_client(timeout_s);
+        let backend: Box<dyn ProviderBackend> = match kind {
+            ProviderKind::Ollama => Box::new(ollama::OllamaBackend),
+            ProviderKind::OpenAI => Box::new(openai::OpenAIBackend),
+            ProviderKind::Gemini => Box::new(gemini::GeminiBackend),
+            ProviderKind::Anthropic => Box::new(anthropic::AnthropicBackend),
+            ProviderKind::Azure => Box::new(azure::AzureBackend),
+            #[cfg(feature = "bedrock")]
+            ProviderKind::Bedrock => Box::new(bedrock::BedrockBackend),
+            #[cfg(not(feature = "bedrock"))]
+            ProviderKind::Bedrock => Box::new(UnsupportedBackend),
+            ProviderKind::OpenRouter => Box::new(openrouter::OpenRouterBackend),
+        };
         Self {
-            kind: ProviderKind::Ollama,
-            client: Self::build_client(timeout_s),
+            kind,
+            client,
             base_url,
             model,
             system_prompt,
-            api_key: None,
+            api_key,
             model_ctx,
             reasoning_config: Default::default(),
             last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-        }
-    }
-
-    /// Creates a new OpenAI-compatible provider instance.
-    pub fn new_openai(
-        base_url: String,
-        model: String,
-        timeout_s: u64,
-        system_prompt: String,
-        api_key: String,
-        model_ctx: usize,
-    ) -> Self {
-        Self {
-            kind: ProviderKind::OpenAI,
-            client: Self::build_client(timeout_s),
-            base_url,
-            model,
-            system_prompt,
-            api_key: Some(api_key),
-            model_ctx,
-            reasoning_config: Default::default(),
-            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-        }
-    }
-
-    /// Creates a new Google Gemini provider instance.
-    pub fn new_gemini(
-        api_key: String,
-        model: String,
-        timeout_s: u64,
-        system_prompt: String,
-        model_ctx: usize,
-    ) -> Self {
-        Self {
-            kind: ProviderKind::Gemini,
-            client: Self::build_client(timeout_s),
-            base_url: "https://generativelanguage.googleapis.com".to_string(),
-            model,
-            system_prompt,
-            api_key: Some(api_key),
-            model_ctx,
-            reasoning_config: Default::default(),
-            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-        }
-    }
-
-    /// Creates a new Anthropic (Claude) provider instance.
-    pub fn new_anthropic(
-        api_key: String,
-        model: String,
-        timeout_s: u64,
-        system_prompt: String,
-        model_ctx: usize,
-    ) -> Self {
-        Self {
-            kind: ProviderKind::Anthropic,
-            client: Self::build_client(timeout_s),
-            base_url: "https://api.anthropic.com".to_string(),
-            model,
-            system_prompt,
-            api_key: Some(api_key),
-            model_ctx,
-            reasoning_config: Default::default(),
-            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-        }
-    }
-
-    /// Creates a new Azure OpenAI provider instance.
-    pub fn new_azure(
-        base_url: String,
-        model: String,
-        timeout_s: u64,
-        system_prompt: String,
-        api_key: String,
-        model_ctx: usize,
-    ) -> Self {
-        Self {
-            kind: ProviderKind::Azure,
-            client: Self::build_client(timeout_s),
-            base_url,
-            model,
-            system_prompt,
-            api_key: Some(api_key),
-            model_ctx,
-            reasoning_config: Default::default(),
-            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-        }
-    }
-
-    /// Creates a new AWS Bedrock provider instance.
-    #[cfg(feature = "bedrock")]
-    pub fn new_bedrock(
-        model: String,
-        timeout_s: u64,
-        system_prompt: String,
-        api_key: String,
-        model_ctx: usize,
-    ) -> Self {
-        Self {
-            kind: ProviderKind::Bedrock,
-            client: Self::build_client(timeout_s),
-            base_url: String::new(),
-            model,
-            system_prompt,
-            api_key: Some(api_key),
-            model_ctx,
-            reasoning_config: Default::default(),
-            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
-        }
-    }
-
-    /// Creates a new OpenRouter provider instance.
-    pub fn new_openrouter(
-        model: String,
-        timeout_s: u64,
-        system_prompt: String,
-        api_key: String,
-        model_ctx: usize,
-    ) -> Self {
-        Self {
-            kind: ProviderKind::OpenRouter,
-            client: Self::build_client(timeout_s),
-            base_url: "https://openrouter.ai/api/v1".to_string(),
-            model,
-            system_prompt,
-            api_key: Some(api_key),
-            model_ctx,
-            reasoning_config: Default::default(),
-            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
+            backend,
         }
     }
 
@@ -355,44 +397,12 @@ impl Provider {
 
     /// Lists available models from the provider.
     pub async fn list_models(&self) -> Result<Vec<String>> {
-        Self::with_retry(|| async {
-            match self.kind {
-                ProviderKind::Ollama => self.list_models_ollama().await,
-                ProviderKind::OpenAI => self.list_models_openai().await,
-                ProviderKind::Gemini => self.list_models_gemini().await,
-                ProviderKind::Anthropic => self.list_models_anthropic().await,
-                ProviderKind::Azure => self.list_models_azure().await,
-                #[cfg(feature = "bedrock")]
-                ProviderKind::Bedrock => self.list_models_bedrock().await,
-                #[cfg(not(feature = "bedrock"))]
-                ProviderKind::Bedrock => Err(anyhow!(
-                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
-                )),
-                ProviderKind::OpenRouter => self.list_models_openrouter().await,
-            }
-        })
-        .await
+        Self::with_retry(|| self.backend.list_models(self)).await
     }
 
     /// Sends a prompt and expects a structured JSON response (parsed into [`ModelReply`]).
     pub async fn complete_json(&self, user_prompt: &str) -> Result<crate::ModelReply> {
-        Self::with_retry(|| async {
-            match self.kind {
-                ProviderKind::Ollama => self.complete_json_ollama(user_prompt).await,
-                ProviderKind::OpenAI => self.complete_json_openai(user_prompt).await,
-                ProviderKind::Gemini => self.complete_json_gemini(user_prompt).await,
-                ProviderKind::Anthropic => self.complete_json_anthropic(user_prompt).await,
-                ProviderKind::Azure => self.complete_json_azure(user_prompt).await,
-                #[cfg(feature = "bedrock")]
-                ProviderKind::Bedrock => self.complete_json_bedrock(user_prompt).await,
-                #[cfg(not(feature = "bedrock"))]
-                ProviderKind::Bedrock => Err(anyhow!(
-                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
-                )),
-                ProviderKind::OpenRouter => self.complete_json_openrouter(user_prompt).await,
-            }
-        })
-        .await
+        Self::with_retry(|| self.backend.complete_json(self, user_prompt)).await
     }
 
     /// Sends a prompt with an image attached, streaming response.
@@ -405,84 +415,15 @@ impl Provider {
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        Self::with_retry(|| async {
-            match self.kind {
-                ProviderKind::OpenAI => {
-                    self.complete_chat_vision_openai(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        mime_type,
-                        base64_data,
-                    )
-                    .await
-                }
-                ProviderKind::Anthropic => {
-                    self.complete_chat_vision_anthropic(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        mime_type,
-                        base64_data,
-                    )
-                    .await
-                }
-                ProviderKind::Gemini => {
-                    self.complete_chat_vision_gemini(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        mime_type,
-                        base64_data,
-                    )
-                    .await
-                }
-                ProviderKind::Ollama => {
-                    self.complete_chat_vision_ollama(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        mime_type,
-                        base64_data,
-                    )
-                    .await
-                }
-                ProviderKind::Azure => {
-                    self.complete_chat_vision_azure(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        mime_type,
-                        base64_data,
-                    )
-                    .await
-                }
-                #[cfg(feature = "bedrock")]
-                ProviderKind::Bedrock => {
-                    self.complete_chat_vision_bedrock(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        mime_type,
-                        base64_data,
-                    )
-                    .await
-                }
-                #[cfg(not(feature = "bedrock"))]
-                ProviderKind::Bedrock => Err(anyhow!(
-                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
-                )),
-                ProviderKind::OpenRouter => {
-                    self.complete_chat_vision_openrouter(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        mime_type,
-                        base64_data,
-                    )
-                    .await
-                }
-            }
+        Self::with_retry(|| {
+            self.backend.complete_chat_stream_with_vision(
+                self,
+                user_prompt,
+                system_prompt,
+                history,
+                mime_type,
+                base64_data,
+            )
         })
         .await
     }
@@ -496,77 +437,14 @@ impl Provider {
         history: &str,
         tool_specs: &[tools::ToolSpec],
     ) -> Result<tools::ToolResponse> {
-        Self::with_retry(|| async {
-            match self.kind {
-                ProviderKind::Ollama => {
-                    self.complete_chat_stream_tools_ollama(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        tool_specs,
-                    )
-                    .await
-                }
-                ProviderKind::OpenAI => {
-                    self.complete_chat_stream_tools_openai(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        tool_specs,
-                    )
-                    .await
-                }
-                ProviderKind::Gemini => {
-                    self.complete_chat_stream_tools_gemini(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        tool_specs,
-                    )
-                    .await
-                }
-                ProviderKind::Anthropic => {
-                    self.complete_chat_stream_tools_anthropic(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        tool_specs,
-                    )
-                    .await
-                }
-                ProviderKind::Azure => {
-                    self.complete_chat_stream_tools_azure(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        tool_specs,
-                    )
-                    .await
-                }
-                #[cfg(feature = "bedrock")]
-                ProviderKind::Bedrock => {
-                    self.complete_chat_stream_tools_bedrock(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        tool_specs,
-                    )
-                    .await
-                }
-                #[cfg(not(feature = "bedrock"))]
-                ProviderKind::Bedrock => Err(anyhow!(
-                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
-                )),
-                ProviderKind::OpenRouter => {
-                    self.complete_chat_stream_tools_openrouter(
-                        user_prompt,
-                        system_prompt,
-                        history,
-                        tool_specs,
-                    )
-                    .await
-                }
-            }
+        Self::with_retry(|| {
+            self.backend.complete_chat_stream_with_tools(
+                self,
+                user_prompt,
+                system_prompt,
+                history,
+                tool_specs,
+            )
         })
         .await
     }
@@ -578,42 +456,9 @@ impl Provider {
         system_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        Self::with_retry(|| async {
-            match self.kind {
-                ProviderKind::Ollama => {
-                    self.complete_chat_stream_ollama(user_prompt, system_prompt, history)
-                        .await
-                }
-                ProviderKind::OpenAI => {
-                    self.complete_chat_stream_openai(user_prompt, system_prompt, history)
-                        .await
-                }
-                ProviderKind::Gemini => {
-                    self.complete_chat_stream_gemini(user_prompt, system_prompt, history)
-                        .await
-                }
-                ProviderKind::Anthropic => {
-                    self.complete_chat_stream_anthropic(user_prompt, system_prompt, history)
-                        .await
-                }
-                ProviderKind::Azure => {
-                    self.complete_chat_stream_azure(user_prompt, system_prompt, history)
-                        .await
-                }
-                #[cfg(feature = "bedrock")]
-                ProviderKind::Bedrock => {
-                    self.complete_chat_stream_bedrock(user_prompt, system_prompt, history)
-                        .await
-                }
-                #[cfg(not(feature = "bedrock"))]
-                ProviderKind::Bedrock => Err(anyhow!(
-                    "AWS Bedrock not compiled (enable 'bedrock' feature)"
-                )),
-                ProviderKind::OpenRouter => {
-                    self.complete_chat_stream_openrouter(user_prompt, system_prompt, history)
-                        .await
-                }
-            }
+        Self::with_retry(|| {
+            self.backend
+                .complete_chat_stream(self, user_prompt, system_prompt, history)
         })
         .await
     }
@@ -625,12 +470,12 @@ impl Provider {
             .clone()
     }
 
-    fn api_key_str(&self) -> &str {
+    pub(super) fn api_key_str(&self) -> &str {
         self.api_key.as_deref().unwrap_or("")
     }
 
     /// Builds the chat completions URL, applying Azure's api-version suffix when needed.
-    fn openai_chat_url(&self) -> String {
+    pub(super) fn openai_chat_url(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
         match self.kind {
             ProviderKind::Azure => {
@@ -641,12 +486,12 @@ impl Provider {
     }
 
     /// Builds the models listing URL.
-    fn openai_models_url(&self) -> String {
+    pub(super) fn openai_models_url(&self) -> String {
         format!("{}/models", self.base_url.trim_end_matches('/'))
     }
 
     /// Adds the appropriate auth header to an OpenAI-compatible request.
-    fn add_openai_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    pub(super) fn add_openai_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self.kind {
             ProviderKind::Azure => {
                 req.header("api-key", self.api_key.as_deref().unwrap_or_default())
@@ -658,7 +503,7 @@ impl Provider {
         }
     }
 
-    fn parse_json_fallback(text: &str) -> Result<crate::ModelReply> {
+    pub(super) fn parse_json_fallback(text: &str) -> Result<crate::ModelReply> {
         match serde_json::from_str::<crate::ModelReply>(text.trim()) {
             Ok(parsed) => Ok(parsed),
             Err(e) => {
@@ -668,7 +513,11 @@ impl Provider {
         }
     }
 
-    async fn parse_api_error(&self, provider: &str, resp: reqwest::Response) -> anyhow::Error {
+    pub(super) async fn parse_api_error(
+        &self,
+        provider: &str,
+        resp: reqwest::Response,
+    ) -> anyhow::Error {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
@@ -746,7 +595,7 @@ impl Provider {
         Ok(full)
     }
 
-    async fn stream_sse_response(&self, resp: reqwest::Response) -> Result<String> {
+    pub(super) async fn stream_sse_response(&self, resp: reqwest::Response) -> Result<String> {
         Self::stream_lines(resp, |trimmed, full| {
             if let Some(data) = trimmed.strip_prefix("data: ") {
                 if data == "[DONE]" {
@@ -774,7 +623,7 @@ impl Provider {
         .await
     }
 
-    async fn stream_anthropic_sse(&self, resp: reqwest::Response) -> Result<String> {
+    pub(super) async fn stream_anthropic_sse(&self, resp: reqwest::Response) -> Result<String> {
         let result = Self::stream_lines(resp, |trimmed, full| {
             if trimmed.starts_with("event: ") {
                 return Ok(true);
@@ -831,7 +680,11 @@ impl Provider {
         result
     }
 
-    async fn handle_ollama_error(&self, resp: reqwest::Response, url: &str) -> Result<String> {
+    pub(super) async fn handle_ollama_error(
+        &self,
+        resp: reqwest::Response,
+        url: &str,
+    ) -> Result<String> {
         let status = resp.status();
         let body = resp
             .text()
@@ -856,7 +709,7 @@ impl Provider {
         Err(anyhow!("Ollama failed: {} — {}", status, err_msg))
     }
 
-    async fn stream_ollama_response(&self, resp: reqwest::Response) -> Result<String> {
+    pub(super) async fn stream_ollama_response(&self, resp: reqwest::Response) -> Result<String> {
         Self::stream_lines(resp, |trimmed, full| {
             if let Ok(obj) = serde_json::from_str::<ollama::OllamaStreamLine>(trimmed) {
                 if let Some(token) = obj.response {
@@ -872,7 +725,7 @@ impl Provider {
         .await
     }
 
-    async fn stream_gemini_sse(&self, resp: reqwest::Response) -> Result<String> {
+    pub(super) async fn stream_gemini_sse(&self, resp: reqwest::Response) -> Result<String> {
         Self::stream_lines(resp, |trimmed, full| {
             if trimmed.is_empty() || trimmed.starts_with(':') {
                 return Ok(true);
