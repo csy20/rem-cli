@@ -151,12 +151,8 @@ static PHRASE_COMBINATIONS: LazyLock<Vec<String>> = LazyLock::new(|| {
 static VERB_PHRASES_SPACE: LazyLock<Vec<String>> =
     LazyLock::new(|| VERB_PHRASES.iter().map(|p| format!(" {}", p)).collect());
 
-static PHRASE_COMBINATIONS_SPACE: LazyLock<Vec<String>> = LazyLock::new(|| {
-    PHRASE_COMBINATIONS
-        .iter()
-        .map(|p| format!(" {}", p))
-        .collect()
-});
+static PHRASE_COMBINATIONS_SPACE: LazyLock<Vec<String>> =
+    LazyLock::new(|| PHRASE_COMBINATIONS.iter().map(|p| format!(" {}", p)).collect());
 
 /// Classifies user input into a [`TaskIntent`] using keyword heuristics.
 pub fn classify_intent(input: &str) -> TaskIntent {
@@ -253,8 +249,7 @@ pub fn intent_instruction(intent: &TaskIntent) -> &'static str {
 }
 
 fn has_creation_intent_lower(lower: &str) -> bool {
-    if (VERB_PHRASES.iter().any(|v| lower.starts_with(v))
-        || VERB_PHRASES_SPACE.iter().any(|v| lower.contains(v)))
+    if (VERB_PHRASES.iter().any(|v| lower.starts_with(v)) || VERB_PHRASES_SPACE.iter().any(|v| lower.contains(v)))
         && !has_question_prefix_lower(lower)
     {
         return true;
@@ -264,12 +259,8 @@ fn has_creation_intent_lower(lower: &str) -> bool {
         return true;
     }
 
-    for (combined, combined_space) in PHRASE_COMBINATIONS
-        .iter()
-        .zip(PHRASE_COMBINATIONS_SPACE.iter())
-    {
-        if (lower.starts_with(combined) || lower.contains(combined_space))
-            && !is_question_about_lower(lower, combined)
+    for (combined, combined_space) in PHRASE_COMBINATIONS.iter().zip(PHRASE_COMBINATIONS_SPACE.iter()) {
+        if (lower.starts_with(combined) || lower.contains(combined_space)) && !is_question_about_lower(lower, combined)
         {
             return true;
         }
@@ -354,5 +345,15 @@ mod tests {
     fn detects_file_paths_with_extensions() {
         assert!(has_file_path("update src/main.rs"));
         assert!(!has_file_path("explain how rust ownership works"));
+    }
+
+    #[test]
+    fn classify_code_action_for_create_project() {
+        assert_eq!(classify_intent("create a rust cli for notes"), TaskIntent::CodeAction);
+    }
+
+    #[test]
+    fn classify_fast_answer_for_explain() {
+        assert_eq!(classify_intent("explain rust ownership"), TaskIntent::FastAnswer);
     }
 }

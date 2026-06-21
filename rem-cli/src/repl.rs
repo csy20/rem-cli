@@ -2,6 +2,7 @@
 //! The [`run_chat`] function handles user input, dispatches slash commands,
 //! calls the LLM provider, and manages the conversational workflow.
 
+use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
@@ -10,28 +11,25 @@ use anyhow::Result;
 use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
 use crate::commands::{
-    auto_write_files, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy,
-    handle_diff, handle_dir, handle_explain, handle_find, handle_goal, handle_init,
-    handle_lint_with_fallback, handle_list_files, handle_memory, handle_memory_set, handle_mode,
-    handle_model, handle_plan, handle_provider, handle_reasoning, handle_refactor, handle_reset,
-    handle_resume_session, handle_review, handle_save_session, handle_search, handle_test,
-    handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why,
-    handle_write, print_chat_help, print_last_files, prompt_for_path,
+    auto_write_files, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy, handle_diff,
+    handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint_with_fallback, handle_list_files,
+    handle_memory, handle_memory_set, handle_mode, handle_model, handle_plan, handle_provider, handle_reasoning,
+    handle_refactor, handle_reset, handle_resume_session, handle_review, handle_save_session, handle_search,
+    handle_test, handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why, handle_write,
+    print_chat_help, print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskIntent};
 use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
-use crate::session_io::{
-    build_prompt, language_specific_guidance, print_welcome, validate_chat_response,
-};
+use crate::session_io::{build_prompt, language_specific_guidance, print_welcome, validate_chat_response};
 use crate::token_count::estimate_tokens;
 use crate::ui;
 use crate::ui::output::SpinnerGuard;
 use crate::{
-    exit_requested, extract_code_blocks_with_names, file_icon, reset_ctrlc_count,
-    CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN,
+    exit_requested, extract_code_blocks_with_names, file_icon, reset_ctrlc_count, CHAT_SYSTEM_PROMPT_CODE,
+    CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN,
 };
 
 /// Initializes a chat session from configuration, setting up workspace,
@@ -100,11 +98,7 @@ fn needs_continuation(line: &str) -> bool {
 }
 
 /// Reads user input with multi-line support.
-fn read_user_input(
-    session: &mut ChatSession,
-    prompt: &str,
-    t: &crate::ui::theme::Theme,
-) -> Option<String> {
+fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme::Theme) -> Option<String> {
     let mut error_count = 0u8;
     let mut lines: Vec<String> = Vec::new();
 
@@ -112,10 +106,7 @@ fn read_user_input(
         let current_prompt = if lines.is_empty() {
             prompt.to_string()
         } else {
-            format!(
-                "\x01{}\x02...> \x01\x1b[0m\x02",
-                ui::theme::paint_dim(t, "\u{2502}")
-            )
+            format!("\x01{}\x02...> \x01\x1b[0m\x02", ui::theme::paint_dim(t, "\u{2502}"))
         };
 
         let line = session.readline(&current_prompt);
@@ -142,29 +133,19 @@ fn read_user_input(
                 return Some(combined);
             }
             Err(e) => {
-                if e.kind() == io::ErrorKind::Interrupted
-                    || e.kind() == io::ErrorKind::UnexpectedEof
-                {
-                    let count =
-                        crate::CTRL_C_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if e.kind() == io::ErrorKind::Interrupted || e.kind() == io::ErrorKind::UnexpectedEof {
+                    let count = crate::CTRL_C_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     if count >= 2 || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
-                        println!(
-                            "  {} Ctrl+C pressed twice -- bye!",
-                            ui::theme::paint_dim(t, "!")
-                        );
+                        println!("  {} Ctrl+C pressed twice -- bye!", ui::theme::paint_dim(t, "!"));
                         session.feedback.flush();
                         session.save_history();
                         session.auto_save_session();
                         return None;
                     }
-                    crate::provider::STREAM_CANCELLED
-                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    crate::provider::STREAM_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
 
                     if lines.is_empty() {
-                        println!(
-                            "  {} press Ctrl+C again to exit",
-                            ui::theme::paint_dim(t, "!")
-                        );
+                        println!("  {} press Ctrl+C again to exit", ui::theme::paint_dim(t, "!"));
                         continue;
                     }
                     // Cancel multi-line input on first Ctrl+C during continuation
@@ -172,17 +153,10 @@ fn read_user_input(
                     println!("  {} input cancelled", ui::theme::paint_dim(t, "!"));
                     continue;
                 }
-                eprintln!(
-                    "  {} input error: {}",
-                    ui::theme::paint_error_label(t, "err:"),
-                    e
-                );
+                eprintln!("  {} input error: {}", ui::theme::paint_error_label(t, "err:"), e);
                 error_count += 1;
                 if error_count >= 3 {
-                    eprintln!(
-                        "  {} too many errors, exiting",
-                        ui::theme::paint_error_label(t, "err:")
-                    );
+                    eprintln!("  {} too many errors, exiting", ui::theme::paint_error_label(t, "err:"));
                     return None;
                 }
                 continue;
@@ -379,15 +353,10 @@ async fn dispatch_slash_command(
 }
 
 /// Builds the full LLM prompt from all context sources.
-fn build_llm_prompt(
-    session: &mut ChatSession,
-    trimmed: &str,
-    intent: &TaskIntent,
-) -> (String, String) {
+fn build_llm_prompt(session: &mut ChatSession, trimmed: &str, intent: &TaskIntent) -> (String, String) {
     let instruction = intent_instruction(intent);
 
-    let needs_path = (session.mode == RunMode::Code || *intent == TaskIntent::CodeAction)
-        && !has_file_path(trimmed);
+    let needs_path = (session.mode == RunMode::Code || *intent == TaskIntent::CodeAction) && !has_file_path(trimmed);
     let final_prompt = if needs_path {
         session.add_history(trimmed);
         let path = prompt_for_path(session).unwrap_or_else(|_| trimmed.to_string());
@@ -395,11 +364,7 @@ fn build_llm_prompt(
     } else {
         session.add_history(trimmed);
         if let Some(ref dir) = session.project_dir {
-            format!(
-                "User request: {}\n\nWorking directory: {}",
-                trimmed,
-                dir.display()
-            )
+            format!("User request: {}\n\nWorking directory: {}", trimmed, dir.display())
         } else {
             format!("User request: {}", trimmed)
         }
@@ -473,10 +438,7 @@ fn build_last_code_context(session: &ChatSession, trimmed: &str) -> String {
     let mut ctx = String::new();
     if !session.last_code.is_empty() {
         let truncated = crate::truncate_bytes(&session.last_code, 6000);
-        ctx = format!(
-            "\n[Last generated code (for reference)]:\n```\n{}\n```\n",
-            truncated
-        );
+        ctx = format!("\n[Last generated code (for reference)]:\n```\n{}\n```\n", truncated);
     }
     if !session.last_files.is_empty() {
         let mut files_ctx = String::from("\n[Last generated files]:\n");
@@ -504,20 +466,13 @@ fn handle_llm_response(
     t: &crate::ui::theme::Theme,
 ) {
     if verbose {
-        eprintln!(
-            "\n  {} raw response:\n{}\n",
-            ui::theme::paint_dim(t, "verbose:"),
-            text
-        );
+        eprintln!("\n  {} raw response:\n{}\n", ui::theme::paint_dim(t, "verbose:"), text);
     }
 
     let (was_validated, validated_text) = validate_chat_response(&text, intent, &session.mode);
     let cleaned = if was_validated && session.mode != RunMode::Code {
         let warn = ui::theme::paint_warning(t, "\u{258C}");
-        let note = ui::theme::paint_dim(
-            t,
-            "(response contained unexpected code \u{2014} showing text only)",
-        );
+        let note = ui::theme::paint_dim(t, "(response contained unexpected code \u{2014} showing text only)");
         println!("{warn} {note}");
         validated_text
     } else {
@@ -556,11 +511,7 @@ fn handle_llm_response(
 
 /// Main interactive REPL loop: reads user input, dispatches slash commands,
 /// calls the LLM, and manages conversation history.
-pub(crate) async fn run_chat(
-    client: &mut Provider,
-    cfg: &mut AppConfig,
-    verbose: bool,
-) -> Result<()> {
+pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> Result<()> {
     reset_ctrlc_count();
     let mut session = initialize_session(client, cfg)?;
     let t = ui::theme::active();
@@ -643,10 +594,10 @@ pub(crate) async fn run_chat(
             }
         };
 
-        let system_prompt = if !lang_guidance.is_empty() {
-            format!("{}{}", system_prompt, lang_guidance)
+        let system_prompt: Cow<'static, str> = if !lang_guidance.is_empty() {
+            format!("{}{}", system_prompt, lang_guidance).into()
         } else {
-            system_prompt.to_string()
+            system_prompt.into()
         };
 
         if session.mode == RunMode::Chat && intent == TaskIntent::CodeAction {
@@ -684,23 +635,13 @@ pub(crate) async fn run_chat(
 
         match result {
             Ok(text) => {
-                handle_llm_response(
-                    &mut session,
-                    trimmed,
-                    text,
-                    &intent,
-                    elapsed,
-                    client,
-                    verbose,
-                    &t,
-                );
+                handle_llm_response(&mut session, trimmed, text, &intent, elapsed, client, verbose, &t);
             }
             Err(e) => {
                 let rail = ui::theme::paint_rail_empty(&t);
                 let err_label = ui::theme::paint_error_label(&t, "\u{2717}");
                 let err_msg = ui::theme::paint(&t, "error", &e.to_string(), false);
-                let timer =
-                    ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
+                let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
                 println!("{rail}");
                 println!("{rail} {err_label} {err_msg}");
                 println!("{rail} {timer}");
@@ -732,21 +673,10 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
         for f in &files {
             let icon = file_icon(&f.path);
             if f.path.is_empty() {
-                println!(
-                    "{}   {} unnamed ({} bytes)",
-                    rail_chr(),
-                    icon,
-                    f.content.len()
-                );
+                println!("{}   {} unnamed ({} bytes)", rail_chr(), icon, f.content.len());
             } else {
                 let path = ui::theme::paint_bright(t, &f.path);
-                println!(
-                    "{}   {} {} ({} bytes)",
-                    rail_chr(),
-                    icon,
-                    path,
-                    f.content.len()
-                );
+                println!("{}   {} {} ({} bytes)", rail_chr(), icon, path, f.content.len());
             }
         }
         println!("{}", rail_chr());
@@ -754,10 +684,7 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
     } else if !code.is_empty() {
         session.last_code = code;
         session.last_files.clear();
-        let msg = ui::theme::paint_success_label(
-            t,
-            "detected code block \u{2014} use /write <path> to save",
-        );
+        let msg = ui::theme::paint_success_label(t, "detected code block \u{2014} use /write <path> to save");
         println!("{}", rail_chr());
         println!("{} {}", rail_chr(), msg);
         println!("{}", rail_chr());

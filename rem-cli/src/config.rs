@@ -59,10 +59,7 @@ pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
         ui::theme::paint_bright(&t, ".")
     );
     println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
-    print!(
-        "{}",
-        ui::theme::paint(&t, "accent", "\u{258C}  rem> ", true)
-    );
+    print!("{}", ui::theme::paint(&t, "accent", "\u{258C}  rem> ", true));
     let _ = io::stdout().flush();
 
     let mut input = String::new();
@@ -114,16 +111,14 @@ pub(crate) fn load_config() -> Result<AppConfig> {
     if let Some(dir) = config_dir() {
         let path = dir.join("config.toml");
         if path.exists() {
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read {}", path.display()))?;
+            let text = fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
             let partial: PartialConfig = toml::from_str(&text).context("invalid global config")?;
             cfg.apply_partial(partial);
         }
     }
     let local = PathBuf::from(".remcli.toml");
     if local.exists() {
-        let text = fs::read_to_string(&local)
-            .with_context(|| format!("failed to read {}", local.display()))?;
+        let text = fs::read_to_string(&local).with_context(|| format!("failed to read {}", local.display()))?;
         let partial: PartialConfig = toml::from_str(&text).context("invalid local config")?;
         cfg.apply_partial(partial);
     }
@@ -139,8 +134,7 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
     let timeout_s = pcfg.and_then(|p| p.timeout_s).unwrap_or(cfg.timeout_s);
     let model = resolve_model(
         kind,
-        pcfg.and_then(|p| p.model.clone())
-            .unwrap_or_else(|| cfg.model.clone()),
+        pcfg.and_then(|p| p.model.clone()).unwrap_or_else(|| cfg.model.clone()),
     );
     let model_ctx = pcfg.and_then(|p| p.model_ctx).unwrap_or(cfg.model_ctx);
 
@@ -166,15 +160,7 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
         }
     }
 
-    let mut provider = Provider::new(
-        kind,
-        base_url,
-        model,
-        timeout_s,
-        system_prompt,
-        api_key,
-        model_ctx,
-    );
+    let mut provider = Provider::new(kind, base_url, model, timeout_s, system_prompt, api_key, model_ctx);
 
     if let Some(effort) = &cfg.reasoning_effort {
         provider.reasoning_config.effort = crate::reasoning::ReasoningEffort::from_str(effort);
@@ -189,9 +175,7 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
 /// Resolves the model name, using provider defaults when the user model is a placeholder.
 fn resolve_model(kind: ProviderKind, model: String) -> String {
     if model == "rem-coder:latest" || model == "rem-coder" {
-        crate::provider::default_model(kind)
-            .unwrap_or(&model)
-            .to_string()
+        crate::provider::default_model(kind).unwrap_or(&model).to_string()
     } else {
         model
     }
@@ -231,13 +215,10 @@ pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
 fn warn_missing_api_key(cfg: &AppConfig) {
     let kind = ProviderKind::from_str(&cfg.provider);
     if let Some(env_var) = crate::provider::api_key_env_var(kind) {
-        let has_key = cfg.api_key.as_ref().is_some_and(|k| !k.is_empty())
-            || std::env::var(env_var).is_ok_and(|k| !k.is_empty());
+        let has_key =
+            cfg.api_key.as_ref().is_some_and(|k| !k.is_empty()) || std::env::var(env_var).is_ok_and(|k| !k.is_empty());
         if !has_key {
-            warn!(
-                "provider '{}' may need --api-key or {}",
-                cfg.provider, env_var
-            );
+            warn!("provider '{}' may need --api-key or {}", cfg.provider, env_var);
         }
     }
 }
@@ -267,10 +248,7 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
 
     let mode = cfg.mode.to_uppercase();
     if !["CHAT", "CODE", "PLAN"].contains(&mode.as_str()) {
-        warn!(
-            "unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.",
-            cfg.mode
-        );
+        warn!("unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.", cfg.mode);
     }
 
     if cfg.timeout_s < 5 || cfg.timeout_s > 600 {
@@ -344,22 +322,28 @@ mod tests {
 
     #[test]
     fn validate_config_warns_on_unknown_mode() {
-        let mut cfg = AppConfig::default();
-        cfg.mode = "INVALID".into();
+        let cfg = AppConfig {
+            mode: "INVALID".into(),
+            ..Default::default()
+        };
         validate_config(&cfg);
     }
 
     #[test]
     fn validate_config_warns_on_timeout_outside_range() {
-        let mut cfg = AppConfig::default();
-        cfg.timeout_s = 1000;
+        let cfg = AppConfig {
+            timeout_s: 1000,
+            ..Default::default()
+        };
         validate_config(&cfg);
     }
 
     #[test]
     fn validate_config_warns_on_low_model_ctx() {
-        let mut cfg = AppConfig::default();
-        cfg.model_ctx = 128;
+        let cfg = AppConfig {
+            model_ctx: 128,
+            ..Default::default()
+        };
         validate_config(&cfg);
     }
 
@@ -375,8 +359,10 @@ mod tests {
             "bedrock",
             "openrouter",
         ] {
-            let mut cfg = AppConfig::default();
-            cfg.provider = provider.to_string();
+            let cfg = AppConfig {
+                provider: provider.to_string(),
+                ..Default::default()
+            };
             validate_config(&cfg);
         }
     }

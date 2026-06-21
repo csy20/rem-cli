@@ -7,11 +7,12 @@ use std::sync::Mutex;
 
 use std::future::Future;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
+use serde_json::json;
 use tokio::time::{sleep, timeout, Duration};
 
 pub mod anthropic;
@@ -133,11 +134,7 @@ impl ProviderKind {
 #[async_trait]
 pub(crate) trait ProviderBackend: Send + Sync {
     async fn list_models(&self, provider: &Provider) -> Result<Vec<String>>;
-    async fn complete_json(
-        &self,
-        provider: &Provider,
-        user_prompt: &str,
-    ) -> Result<crate::ModelReply>;
+    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply>;
     async fn complete_chat_stream(
         &self,
         provider: &Provider,
@@ -183,10 +180,7 @@ pub struct Provider {
 const DEFAULT_BASE_URLS: &[(ProviderKind, &str)] = &[
     (ProviderKind::Ollama, "http://localhost:11434"),
     (ProviderKind::OpenAI, "https://api.openai.com/v1"),
-    (
-        ProviderKind::Gemini,
-        "https://generativelanguage.googleapis.com",
-    ),
+    (ProviderKind::Gemini, "https://generativelanguage.googleapis.com"),
     (ProviderKind::Anthropic, "https://api.anthropic.com"),
     (ProviderKind::Azure, ""),
     (ProviderKind::Bedrock, ""),
@@ -212,10 +206,7 @@ pub(crate) fn default_base_url(kind: ProviderKind) -> String {
 
 /// Returns the default model for a provider kind, if any.
 pub(crate) fn default_model(kind: ProviderKind) -> Option<&'static str> {
-    DEFAULT_MODELS
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map(|(_, m)| *m)
+    DEFAULT_MODELS.iter().find(|(k, _)| *k == kind).map(|(_, m)| *m)
 }
 
 /// API key environment variable names per provider kind.
@@ -230,10 +221,7 @@ pub(crate) const API_KEY_ENV_VARS: &[(ProviderKind, &str)] = &[
 
 /// Returns the env var name for a provider's API key, if known.
 pub(crate) fn api_key_env_var(kind: ProviderKind) -> Option<&'static str> {
-    API_KEY_ENV_VARS
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map(|(_, e)| *e)
+    API_KEY_ENV_VARS.iter().find(|(k, _)| *k == kind).map(|(_, e)| *e)
 }
 
 /// Fallback backend returned when a feature-gated provider is not compiled.
@@ -244,18 +232,10 @@ struct UnsupportedBackend;
 #[async_trait]
 impl ProviderBackend for UnsupportedBackend {
     async fn list_models(&self, _provider: &Provider) -> Result<Vec<String>> {
-        Err(anyhow!(
-            "AWS Bedrock not compiled (enable 'bedrock' feature)"
-        ))
+        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
-    async fn complete_json(
-        &self,
-        _provider: &Provider,
-        _user_prompt: &str,
-    ) -> Result<crate::ModelReply> {
-        Err(anyhow!(
-            "AWS Bedrock not compiled (enable 'bedrock' feature)"
-        ))
+    async fn complete_json(&self, _provider: &Provider, _user_prompt: &str) -> Result<crate::ModelReply> {
+        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
     async fn complete_chat_stream(
         &self,
@@ -264,9 +244,7 @@ impl ProviderBackend for UnsupportedBackend {
         _system_prompt: &str,
         _history: &str,
     ) -> Result<String> {
-        Err(anyhow!(
-            "AWS Bedrock not compiled (enable 'bedrock' feature)"
-        ))
+        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
     async fn complete_chat_stream_with_vision(
         &self,
@@ -277,9 +255,7 @@ impl ProviderBackend for UnsupportedBackend {
         _mime_type: &str,
         _base64_data: &str,
     ) -> Result<String> {
-        Err(anyhow!(
-            "AWS Bedrock not compiled (enable 'bedrock' feature)"
-        ))
+        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
     async fn complete_chat_stream_with_tools(
         &self,
@@ -289,9 +265,7 @@ impl ProviderBackend for UnsupportedBackend {
         _history: &str,
         _tool_specs: &[tools::ToolSpec],
     ) -> Result<tools::ToolResponse> {
-        Err(anyhow!(
-            "AWS Bedrock not compiled (enable 'bedrock' feature)"
-        ))
+        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
 }
 
@@ -364,6 +338,29 @@ impl Provider {
         }
     }
 
+    /// Returns true if the error looks transient (network issues, server errors, timeouts).
+    fn is_transient_error(e: &anyhow::Error) -> bool {
+        let err_str = e.to_string();
+        // Check for tokio timeout
+        if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
+            return true;
+        }
+        // Check for reqwest error kinds
+        if let Some(req_err) = e.downcast_ref::<reqwest::Error>() {
+            if req_err.is_timeout() || req_err.is_connect() || req_err.is_request() {
+                return true;
+            }
+            if let Some(status) = req_err.status() {
+                let code = status.as_u16();
+                if code == 429 || (500..=504).contains(&code) {
+                    return true;
+                }
+            }
+        }
+        // Fallback: string-based detection for wrapped errors
+        err_str.contains("connection refused") || err_str.contains("connection reset") || err_str.contains("timed out")
+    }
+
     async fn with_retry<F, Fut, T>(f: F) -> Result<T>
     where
         F: Fn() -> Fut,
@@ -374,17 +371,7 @@ impl Provider {
             match f().await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    let err_str = e.to_string();
-                    let is_transient = err_str.contains("timeout")
-                        || err_str.contains("timed out")
-                        || err_str.contains("429")
-                        || err_str.contains("500")
-                        || err_str.contains("502")
-                        || err_str.contains("503")
-                        || err_str.contains("504")
-                        || err_str.contains("connection refused")
-                        || err_str.contains("connection reset");
-                    if !is_transient || attempt == 2 {
+                    if !Self::is_transient_error(&e) || attempt == 2 {
                         return Err(e);
                     }
                     last_err = Some(e);
@@ -438,24 +425,14 @@ impl Provider {
         tool_specs: &[tools::ToolSpec],
     ) -> Result<tools::ToolResponse> {
         Self::with_retry(|| {
-            self.backend.complete_chat_stream_with_tools(
-                self,
-                user_prompt,
-                system_prompt,
-                history,
-                tool_specs,
-            )
+            self.backend
+                .complete_chat_stream_with_tools(self, user_prompt, system_prompt, history, tool_specs)
         })
         .await
     }
 
     /// Sends a prompt with streaming response, printing tokens as they arrive.
-    pub async fn complete_chat_stream(
-        &self,
-        user_prompt: &str,
-        system_prompt: &str,
-        history: &str,
-    ) -> Result<String> {
+    pub async fn complete_chat_stream(&self, user_prompt: &str, system_prompt: &str, history: &str) -> Result<String> {
         Self::with_retry(|| {
             self.backend
                 .complete_chat_stream(self, user_prompt, system_prompt, history)
@@ -464,10 +441,7 @@ impl Provider {
     }
 
     pub(crate) fn anthropic_usage(&self) -> anthropic::AnthropicUsage {
-        self.last_usage
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.last_usage.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub(super) fn api_key_str(&self) -> &str {
@@ -493,9 +467,7 @@ impl Provider {
     /// Adds the appropriate auth header to an OpenAI-compatible request.
     pub(super) fn add_openai_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self.kind {
-            ProviderKind::Azure => {
-                req.header("api-key", self.api_key.as_deref().unwrap_or_default())
-            }
+            ProviderKind::Azure => req.header("api-key", self.api_key.as_deref().unwrap_or_default()),
             _ => req.header(
                 "Authorization",
                 format!("Bearer {}", self.api_key.as_deref().unwrap_or_default()),
@@ -513,11 +485,7 @@ impl Provider {
         }
     }
 
-    pub(super) async fn parse_api_error(
-        &self,
-        provider: &str,
-        resp: reqwest::Response,
-    ) -> anyhow::Error {
+    pub(super) async fn parse_api_error(&self, provider: &str, resp: reqwest::Response) -> anyhow::Error {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
@@ -602,18 +570,11 @@ impl Provider {
                     return Ok(false);
                 }
                 if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
-                    if let Some(content) = chunk
-                        .choices
-                        .first()
-                        .and_then(|c| c.delta.content.as_deref())
-                    {
+                    if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
                         full.push_str(content);
                         Self::emit_token(content);
                         if full.len() > MAX_RESPONSE_BYTES {
-                            return Err(anyhow!(
-                                "response too large ({} bytes)",
-                                MAX_RESPONSE_BYTES
-                            ));
+                            return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
                         }
                     }
                 }
@@ -645,8 +606,7 @@ impl Provider {
                         }
                         Some("message_start") => {
                             if let Some(usage) = chunk.message.and_then(|m| m.usage) {
-                                let mut last_usage =
-                                    self.last_usage.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut last_usage = self.last_usage.lock().unwrap_or_else(|e| e.into_inner());
                                 if let Some(t) = usage.input_tokens {
                                     last_usage.input_tokens = t;
                                 }
@@ -660,8 +620,7 @@ impl Provider {
                         }
                         Some("message_delta") => {
                             if let Some(usage) = chunk.usage {
-                                let mut last_usage =
-                                    self.last_usage.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut last_usage = self.last_usage.lock().unwrap_or_else(|e| e.into_inner());
                                 if let Some(t) = usage.output_tokens {
                                     last_usage.output_tokens = t;
                                 }
@@ -680,16 +639,9 @@ impl Provider {
         result
     }
 
-    pub(super) async fn handle_ollama_error(
-        &self,
-        resp: reqwest::Response,
-        url: &str,
-    ) -> Result<String> {
+    pub(super) async fn handle_ollama_error(&self, resp: reqwest::Response, url: &str) -> Result<String> {
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("(read error: {})", e));
+        let body = resp.text().await.unwrap_or_else(|e| format!("(read error: {})", e));
         let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
             .map(|v| v.error.to_string())
             .unwrap_or_else(|_| body.clone());
@@ -701,10 +653,7 @@ impl Provider {
             ));
         }
         if status.as_u16() == 404 {
-            return Err(anyhow!(
-                "Endpoint not found (404 at {}). Check --ollama-url",
-                url
-            ));
+            return Err(anyhow!("Endpoint not found (404 at {}). Check --ollama-url", url));
         }
         Err(anyhow!("Ollama failed: {} — {}", status, err_msg))
     }
@@ -743,10 +692,7 @@ impl Provider {
                         full.push_str(&text);
                         Self::emit_token(&text);
                         if full.len() > MAX_RESPONSE_BYTES {
-                            return Err(anyhow!(
-                                "response too large ({} bytes)",
-                                MAX_RESPONSE_BYTES
-                            ));
+                            return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
                         }
                     }
                 }
@@ -758,9 +704,125 @@ impl Provider {
 
     /// Shared tool streaming loop for OpenAI-compatible providers (OpenAI, Azure, OpenRouter).
     /// Handles SSE buffering, timeout, cancellation, text + tool call accumulation.
-    pub(crate) async fn stream_openai_tool_response(
-        resp: reqwest::Response,
+    /// Builds an OpenAI-compatible messages vec from system/history/user parts.
+    pub(super) fn openai_compat_messages(
+        system_prompt: &str,
+        history: &str,
+        user_prompt: &str,
+    ) -> Vec<serde_json::Value> {
+        let mut messages = vec![json!({"role": "system", "content": system_prompt})];
+        if !history.is_empty() {
+            messages.push(json!({"role": "user", "content": history}));
+        }
+        messages.push(json!({"role": "user", "content": user_prompt}));
+        messages
+    }
+
+    /// OpenAI-compatible chat stream for Azure/OpenRouter (no reasoning extras).
+    pub(super) async fn openai_compat_chat_stream(
+        &self,
+        provider_name: &str,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+    ) -> Result<String> {
+        let url = self.openai_chat_url();
+        let messages = Self::openai_compat_messages(system_prompt, history, user_prompt);
+        let resp = self
+            .add_openai_auth(self.client.post(&url))
+            .json(&json!({
+                "model": self.model,
+                "messages": messages,
+                "stream": true,
+                "temperature": 0.7,
+                "max_tokens": 4096,
+            }))
+            .send()
+            .await
+            .with_context(|| format!("failed to call {} API", provider_name))?;
+        if !resp.status().is_success() {
+            return Err(self.parse_api_error(provider_name, resp).await);
+        }
+        self.stream_sse_response(resp).await
+    }
+
+    /// OpenAI-compatible vision stream for Azure/OpenRouter.
+    pub(super) async fn openai_compat_chat_stream_with_vision(
+        &self,
+        provider_name: &str,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        mime_type: &str,
+        base64_data: &str,
+    ) -> Result<String> {
+        let url = self.openai_chat_url();
+        let data_uri = format!("data:{};base64,{}", mime_type, base64_data);
+        let mut messages: Vec<serde_json::Value> = vec![];
+        messages.push(json!({"role": "system", "content": system_prompt}));
+        if !history.is_empty() {
+            messages.push(json!({"role": "user", "content": history}));
+        }
+        messages.push(json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_prompt},
+                {"type": "image_url", "image_url": {"url": data_uri}}
+            ]
+        }));
+        let resp = self
+            .add_openai_auth(self.client.post(&url))
+            .json(&json!({
+                "model": self.model,
+                "messages": messages,
+                "stream": true,
+                "max_tokens": 4096
+            }))
+            .send()
+            .await
+            .with_context(|| format!("failed to call {} vision API", provider_name))?;
+        if !resp.status().is_success() {
+            return Err(self.parse_api_error(provider_name, resp).await);
+        }
+        self.stream_sse_response(resp).await
+    }
+
+    /// OpenAI-compatible tool streaming for Azure/OpenRouter.
+    pub(super) async fn openai_compat_chat_stream_with_tools(
+        &self,
+        provider_name: &str,
+        user_prompt: &str,
+        system_prompt: &str,
+        history: &str,
+        tool_specs: &[tools::ToolSpec],
     ) -> Result<tools::ToolResponse> {
+        let url = self.openai_chat_url();
+        let messages = Self::openai_compat_messages(system_prompt, history, user_prompt);
+        let tools: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
+        let mut payload = json!({
+            "model": self.model,
+            "messages": messages,
+            "stream": true,
+            "temperature": 0.7,
+            "max_tokens": 4096,
+        });
+        if !tools.is_empty() {
+            payload["tools"] = json!(tools);
+            payload["tool_choice"] = json!("auto");
+        }
+        let resp = self
+            .add_openai_auth(self.client.post(&url))
+            .json(&payload)
+            .send()
+            .await
+            .with_context(|| format!("failed to call {} API", provider_name))?;
+        if !resp.status().is_success() {
+            return Err(self.parse_api_error(provider_name, resp).await);
+        }
+        Self::stream_openai_tool_response(resp).await
+    }
+
+    pub(crate) async fn stream_openai_tool_response(resp: reqwest::Response) -> Result<tools::ToolResponse> {
         let mut full_text = String::with_capacity(4096);
         let mut tool_acc = openai::AccumulatedToolCalls::default();
 
@@ -773,18 +835,10 @@ impl Provider {
                 return Ok(false);
             }
             if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
-                if let Some(content) = chunk
-                    .choices
-                    .first()
-                    .and_then(|c| c.delta.content.as_deref())
-                {
+                if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
                     full_text.push_str(content);
                 }
-                if let Some(tool_calls) = chunk
-                    .choices
-                    .first()
-                    .and_then(|c| c.delta.tool_calls.as_ref())
-                {
+                if let Some(tool_calls) = chunk.choices.first().and_then(|c| c.delta.tool_calls.as_ref()) {
                     tool_acc.absorb_chunk(tool_calls);
                 }
             }

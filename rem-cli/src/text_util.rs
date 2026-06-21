@@ -33,9 +33,10 @@ pub(crate) fn truncate_bytes(s: &str, max: usize) -> String {
 
 /// Truncates a string to at most `max_lines` lines.
 pub(crate) fn truncate_to_lines(s: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = s.lines().take(max_lines).collect();
-    let mut result = lines.join("\n");
-    if s.lines().count() > max_lines {
+    let all_lines: Vec<&str> = s.lines().collect();
+    let total = all_lines.len();
+    let mut result = all_lines.into_iter().take(max_lines).collect::<Vec<_>>().join("\n");
+    if total > max_lines {
         result.push_str("\n...[truncated]");
     }
     result

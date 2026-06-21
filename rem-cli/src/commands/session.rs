@@ -62,11 +62,7 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
                     return;
                 }
             } else {
-                println!(
-                    "  {} invalid directory: {}",
-                    ui::theme::paint_warning(&t, "!"),
-                    raw
-                );
+                println!("  {} invalid directory: {}", ui::theme::paint_warning(&t, "!"), raw);
                 return;
             }
         }
@@ -119,11 +115,7 @@ pub(crate) fn handle_list_files(session: &ChatSession) {
     println!("{}", ui::theme::paint_rail_empty(&t));
 
     let mut entries: Vec<(String, bool, u64)> = Vec::new();
-    for entry in WalkDir::new(&dir)
-        .max_depth(4)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&dir).max_depth(4).into_iter().filter_map(|e| e.ok()) {
         let p = entry.path();
         if p == dir {
             continue;
@@ -225,10 +217,7 @@ pub(crate) fn handle_config(session: &ChatSession, client: &Provider) {
     println!(
         "{} {}",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
-        ui::theme::paint_dim(
-            &t,
-            "/model <name>  /provider <name>  /config workspace <path>"
-        )
+        ui::theme::paint_dim(&t, "/model <name>  /provider <name>  /config workspace <path>")
     );
     println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
 }
@@ -258,10 +247,7 @@ pub(crate) fn handle_config_set(session: &mut ChatSession, client: &Provider, ar
                 ui::theme::paint_warning(&t, "\u{258C}"),
                 other
             );
-            println!(
-                "{} available: model, workspace",
-                ui::theme::paint_rail_empty(&t)
-            );
+            println!("{} available: model, workspace", ui::theme::paint_rail_empty(&t));
         }
     }
 }
@@ -275,7 +261,7 @@ pub(crate) fn handle_tokens(session: &ChatSession, client: &Provider) {
         .iter()
         .map(|(u, a)| estimate_tokens_batch(&[u, a]))
         .sum();
-    let model_ctx = 4096;
+    let model_ctx = client.model_ctx;
     let pct = context_usage_percent(history_tokens, model_ctx);
     let t = ui::theme::active();
 
@@ -318,11 +304,7 @@ pub(crate) fn handle_tokens(session: &ChatSession, client: &Provider) {
             ui::theme::paint_bright(&t, "context history:"),
             ui::theme::paint_dim(
                 &t,
-                &format!(
-                    "~{} tokens ({} turns)",
-                    history_tokens,
-                    session.history.len()
-                )
+                &format!("~{} tokens ({} turns)", history_tokens, session.history.len())
             )
         );
 
@@ -416,19 +398,12 @@ pub(crate) fn handle_memory_set(session: &mut ChatSession, args: &str) {
         session.project_memory.content.clear();
         session.project_memory.loaded = false;
         let _ = session.project_memory.save();
-        println!(
-            "{} memory cleared",
-            ui::theme::paint_success_label(&t, "\u{2713}")
-        );
+        println!("{} memory cleared", ui::theme::paint_success_label(&t, "\u{2713}"));
         return;
     }
     if let Some(text) = args.strip_prefix("add ") {
         if let Err(e) = session.project_memory.append(text) {
-            println!(
-                "{} failed: {}",
-                ui::theme::paint_error_label(&t, "\u{2717}"),
-                e
-            );
+            println!("{} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
         } else {
             println!(
                 "{} appended to memory ({} bytes)",
@@ -439,11 +414,7 @@ pub(crate) fn handle_memory_set(session: &mut ChatSession, args: &str) {
         return;
     }
     if let Err(e) = session.project_memory.set(args) {
-        println!(
-            "{} failed: {}",
-            ui::theme::paint_error_label(&t, "\u{2717}"),
-            e
-        );
+        println!("{} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
     } else {
         println!(
             "{} memory saved ({} bytes)",
@@ -530,10 +501,9 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
         Ok(summary) => {
             let old_count = session.history.len();
             session.history.clear();
-            session.history.push((
-                "[compacted summary]".to_string(),
-                summary.trim().to_string(),
-            ));
+            session
+                .history
+                .push(("[compacted summary]".to_string(), summary.trim().to_string()));
             println!(
                 "{} {} {} → {} turns",
                 ui::theme::paint(&t, "accent", "\u{258C}", true),
@@ -600,9 +570,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                 if let Some(history) = data["history"].as_array() {
                     let mut restored = 0;
                     for entry in history {
-                        if let (Some(u), Some(a)) =
-                            (entry["user"].as_str(), entry["assistant"].as_str())
-                        {
+                        if let (Some(u), Some(a)) = (entry["user"].as_str(), entry["assistant"].as_str()) {
                             session.history.push((u.to_string(), a.to_string()));
                             restored += 1;
                         }
@@ -672,10 +640,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                     }
                 }
             } else {
-                println!(
-                    "{} invalid session file",
-                    ui::theme::paint_error_label(&t, "\u{258C}")
-                );
+                println!("{} invalid session file", ui::theme::paint_error_label(&t, "\u{258C}"));
             }
         }
         Err(e) => println!(

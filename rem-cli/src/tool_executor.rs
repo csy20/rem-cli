@@ -12,19 +12,14 @@ use crate::ui;
 /// Lazily initialized tokio runtime reused for web search tool calls.
 fn web_search_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Runtime::new().expect("failed to create tokio runtime for web search")
-    })
+    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("failed to create tokio runtime for web search"))
 }
 
 /// Maximum tool call rounds before forcing a text response.
 const MAX_TOOL_ROUNDS: usize = 10;
 
 /// Executes a single tool call and returns the result.
-pub(crate) fn execute_tool_call(
-    tool_call: &ToolCall,
-    project_dir: &std::path::Path,
-) -> ToolCallResult {
+pub(crate) fn execute_tool_call(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     match tool_call.name.as_str() {
         "read_file" => execute_read_file(tool_call, project_dir),
         "write_file" => execute_write_file(tool_call, project_dir),
@@ -45,9 +40,7 @@ pub(crate) fn execute_tool_call(
 
 fn extract_arg(tool_call: &ToolCall, key: &str) -> Option<String> {
     let args = &tool_call.arguments;
-    args.get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
 fn execute_read_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
@@ -55,7 +48,10 @@ fn execute_read_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> Too
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
     };
-    let path = resolve_path(project_dir, &path_str);
+    let path = match resolve_path(project_dir, &path_str) {
+        Some(p) => p,
+        None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
+    };
     match std::fs::read_to_string(&path) {
         Ok(content) => ToolCallResult {
             call_id: tool_call.id.clone(),
@@ -63,10 +59,7 @@ fn execute_read_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> Too
             content: format!("File: {}\n```\n{}\n```", path.display(), content),
             is_error: false,
         },
-        Err(e) => err_result(
-            tool_call,
-            &format!("cannot read file '{}': {}", path.display(), e),
-        ),
+        Err(e) => err_result(tool_call, &format!("cannot read file '{}': {}", path.display(), e)),
     }
 }
 
@@ -79,7 +72,10 @@ fn execute_write_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> To
         Some(c) => c,
         None => return err_result(tool_call, "missing 'content' argument"),
     };
-    let path = resolve_path(project_dir, &path_str);
+    let path = match resolve_path(project_dir, &path_str) {
+        Some(p) => p,
+        None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -87,17 +83,10 @@ fn execute_write_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> To
         Ok(()) => ToolCallResult {
             call_id: tool_call.id.clone(),
             name: "write_file".into(),
-            content: format!(
-                "Successfully wrote {} bytes to {}",
-                content.len(),
-                path.display()
-            ),
+            content: format!("Successfully wrote {} bytes to {}", content.len(), path.display()),
             is_error: false,
         },
-        Err(e) => err_result(
-            tool_call,
-            &format!("cannot write '{}': {}", path.display(), e),
-        ),
+        Err(e) => err_result(tool_call, &format!("cannot write '{}': {}", path.display(), e)),
     }
 }
 
@@ -114,18 +103,10 @@ fn execute_search_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> 
     );
     for m in report.matches.iter().take(30) {
         let rel = m.path.strip_prefix(project_dir).unwrap_or(&m.path);
-        content.push_str(&format!(
-            "{}:{}: {}\n",
-            rel.display(),
-            m.line_no,
-            m.line.trim()
-        ));
+        content.push_str(&format!("{}:{}: {}\n", rel.display(), m.line_no, m.line.trim()));
     }
     if report.matches.len() > 30 {
-        content.push_str(&format!(
-            "... and {} more matches",
-            report.matches.len() - 30
-        ));
+        content.push_str(&format!("... and {} more matches", report.matches.len() - 30));
     }
     ToolCallResult {
         call_id: tool_call.id.clone(),
@@ -144,10 +125,7 @@ fn execute_tool_lint(tool_call: &ToolCall) -> ToolCallResult {
     ToolCallResult {
         call_id: tool_call.id.clone(),
         name: "run_lint".into(),
-        content: format!(
-            "Lint result for {}:\n{}\n{}",
-            path, result.stdout, result.stderr
-        ),
+        content: format!("Lint result for {}:\n{}\n{}", path, result.stdout, result.stderr),
         is_error: !result.success,
     }
 }
@@ -161,10 +139,7 @@ fn execute_tool_test(tool_call: &ToolCall) -> ToolCallResult {
     ToolCallResult {
         call_id: tool_call.id.clone(),
         name: "run_test".into(),
-        content: format!(
-            "Test result for {}:\n{}\n{}",
-            path, result.stdout, result.stderr
-        ),
+        content: format!("Test result for {}:\n{}\n{}", path, result.stdout, result.stderr),
         is_error: !result.success,
     }
 }
@@ -198,17 +173,15 @@ fn execute_web_search_sync(tool_call: &ToolCall) -> ToolCallResult {
 
 fn execute_list_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let path_str = extract_arg(tool_call, "path").unwrap_or_else(|| ".".to_string());
-    let path = resolve_path(project_dir, &path_str);
+    let path = match resolve_path(project_dir, &path_str) {
+        Some(p) => p,
+        None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
+    };
     let mut content = String::new();
     if path.is_dir() {
         let entries = match std::fs::read_dir(&path) {
             Ok(entries) => entries,
-            Err(e) => {
-                return err_result(
-                    tool_call,
-                    &format!("cannot list '{}': {}", path.display(), e),
-                )
-            }
+            Err(e) => return err_result(tool_call, &format!("cannot list '{}': {}", path.display(), e)),
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -238,18 +211,10 @@ fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> T
         .arguments
         .get("args")
         .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
 
-    match Command::new(&command)
-        .args(&args)
-        .current_dir(project_dir)
-        .output()
-    {
+    match Command::new(&command).args(&args).current_dir(project_dir).output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -277,13 +242,8 @@ fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> T
     }
 }
 
-fn resolve_path(base: &std::path::Path, rel: &str) -> PathBuf {
-    let p = std::path::Path::new(rel);
-    if p.is_relative() {
-        base.join(p)
-    } else {
-        p.to_path_buf()
-    }
+fn resolve_path(base: &std::path::Path, rel: &str) -> Option<PathBuf> {
+    crate::types::resolve_safe_path(base, rel)
 }
 
 fn err_result(tool_call: &ToolCall, msg: &str) -> ToolCallResult {
@@ -319,12 +279,7 @@ pub(crate) async fn run_tool_loop(
         round += 1;
 
         match client
-            .complete_chat_stream_with_tools(
-                &current_prompt,
-                &current_system,
-                &current_history,
-                &tools,
-            )
+            .complete_chat_stream_with_tools(&current_prompt, &current_system, &current_history, &tools)
             .await
         {
             Ok(ToolResponse::Text(text)) => {
@@ -369,13 +324,68 @@ pub(crate) async fn run_tool_loop(
                 // and system/history are passed through
                 current_prompt = follow_up;
                 // Don't repeat the system prompt in subsequent rounds
-                current_system =
-                    "Continue working on the task. Use tool results above.".to_string();
+                current_system = "Continue working on the task. Use tool results above.".to_string();
                 current_history.clear();
             }
             Err(e) => {
                 return Err(format!("LLM call failed: {}", e));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tool_call(name: &str, args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "test-1".into(),
+            name: name.into(),
+            arguments: args,
+        }
+    }
+
+    #[test]
+    fn extract_arg_returns_value() {
+        let tc = make_tool_call("read_file", serde_json::json!({"path": "src/main.rs"}));
+        assert_eq!(extract_arg(&tc, "path"), Some("src/main.rs".into()));
+    }
+
+    #[test]
+    fn extract_arg_returns_none_for_missing() {
+        let tc = make_tool_call("read_file", serde_json::json!({}));
+        assert_eq!(extract_arg(&tc, "path"), None);
+    }
+
+    #[test]
+    fn extract_arg_returns_none_for_wrong_type() {
+        let tc = make_tool_call("read_file", serde_json::json!({"path": 42}));
+        assert_eq!(extract_arg(&tc, "path"), None);
+    }
+
+    #[test]
+    fn err_result_sets_error_flag() {
+        let tc = make_tool_call("test_tool", serde_json::json!({}));
+        let err = err_result(&tc, "something went wrong");
+        assert!(err.is_error);
+        assert_eq!(err.name, "test_tool");
+        assert!(err.content.contains("something went wrong"));
+    }
+
+    #[test]
+    fn execute_unknown_tool_returns_error() {
+        let tc = make_tool_call("nonexistent_tool", serde_json::json!({}));
+        let result = execute_tool_call(&tc, &PathBuf::from("."));
+        assert!(result.is_error);
+        assert!(result.content.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn execute_read_file_missing_path() {
+        let tc = make_tool_call("read_file", serde_json::json!({}));
+        let result = execute_tool_call(&tc, &PathBuf::from("."));
+        assert!(result.is_error);
+        assert!(result.content.contains("missing 'path'"));
     }
 }

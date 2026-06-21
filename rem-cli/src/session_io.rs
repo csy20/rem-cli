@@ -36,21 +36,14 @@ fn detect_system_ram_gb() -> u64 {
     if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
         for line in content.lines() {
             if line.starts_with("MemTotal:") {
-                let kb: u64 = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
+                let kb: u64 = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
                 return kb / 1024 / 1024;
             }
         }
     }
 
     // macOS: sysctl hw.memsize
-    if let Ok(output) = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-    {
+    if let Ok(output) = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
         if let Ok(s) = String::from_utf8(output.stdout) {
             if let Ok(bytes) = s.trim().parse::<u64>() {
                 return bytes / 1024 / 1024 / 1024;
@@ -98,11 +91,9 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
         if rel_str.contains("venv")
             || rel_str.contains("dist")
             || rel_str.contains(".pytest_cache")
-            || rel.components().any(|c| {
-                c.as_os_str()
-                    .to_str()
-                    .is_some_and(crate::find::should_skip_dir)
-            })
+            || rel
+                .components()
+                .any(|c| c.as_os_str().to_str().is_some_and(crate::find::should_skip_dir))
         {
             continue;
         }
@@ -146,7 +137,7 @@ pub(crate) fn detect_project_type(dir: &Path) -> &'static str {
 
     let has_file = |name: &str| entries.iter().any(|f| f == name);
 
-    if has_file("Cargo.toml") {
+    if has_file("cargo.toml") {
         return "rust";
     }
     if has_file("go.mod") {
@@ -164,7 +155,7 @@ pub(crate) fn detect_project_type(dir: &Path) -> &'static str {
     if has_file("dart.yaml") || has_file("pubspec.yaml") {
         return "dart";
     }
-    if has_file("Makefile") {
+    if has_file("makefile") {
         return "cpp";
     }
     ""
@@ -218,26 +209,19 @@ pub(crate) fn build_prompt(session: &ChatSession, client: &Provider) -> String {
 
 /// Validates the LLM response, stripping code if in CHAT mode and inappropriate.
 /// Returns (was_validated, cleaned_response).
-pub(crate) fn validate_chat_response(
-    response: &str,
-    intent: &TaskIntent,
-    mode: &RunMode,
-) -> (bool, String) {
+pub(crate) fn validate_chat_response(response: &str, intent: &TaskIntent, mode: &RunMode) -> (bool, String) {
     if *intent != TaskIntent::CodeAction && *mode != RunMode::Code {
         let has_code_fences = response.contains("```");
         let has_multi_file = response.contains("### ") && has_code_fences;
-        let has_json = response.trim().starts_with('{')
-            && (response.contains("\"code\"") || response.contains("\"files\""));
+        let has_json =
+            response.trim().starts_with('{') && (response.contains("\"code\"") || response.contains("\"files\""));
 
         if has_multi_file || has_json {
             let code_stripped = strip_code_blocks(response);
             if !code_stripped.trim().is_empty() {
                 return (true, code_stripped);
             }
-            return (
-                true,
-                "I understood your question. Let me answer directly: ".to_string(),
-            );
+            return (true, "I understood your question. Let me answer directly: ".to_string());
         }
     }
 
@@ -256,11 +240,11 @@ mod tests {
     use super::*;
     use crate::chat::RunMode;
     use crate::intent::TaskIntent;
+    use std::path::PathBuf;
 
     #[test]
     fn validate_chat_response_passes_plain_text() {
-        let (was_validated, _) =
-            validate_chat_response("Hi there!", &TaskIntent::FastAnswer, &RunMode::Chat);
+        let (was_validated, _) = validate_chat_response("Hi there!", &TaskIntent::FastAnswer, &RunMode::Chat);
         assert!(!was_validated);
     }
 
@@ -287,19 +271,65 @@ mod tests {
 
     #[test]
     fn validate_chat_strips_json_in_chat_mode() {
-        let (was_validated, _cleaned) = validate_chat_response(
-            "{\"code\": \"fn main() {}\"}",
-            &TaskIntent::FastAnswer,
-            &RunMode::Chat,
-        );
+        let (was_validated, _cleaned) =
+            validate_chat_response("{\"code\": \"fn main() {}\"}", &TaskIntent::FastAnswer, &RunMode::Chat);
         assert!(was_validated);
     }
 
     #[test]
     fn validate_chat_handles_empty_response() {
-        let (was_validated, cleaned) =
-            validate_chat_response("", &TaskIntent::CodeAction, &RunMode::Chat);
+        let (was_validated, cleaned) = validate_chat_response("", &TaskIntent::CodeAction, &RunMode::Chat);
         assert!(was_validated);
         assert!(cleaned.contains("No response generated"));
+    }
+
+    #[test]
+    fn detect_project_type_rust() {
+        let dir = std::env::temp_dir().join(format!("rem-test-rust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+        assert_eq!(detect_project_type(&dir), "rust");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_project_type_python() {
+        let dir = std::env::temp_dir().join(format!("rem-test-py-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("setup.py"), "").unwrap();
+        assert_eq!(detect_project_type(&dir), "python");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_project_type_unknown() {
+        let dir = std::env::temp_dir().join(format!("rem-test-unk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("readme.md"), "").unwrap();
+        assert_eq!(detect_project_type(&dir), "");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detect_project_type_nonexistent() {
+        let dir = PathBuf::from("/nonexistent_rem_test_dir");
+        assert_eq!(detect_project_type(&dir), "");
+    }
+
+    #[test]
+    fn language_specific_guidance_returns_known_types() {
+        assert!(language_specific_guidance("rust").contains("cargo"));
+        assert!(language_specific_guidance("python").contains("PEP 8"));
+        assert!(language_specific_guidance("javascript").contains("npm"));
+        assert!(language_specific_guidance("go").contains("go mod"));
+        assert!(language_specific_guidance("html_css").contains("flexbox"));
+    }
+
+    #[test]
+    fn language_specific_guidance_unknown_returns_empty() {
+        assert_eq!(language_specific_guidance("unknown_type"), "");
     }
 }

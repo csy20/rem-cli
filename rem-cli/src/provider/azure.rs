@@ -12,24 +12,14 @@ pub(super) struct AzureBackend;
 impl ProviderBackend for AzureBackend {
     async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
         let url = provider.openai_models_url();
-        let resp = provider
-            .add_openai_auth(provider.client.get(&url))
-            .send()
-            .await?;
+        let resp = provider.add_openai_auth(provider.client.get(&url)).send().await?;
         if !resp.status().is_success() {
-            return Err(anyhow!(
-                "Azure OpenAI API unreachable at {}",
-                provider.base_url
-            ));
+            return Err(anyhow!("Azure OpenAI API unreachable at {}", provider.base_url));
         }
         Ok(vec![provider.model.clone()])
     }
 
-    async fn complete_json(
-        &self,
-        provider: &Provider,
-        user_prompt: &str,
-    ) -> Result<crate::ModelReply> {
+    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
         let url = provider.openai_chat_url();
         let resp = provider
             .add_openai_auth(provider.client.post(&url))
@@ -50,11 +40,7 @@ impl ProviderBackend for AzureBackend {
             return Err(provider.parse_api_error("Azure OpenAI", resp).await);
         }
         let parsed: OpenAIResponse = resp.json().await.context("invalid Azure OpenAI response")?;
-        let content = parsed
-            .choices
-            .first()
-            .map(|c| c.message.content.as_str())
-            .unwrap_or("");
+        let content = parsed.choices.first().map(|c| c.message.content.as_str()).unwrap_or("");
         Provider::parse_json_fallback(content)
     }
 
@@ -65,30 +51,9 @@ impl ProviderBackend for AzureBackend {
         system_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = provider.openai_chat_url();
-        let mut messages: Vec<serde_json::Value> = vec![];
-        messages.push(json!({"role": "system", "content": system_prompt}));
-        if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
-        }
-        messages.push(json!({"role": "user", "content": user_prompt}));
-
-        let resp = provider
-            .add_openai_auth(provider.client.post(&url))
-            .json(&json!({
-                "model": provider.model,
-                "messages": messages,
-                "stream": true,
-                "temperature": 0.7,
-                "max_tokens": 4096,
-            }))
-            .send()
+        provider
+            .openai_compat_chat_stream("Azure OpenAI", user_prompt, system_prompt, history)
             .await
-            .context("failed to call Azure OpenAI API")?;
-        if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Azure OpenAI", resp).await);
-        }
-        provider.stream_sse_response(resp).await
     }
 
     async fn complete_chat_stream_with_vision(
@@ -100,35 +65,16 @@ impl ProviderBackend for AzureBackend {
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        let url = provider.openai_chat_url();
-        let data_uri = format!("data:{};base64,{}", mime_type, base64_data);
-        let mut messages: Vec<serde_json::Value> = vec![];
-        messages.push(json!({"role": "system", "content": system_prompt}));
-        if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
-        }
-        messages.push(json!({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": data_uri}}
-            ]
-        }));
-        let resp = provider
-            .add_openai_auth(provider.client.post(&url))
-            .json(&json!({
-                "model": provider.model,
-                "messages": messages,
-                "stream": true,
-                "max_tokens": 4096
-            }))
-            .send()
+        provider
+            .openai_compat_chat_stream_with_vision(
+                "Azure OpenAI",
+                user_prompt,
+                system_prompt,
+                history,
+                mime_type,
+                base64_data,
+            )
             .await
-            .context("failed to call Azure OpenAI vision API")?;
-        if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Azure OpenAI", resp).await);
-        }
-        provider.stream_sse_response(resp).await
     }
 
     async fn complete_chat_stream_with_tools(
@@ -139,37 +85,8 @@ impl ProviderBackend for AzureBackend {
         history: &str,
         tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        let url = provider.openai_chat_url();
-        let mut messages: Vec<serde_json::Value> = vec![];
-        messages.push(json!({"role": "system", "content": system_prompt}));
-        if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
-        }
-        messages.push(json!({"role": "user", "content": user_prompt}));
-
-        let tools: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
-        let mut payload = json!({
-            "model": provider.model,
-            "messages": messages,
-            "stream": true,
-            "temperature": 0.7,
-            "max_tokens": 4096,
-        });
-        if !tools.is_empty() {
-            payload["tools"] = json!(tools);
-            payload["tool_choice"] = json!("auto");
-        }
-
-        let resp = provider
-            .add_openai_auth(provider.client.post(&url))
-            .json(&payload)
-            .send()
+        provider
+            .openai_compat_chat_stream_with_tools("Azure OpenAI", user_prompt, system_prompt, history, tool_specs)
             .await
-            .context("failed to call Azure OpenAI API")?;
-        if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Azure OpenAI", resp).await);
-        }
-
-        Provider::stream_openai_tool_response(resp).await
     }
 }

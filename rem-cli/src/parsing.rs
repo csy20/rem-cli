@@ -5,8 +5,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-static RE_BOLD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").expect("invalid regex literal"));
+static RE_BOLD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").expect("invalid regex literal"));
 
 /// Extracts the first fenced code block from markdown text.
 pub fn extract_code_block(text: &str) -> String {
@@ -47,10 +46,7 @@ pub fn current_name_from_bold(line: &str) -> Option<String> {
 pub fn guess_filename(lines: &[&str]) -> String {
     for line in lines.iter().take(3) {
         let trimmed = line.trim();
-        if trimmed.starts_with("<!DOCTYPE")
-            || trimmed.starts_with("<html")
-            || trimmed.contains("<head")
-        {
+        if trimmed.starts_with("<!DOCTYPE") || trimmed.starts_with("<html") || trimmed.contains("<head") {
             return "index.html".to_string();
         }
         if trimmed.starts_with("fn ")
@@ -158,5 +154,21 @@ mod tests {
         assert!(out.contains("hello"));
         assert!(out.contains("world"));
         assert!(!out.contains("<div>x</div>"));
+    }
+
+    #[test]
+    fn extracts_named_file_header() {
+        let text = "### index.html\n```html\n<h1>Hello</h1>\n```";
+        let first = extract_code_block(text);
+        assert_eq!(first, "<h1>Hello</h1>");
+    }
+
+    #[test]
+    fn strips_code_blocks_from_chat_text() {
+        let text = "Answer:\n```js\nconst x = 1;\n```\nDone.";
+        let stripped = strip_code_blocks(text);
+        assert!(stripped.contains("Answer:"));
+        assert!(stripped.contains("Done."));
+        assert!(!stripped.contains("const x = 1"));
     }
 }

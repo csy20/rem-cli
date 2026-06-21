@@ -211,7 +211,8 @@ async fn test_openai_list_models() {
 #[tokio::test]
 async fn test_openai_complete_json() {
     let mock_server = MockServer::start().await;
-    let response_str = r#"{"explanation":"test","code":"print('hello')","files":[],"commands":[],"checks":[],"caution":""}"#;
+    let response_str =
+        r#"{"explanation":"test","code":"print('hello')","files":[],"commands":[],"checks":[],"caution":""}"#;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -319,8 +320,7 @@ async fn test_gemini_list_models() {
 #[tokio::test]
 async fn test_gemini_complete_json() {
     let mock_server = MockServer::start().await;
-    let response_str =
-        r#"{"explanation":"test","code":"","files":[],"commands":[],"checks":[],"caution":""}"#;
+    let response_str = r#"{"explanation":"test","code":"","files":[],"commands":[],"checks":[],"caution":""}"#;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "candidates": [{
@@ -402,8 +402,7 @@ async fn test_anthropic_list_models() {
 #[tokio::test]
 async fn test_anthropic_complete_json() {
     let mock_server = MockServer::start().await;
-    let response_str =
-        r#"{"explanation":"test","code":"","files":[],"commands":[],"checks":[],"caution":""}"#;
+    let response_str = r#"{"explanation":"test","code":"","files":[],"commands":[],"checks":[],"caution":""}"#;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "content": [{"text": response_str}]
@@ -497,4 +496,34 @@ async fn test_gemini_api_error() {
     let err = provider.complete_json("hello").await.unwrap_err();
     let msg = format!("{}", err);
     assert!(msg.contains("Gemini"));
+}
+
+#[test]
+fn is_transient_detects_timeout_string() {
+    let err = anyhow::anyhow!("request timed out");
+    assert!(Provider::is_transient_error(&err));
+}
+
+#[test]
+fn is_transient_detects_connection_refused() {
+    let err = anyhow::anyhow!("connection refused: endpoint");
+    assert!(Provider::is_transient_error(&err));
+}
+
+#[test]
+fn is_transient_handles_unexpected_format() {
+    let err = anyhow::anyhow!("unexpected response format");
+    assert!(!Provider::is_transient_error(&err));
+}
+
+#[test]
+fn is_transient_rejects_authentication_errors() {
+    let err = anyhow::anyhow!("invalid API key");
+    assert!(!Provider::is_transient_error(&err));
+}
+
+#[test]
+fn is_transient_rejects_400() {
+    let err = anyhow::anyhow!("HTTP 400 Bad Request");
+    assert!(!Provider::is_transient_error(&err));
 }

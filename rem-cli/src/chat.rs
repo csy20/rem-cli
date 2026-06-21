@@ -3,9 +3,7 @@
 //! references, builds system prompts with project context, and manages modes.
 
 use crate::feedback::FeedbackTracker;
-use crate::indexer::{
-    build_retrieved_context, load_codebase_index, retrieve_relevant_chunks, CodebaseIndex,
-};
+use crate::indexer::{build_retrieved_context, load_codebase_index, retrieve_relevant_chunks, CodebaseIndex};
 use crate::intent::TaskIntent;
 use crate::memory::ProjectMemory;
 use crate::search::SearchResult;
@@ -74,8 +72,7 @@ impl ChatSession {
         let _ = rl.load_history(&history_path);
         rl.set_max_history_size(1000).ok();
         let project_dir = workspace.clone();
-        let project_memory =
-            ProjectMemory::load(project_dir.as_deref().unwrap_or_else(|| Path::new(".")));
+        let project_memory = ProjectMemory::load(project_dir.as_deref().unwrap_or_else(|| Path::new(".")));
         Ok(Self {
             rl,
             last_code: String::new(),
@@ -140,8 +137,8 @@ impl ChatSession {
     /// Uses codebase index for retrieval when available; falls back to file listing.
     /// The index is cached in memory to avoid reloading from disk on every turn.
     pub(crate) fn build_relevant_project_context(&mut self, query: &str) -> String {
-        let dir = match self.project_dir.clone() {
-            Some(ref d) => d.clone(),
+        let dir = match &self.project_dir {
+            Some(d) => d.clone(),
             None => return String::new(),
         };
 
@@ -271,10 +268,7 @@ impl ChatSession {
                     PathBuf::from(ref_path)
                 }
             } else {
-                let base = self
-                    .project_dir
-                    .as_deref()
-                    .unwrap_or_else(|| Path::new("."));
+                let base = self.project_dir.as_deref().unwrap_or_else(|| Path::new("."));
                 match crate::resolve_safe_path(base, ref_path) {
                     Some(p) => p,
                     None => continue,
@@ -304,11 +298,10 @@ impl ChatSession {
                         if rel_str.is_empty() || rel_str.starts_with('.') {
                             continue;
                         }
-                        if rel.components().any(|c| {
-                            c.as_os_str()
-                                .to_str()
-                                .is_some_and(crate::find::should_skip_dir)
-                        }) {
+                        if rel
+                            .components()
+                            .any(|c| c.as_os_str().to_str().is_some_and(crate::find::should_skip_dir))
+                        {
                             continue;
                         }
                         let marker = if e.file_type().is_dir() { "/" } else { "" };
@@ -359,5 +352,87 @@ impl RunMode {
             RunMode::Code => "CODE",
             RunMode::Plan => "PLAN",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_session() -> ChatSession {
+        ChatSession::new("test-model", None).unwrap()
+    }
+
+    #[test]
+    fn build_search_context_empty() {
+        let session = make_session();
+        assert!(session.build_search_context().is_empty());
+    }
+
+    #[test]
+    fn build_search_context_with_results() {
+        let mut session = make_session();
+        session.last_search.push(SearchResult {
+            title: "Rust Lang".into(),
+            snippet: "The Rust programming language".into(),
+            url: "https://rust-lang.org".into(),
+        });
+        let ctx = session.build_search_context();
+        assert!(ctx.contains("Rust Lang"));
+        assert!(ctx.contains("The Rust programming language"));
+    }
+
+    #[test]
+    fn to_session_json_roundtrip() {
+        let mut session = make_session();
+        session.last_code = "fn main() {}".into();
+        session.history.push(("hello".into(), "world".into()));
+        let json = session.to_session_json();
+        assert_eq!(json["mode"], "CHAT");
+        assert_eq!(json["last_code"], "fn main() {}");
+        assert_eq!(json["history"][0]["user"], "hello");
+        assert_eq!(json["history"][0]["assistant"], "world");
+    }
+
+    #[test]
+    fn get_project_type_unknown() {
+        let mut session = make_session();
+        assert!(session.get_project_type().is_empty());
+    }
+
+    #[test]
+    fn mode_toggle_cycles_correctly() {
+        assert_eq!(RunMode::Chat.toggle(), RunMode::Code);
+        assert_eq!(RunMode::Code.toggle(), RunMode::Plan);
+        assert_eq!(RunMode::Plan.toggle(), RunMode::Chat);
+    }
+
+    #[test]
+    fn mode_label_matches_expected() {
+        assert_eq!(RunMode::Chat.label(), "CHAT");
+        assert_eq!(RunMode::Code.label(), "CODE");
+        assert_eq!(RunMode::Plan.label(), "PLAN");
+    }
+
+    #[test]
+    fn session_dir_falls_back_to_cwd() {
+        let session = make_session();
+        assert_eq!(session.session_dir(), std::env::current_dir().unwrap());
+    }
+
+    #[test]
+    fn resolve_at_references_no_references() {
+        let session = make_session();
+        let (cleaned, extra) = session.resolve_at_references("hello world");
+        assert_eq!(cleaned, "hello world");
+        assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn resolve_at_references_ignores_http() {
+        let session = make_session();
+        let (cleaned, extra) = session.resolve_at_references("see @https://example.com/doc for details");
+        assert_eq!(cleaned, "see @https://example.com/doc for details");
+        assert!(extra.is_empty());
     }
 }
