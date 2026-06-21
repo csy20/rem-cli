@@ -72,10 +72,7 @@ impl ProjectMemory {
         if self.content.is_empty() {
             return String::new();
         }
-        format!(
-            "[Project memory from {}]:\n\n{}\n\n",
-            MEMORY_FILENAME, self.content
-        )
+        format!("[Project memory from {}]:\n\n{}\n\n", MEMORY_FILENAME, self.content)
     }
 
     /// Generates a starter memory file with project overview and language conventions.
@@ -106,9 +103,7 @@ impl ProjectMemory {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                e.file_type().is_dir()
-                    && !name.starts_with('.')
-                    && !crate::find::should_skip_dir(&name)
+                e.file_type().is_dir() && !name.starts_with('.') && !crate::find::should_skip_dir(&name)
             })
             .count();
 

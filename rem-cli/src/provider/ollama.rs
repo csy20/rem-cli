@@ -8,11 +8,8 @@ use serde_json::json;
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
 use super::{Provider, ProviderBackend};
 
-static NUM_THREADS: LazyLock<usize> = LazyLock::new(|| {
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-});
+static NUM_THREADS: LazyLock<usize> =
+    LazyLock::new(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
 
 #[derive(Debug, Deserialize)]
 pub struct OllamaTagsResponse {
@@ -73,11 +70,7 @@ impl ProviderBackend for OllamaBackend {
         Ok(parsed.models.into_iter().map(|m| m.name).collect())
     }
 
-    async fn complete_json(
-        &self,
-        provider: &Provider,
-        user_prompt: &str,
-    ) -> Result<crate::ModelReply> {
+    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
         let url = super::api_url(&provider.base_url, "generate");
         let final_prompt = format!(
             "{}\n\nUser request:\n{}\n\nReturn JSON only.",
@@ -138,10 +131,7 @@ impl ProviderBackend for OllamaBackend {
         let final_prompt = if history.is_empty() {
             format!("{}\n\nUser: {}\n\nREM:", system_prompt, user_prompt)
         } else {
-            format!(
-                "{}\n\n{}User: {}\n\nREM:",
-                system_prompt, history, user_prompt
-            )
+            format!("{}\n\n{}User: {}\n\nREM:", system_prompt, history, user_prompt)
         };
         let payload = json!({
             "model": provider.model,
@@ -176,10 +166,7 @@ impl ProviderBackend for OllamaBackend {
         let final_prompt = if history.is_empty() {
             format!("{}\n\nUser: {}\n\nREM:", system_prompt, user_prompt)
         } else {
-            format!(
-                "{}\n\n{}User: {}\n\nREM:",
-                system_prompt, history, user_prompt
-            )
+            format!("{}\n\n{}User: {}\n\nREM:", system_prompt, history, user_prompt)
         };
         let payload = json!({
             "model": provider.model,
@@ -258,11 +245,7 @@ impl ProviderBackend for OllamaBackend {
                     if let Some(ref calls) = msg.tool_calls {
                         for tc in calls {
                             let idx = tool_calls.len() as i64;
-                            let name = tc
-                                .function
-                                .as_ref()
-                                .and_then(|f| f.name.clone())
-                                .unwrap_or_default();
+                            let name = tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
                             let args = tc
                                 .function
                                 .as_ref()
@@ -277,10 +260,7 @@ impl ProviderBackend for OllamaBackend {
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!(
-                    "response too large ({} bytes)",
-                    super::MAX_RESPONSE_BYTES
-                ));
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
             }
             Ok(true)
         })

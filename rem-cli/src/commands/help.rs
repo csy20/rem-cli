@@ -7,10 +7,7 @@ pub(crate) fn print_chat_help() {
     let t = ui::theme::active();
     println!("{}", ui::theme::paint_rail_empty(&t));
     println!("{}", ui::theme::paint_rail_header(&t, "COMMANDS"));
-    println!(
-        "{}",
-        ui::theme::paint_help_line(&t, "/help", "show this help")
-    );
+    println!("{}", ui::theme::paint_help_line(&t, "/help", "show this help"));
     println!(
         "{}",
         ui::theme::paint_help_line(&t, "/mode", "toggle CHAT → CODE → PLAN")
@@ -21,11 +18,7 @@ pub(crate) fn print_chat_help() {
     );
     println!(
         "{}",
-        ui::theme::paint_help_line(
-            &t,
-            "/model <name>",
-            "switch model (e.g. gpt-4, claude-sonnet-4)"
-        )
+        ui::theme::paint_help_line(&t, "/model <name>", "switch model (e.g. gpt-4, claude-sonnet-4)")
     );
     println!(
         "{}",
@@ -55,14 +48,8 @@ pub(crate) fn print_chat_help() {
         "{}",
         ui::theme::paint_help_line(&t, "/write <path>", "save last code to file")
     );
-    println!(
-        "{}",
-        ui::theme::paint_help_line(&t, "/save <path>", "same as /write")
-    );
-    println!(
-        "{}",
-        ui::theme::paint_help_line(&t, "/dir <path>", "set project root")
-    );
+    println!("{}", ui::theme::paint_help_line(&t, "/save <path>", "same as /write"));
+    println!("{}", ui::theme::paint_help_line(&t, "/dir <path>", "set project root"));
     println!(
         "{}",
         ui::theme::paint_help_line(&t, "/search <q>", "search the web (DuckDuckGo)")
@@ -143,10 +130,7 @@ pub(crate) fn print_chat_help() {
         "{}",
         ui::theme::paint_help_line(&t, "/why", "show why last intent was chosen")
     );
-    println!(
-        "{}",
-        ui::theme::paint_help_line(&t, "exit / quit", "exit REM")
-    );
+    println!("{}", ui::theme::paint_help_line(&t, "exit / quit", "exit REM"));
     println!("{}", ui::theme::paint_rail_empty(&t));
     println!("{}", ui::theme::paint_rail_header(&t, "TIPS"));
     println!(
@@ -156,11 +140,7 @@ pub(crate) fn print_chat_help() {
             &[
                 ("text_faint", "use ", false),
                 ("accent", "@<path>", true),
-                (
-                    "text_faint",
-                    " to include file context: @src/main.rs",
-                    false
-                ),
+                ("text_faint", " to include file context: @src/main.rs", false),
             ]
         )
     );
@@ -171,11 +151,7 @@ pub(crate) fn print_chat_help() {
             &[
                 ("text_faint", "use ", false),
                 ("accent", "/mode", true),
-                (
-                    "text_faint",
-                    " to toggle between chat, code, and plan modes",
-                    false
-                ),
+                ("text_faint", " to toggle between chat, code, and plan modes", false),
             ]
         )
     );
@@ -223,11 +199,7 @@ pub(crate) fn print_chat_help() {
             &[
                 ("text_faint", "run ", false),
                 ("accent", "/init", true),
-                (
-                    "text_faint",
-                    " for persistent project memory across sessions",
-                    false
-                ),
+                ("text_faint", " for persistent project memory across sessions", false),
             ]
         )
     );

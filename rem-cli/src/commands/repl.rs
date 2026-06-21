@@ -20,10 +20,7 @@ pub(crate) fn handle_theme(cfg: &mut AppConfig, tail: Option<&str>) {
             cfg.theme = active_theme.name.clone();
             let _ = save_config(cfg);
             let rail = ui::theme::paint_rail_empty(&t);
-            let msg = ui::theme::paint_success_label(
-                &t,
-                &format!("theme \u{2192} {}", active_theme.name),
-            );
+            let msg = ui::theme::paint_success_label(&t, &format!("theme \u{2192} {}", active_theme.name));
             println!("{rail}");
             println!("{rail} {msg}");
             println!("{rail}");
@@ -74,18 +71,13 @@ pub(crate) fn handle_model(client: &mut Provider, cfg: &mut AppConfig, tail: Opt
     if let Some(new_model) = tail {
         let new_model = new_model.trim().to_string();
         if new_model.is_empty() {
-            println!(
-                "{} model: {}",
-                ui::theme::paint_rail_empty(&t),
-                client.model
-            );
+            println!("{} model: {}", ui::theme::paint_rail_empty(&t), client.model);
         } else {
             client.set_model(new_model.clone());
             cfg.model = new_model;
             let _ = save_config(cfg);
             let rail = ui::theme::paint_rail_empty(&t);
-            let msg =
-                ui::theme::paint_success_label(&t, &format!("model \u{2192} {}", client.model));
+            let msg = ui::theme::paint_success_label(&t, &format!("model \u{2192} {}", client.model));
             println!("{rail}");
             println!("{rail} {msg}");
             println!("{rail}");
@@ -113,10 +105,7 @@ pub(crate) fn handle_provider(client: &mut Provider, cfg: &mut AppConfig, tail: 
                 let _ = save_config(cfg);
                 *client = new_client;
                 let rail = ui::theme::paint_rail_empty(&t);
-                let msg = ui::theme::paint_success_label(
-                    &t,
-                    &format!("provider \u{2192} {}", client.kind.as_str()),
-                );
+                let msg = ui::theme::paint_success_label(&t, &format!("provider \u{2192} {}", client.kind.as_str()));
                 println!("{rail}");
                 println!("{rail} {msg}");
                 let model_msg = ui::theme::paint_dim(&t, &format!("model: {}", client.model));
@@ -125,8 +114,7 @@ pub(crate) fn handle_provider(client: &mut Provider, cfg: &mut AppConfig, tail: 
             }
             Err(e) => {
                 let rail = ui::theme::paint_rail_empty(&t);
-                let msg =
-                    ui::theme::paint_error_label(&t, &format!("failed to switch provider: {}", e));
+                let msg = ui::theme::paint_error_label(&t, &format!("failed to switch provider: {}", e));
                 println!("{rail} {msg}");
                 println!("{rail}");
             }
@@ -147,12 +135,7 @@ pub(crate) fn handle_mode(session: &mut ChatSession, cfg: &mut AppConfig) {
         RunMode::Plan => "explore & plan \u{2014} analyze, propose approach, no code",
     };
     let rail = ui::theme::paint_rail_empty(&t);
-    let status = ui::theme::paint(
-        &t,
-        mode_key,
-        &format!("switched to {mode_label} mode"),
-        true,
-    );
+    let status = ui::theme::paint(&t, mode_key, &format!("switched to {mode_label} mode"), true);
     let sub = ui::theme::paint_dim(&t, hint);
     println!("{rail}");
     println!("{rail} {status}");
@@ -167,10 +150,7 @@ pub(crate) fn handle_plan(session: &mut ChatSession, cfg: &mut AppConfig) {
     let _ = save_config(cfg);
     let rail = ui::theme::paint_rail_empty(&t);
     let status = ui::theme::paint(&t, "accent_info", "switched to PLAN mode", true);
-    let sub = ui::theme::paint_dim(
-        &t,
-        "explore & plan \u{2014} analyze, propose approach, no code",
-    );
+    let sub = ui::theme::paint_dim(&t, "explore & plan \u{2014} analyze, propose approach, no code");
     println!("{rail}");
     println!("{rail} {status}");
     println!("{rail}  {sub}");
@@ -198,14 +178,8 @@ pub(crate) fn handle_reset(session: &mut ChatSession) {
     session.last_files.clear();
     session.last_files_written.clear();
     let rail = ui::theme::paint_rail_empty(&t);
-    let msg = ui::theme::paint_success_label(
-        &t,
-        "full reset \u{2014} history, code cache, and results cleared",
-    );
-    let sub = ui::theme::paint_dim(
-        &t,
-        "(memory preserved \u{2014} use /memory to clear project memory)",
-    );
+    let msg = ui::theme::paint_success_label(&t, "full reset \u{2014} history, code cache, and results cleared");
+    let sub = ui::theme::paint_dim(&t, "(memory preserved \u{2014} use /memory to clear project memory)");
     println!("{rail}");
     println!("{rail} {msg}");
     println!("{rail}   {sub}");
@@ -239,10 +213,7 @@ pub(crate) fn handle_reasoning(client: &mut Provider, cfg: &mut AppConfig, tail:
                 client.reasoning_config.effort = effort;
                 client.reasoning_config.enabled = true;
                 cfg.reasoning_effort = Some(effort.as_str().to_string());
-                let msg = ui::theme::paint_success_label(
-                    &t,
-                    &format!("reasoning effort \u{2192} {}", effort.as_str()),
-                );
+                let msg = ui::theme::paint_success_label(&t, &format!("reasoning effort \u{2192} {}", effort.as_str()));
                 println!("{rail}");
                 println!("{rail} {msg}");
                 println!("{rail}");
@@ -265,27 +236,19 @@ pub(crate) fn handle_reasoning(client: &mut Provider, cfg: &mut AppConfig, tail:
                 if let Ok(n) = args.trim_start_matches("budget ").parse::<u32>() {
                     client.reasoning_config.thinking_budget = n;
                     cfg.thinking_budget = Some(n);
-                    let msg = ui::theme::paint_success_label(
-                        &t,
-                        &format!("thinking budget \u{2192} {} tokens", n),
-                    );
+                    let msg = ui::theme::paint_success_label(&t, &format!("thinking budget \u{2192} {} tokens", n));
                     println!("{rail}");
                     println!("{rail} {msg}");
                     println!("{rail}");
                 } else {
-                    let msg = ui::theme::paint_error_label(
-                        &t,
-                        "invalid budget — usage: /reasoning budget <tokens>",
-                    );
+                    let msg = ui::theme::paint_error_label(&t, "invalid budget — usage: /reasoning budget <tokens>");
                     println!("{rail} {msg}");
                     println!("{rail}");
                 }
             }
             _ => {
-                let msg = ui::theme::paint_warning(
-                    &t,
-                    "usage: /reasoning [on|off|low|medium|high|show|hide|budget <n>]",
-                );
+                let msg =
+                    ui::theme::paint_warning(&t, "usage: /reasoning [on|off|low|medium|high|show|hide|budget <n>]");
                 println!("{rail}");
                 println!("{rail} {msg}");
                 println!("{rail}");
@@ -338,8 +301,7 @@ pub(crate) fn handle_watch(session: &ChatSession) {
             println!("{rail}");
         }
         Err(e) => {
-            let msg =
-                ui::theme::paint_error_label(&t, &format!("failed to start file watcher: {}", e));
+            let msg = ui::theme::paint_error_label(&t, &format!("failed to start file watcher: {}", e));
             println!("{rail} {msg}");
             println!("{rail}");
         }
@@ -373,8 +335,7 @@ pub(crate) fn handle_why(session: &ChatSession) {
         || lower_db.starts_with("why ")
         || lower_db.starts_with("explain ");
     let debug_intent = ui::theme::paint_dim(&t, &format!("  has_creation_intent={create_hit}"));
-    let debug_fix =
-        ui::theme::paint_dim(&t, &format!("  fix_window={fix_hit}  is_question={is_q}"));
+    let debug_fix = ui::theme::paint_dim(&t, &format!("  fix_window={fix_hit}  is_question={is_q}"));
     println!("{rail}");
     println!("{rail} {intent_label} {intent_val}");
     println!("{rail} {input_label} {input_val}");

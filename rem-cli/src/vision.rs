@@ -95,8 +95,7 @@ pub(crate) async fn handle_vision(client: &Provider, session: &mut ChatSession, 
 /// Encodes a local image file to base64 with its MIME type.
 pub(crate) fn encode_image(path: &Path) -> Result<(String, String), String> {
     let mime = detect_mime_type(path);
-    let data = std::fs::read(path)
-        .map_err(|e| format!("cannot read image '{}': {}", path.display(), e))?;
+    let data = std::fs::read(path).map_err(|e| format!("cannot read image '{}': {}", path.display(), e))?;
     let b64 = base64_encode(&data);
     Ok((mime, b64))
 }

@@ -10,9 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
-use cli::{
-    AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs,
-};
+use cli::{AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs};
 use walkdir::WalkDir;
 
 mod agentic;
@@ -231,9 +229,7 @@ async fn main() -> Result<()> {
             let is_pipe = !std::io::stdin().is_terminal();
             if is_pipe {
                 let mut stdin_data = String::new();
-                if io::stdin().read_to_string(&mut stdin_data).is_ok()
-                    && !stdin_data.trim().is_empty()
-                {
+                if io::stdin().read_to_string(&mut stdin_data).is_ok() && !stdin_data.trim().is_empty() {
                     return run_pipe(&client, &cfg, stdin_data.trim(), verbose).await;
                 }
             }
@@ -254,10 +250,7 @@ async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, verbose: boo
             &input[..12000]
         )
     } else {
-        format!(
-            "Analyze the following piped input. Be concise.\n\n{}",
-            input
-        )
+        format!("Analyze the following piped input. Be concise.\n\n{}", input)
     };
     let _spinner = SpinnerGuard::new("thinking...");
     let result = client.complete_chat_stream(
@@ -268,11 +261,7 @@ async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, verbose: boo
     match result {
         Ok(text) => {
             if verbose {
-                eprintln!(
-                    "\n  {} raw:\n{}\n",
-                    ui::theme::paint_dim(&t, "verbose:"),
-                    text
-                );
+                eprintln!("\n  {} raw:\n{}\n", ui::theme::paint_dim(&t, "verbose:"), text);
             }
             println!();
             println!("{}", text.trim());
@@ -305,9 +294,7 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
                 TaskIntent::WebNeeded => CHAT_SYSTEM_PROMPT_CONVERSATIONAL,
                 TaskIntent::CodeAction => unreachable!(),
             };
-            let text = client
-                .complete_chat_stream(&composed, system_prompt, "")
-                .await?;
+            let text = client.complete_chat_stream(&composed, system_prompt, "").await?;
             Ok(ModelReply {
                 explanation: text.trim().to_string(),
                 code: String::new(),
@@ -325,10 +312,7 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
             println!("{}", serde_json::to_string(&reply).unwrap_or_default());
         }
         "json-pretty" => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&reply).unwrap_or_default()
-            );
+            println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
         }
         _ => {
             if verbose {
@@ -337,11 +321,7 @@ async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: boo
                     ui::theme::paint_dim(&t, "verbose:"),
                     reply.explanation
                 );
-                eprintln!(
-                    "{} raw files: {:?}",
-                    ui::theme::paint_dim(&t, "verbose:"),
-                    reply.files
-                );
+                eprintln!("{} raw files: {:?}", ui::theme::paint_dim(&t, "verbose:"), reply.files);
             }
             print_reply(&reply, true);
         }
@@ -392,8 +372,7 @@ async fn run_explain(client: &Provider, args: ExplainArgs) -> Result<()> {
 async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArgs) -> Result<()> {
     let t = ui::theme::active();
     print_banner(client);
-    let existing = fs::read_to_string(&args.file)
-        .with_context(|| format!("failed to read {}", args.file.display()))?;
+    let existing = fs::read_to_string(&args.file).with_context(|| format!("failed to read {}", args.file.display()))?;
     let dir_ctx = build_context(&args.file, cfg.max_context_bytes)?;
     let prompt = format!(
         "Task: {}\n\nTarget file: {}\n\nCurrent content:\n{}\n\nNearby context:\n{}\n\nReturn updated file content in code or files array.",
@@ -434,8 +413,7 @@ fn build_context(target: &Path, max_bytes: usize) -> Result<String> {
         }
     }
     if target.exists() {
-        let content = fs::read_to_string(target)
-            .with_context(|| format!("failed to read {}", target.display()))?;
+        let content = fs::read_to_string(target).with_context(|| format!("failed to read {}", target.display()))?;
         out.push_str("\nTarget file:\n");
         out.push_str(&truncate_bytes(&content, max_bytes / 2));
     }
@@ -446,10 +424,7 @@ fn build_context(target: &Path, max_bytes: usize) -> Result<String> {
 
 fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
     let t = ui::theme::active();
-    let dir = if args.name.starts_with('/')
-        || args.name.starts_with("./")
-        || args.name.starts_with("../")
-    {
+    let dir = if args.name.starts_with('/') || args.name.starts_with("./") || args.name.starts_with("../") {
         PathBuf::from(&args.name)
     } else if let Some(ref ws) = cfg.workspace_dir {
         let base = PathBuf::from(ws);
@@ -493,10 +468,7 @@ fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
     println!(
         "{} {}",
         ui::theme::paint_success_label(&t, "✓"),
-        ui::theme::paint_bright(
-            &t,
-            &format!("created project '{}' ({})", args.name, args.project_type)
-        )
+        ui::theme::paint_bright(&t, &format!("created project '{}' ({})", args.name, args.project_type))
     );
     for f in &files {
         let icon = file_icon(&f.path);
@@ -528,11 +500,7 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     });
-    let dir = if dir.exists() {
-        dir
-    } else {
-        PathBuf::from(".")
-    };
+    let dir = if dir.exists() { dir } else { PathBuf::from(".") };
 
     println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
     println!(
@@ -613,7 +581,13 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         ui::theme::paint_bright(&t, &out_path.display().to_string())
     );
-    println!("{} `rem chat` / `rem ask` / `/goal` will now pull relevant chunks instead of full listings.", ui::theme::paint(&t, "accent", "\u{258C}", true));
-    println!("{} (keyword retrieval; raise model_ctx in ~/.config/rem-cli/config.toml for large projects)", ui::theme::paint(&t, "accent", "\u{258C}", true));
+    println!(
+        "{} `rem chat` / `rem ask` / `/goal` will now pull relevant chunks instead of full listings.",
+        ui::theme::paint(&t, "accent", "\u{258C}", true)
+    );
+    println!(
+        "{} (keyword retrieval; raise model_ctx in ~/.config/rem-cli/config.toml for large projects)",
+        ui::theme::paint(&t, "accent", "\u{258C}", true)
+    );
     Ok(())
 }

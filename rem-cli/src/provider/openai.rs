@@ -136,10 +136,7 @@ pub(super) struct OpenAIBackend;
 impl ProviderBackend for OpenAIBackend {
     async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
         let url = provider.openai_models_url();
-        let resp = provider
-            .add_openai_auth(provider.client.get(&url))
-            .send()
-            .await?;
+        let resp = provider.add_openai_auth(provider.client.get(&url)).send().await?;
         if !resp.status().is_success() {
             return Err(anyhow!("OpenAI API unreachable at {}", provider.base_url));
         }
@@ -147,11 +144,7 @@ impl ProviderBackend for OpenAIBackend {
         Ok(parsed.data.into_iter().map(|m| m.id).collect())
     }
 
-    async fn complete_json(
-        &self,
-        provider: &Provider,
-        user_prompt: &str,
-    ) -> Result<crate::ModelReply> {
+    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
         let url = provider.openai_chat_url();
         let resp = provider
             .add_openai_auth(provider.client.post(&url))
@@ -174,11 +167,7 @@ impl ProviderBackend for OpenAIBackend {
         }
 
         let parsed: OpenAIResponse = resp.json().await.context("invalid OpenAI response")?;
-        let content = parsed
-            .choices
-            .first()
-            .map(|c| c.message.content.as_str())
-            .unwrap_or("");
+        let content = parsed.choices.first().map(|c| c.message.content.as_str()).unwrap_or("");
 
         Provider::parse_json_fallback(content)
     }
@@ -235,11 +224,7 @@ impl ProviderBackend for OpenAIBackend {
                 return Err(provider.parse_api_error("OpenAI", resp).await);
             }
             let parsed: OpenAIResponse = resp.json().await.context("invalid OpenAI response")?;
-            let content = parsed
-                .choices
-                .first()
-                .map(|c| c.message.content.as_str())
-                .unwrap_or("");
+            let content = parsed.choices.first().map(|c| c.message.content.as_str()).unwrap_or("");
             return Ok(content.to_string());
         }
 

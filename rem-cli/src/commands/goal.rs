@@ -7,8 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use crate::agentic::{
-    build_agentic_prompt, build_tool_context, extract_goal_signal, format_tool_output, run_lint,
-    run_test,
+    build_agentic_prompt, build_tool_context, extract_goal_signal, format_tool_output, run_lint, run_test,
 };
 use crate::chat::ChatSession;
 use crate::parsing::extract_code_block;
@@ -147,9 +146,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         };
 
         let cleaned = text.trim().to_string();
-        session
-            .history
-            .push((format!("/goal {}", condition), cleaned.clone()));
+        session.history.push((format!("/goal {}", condition), cleaned.clone()));
 
         let files = extract_code_blocks_with_names(&cleaned);
         let code = extract_code_block(&cleaned);
@@ -198,11 +195,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                     println!("{}", format_tool_output(&test_result));
                 }
 
-                tool_results.push_str(&build_tool_context(
-                    Some(&lint_result),
-                    Some(&test_result),
-                    None,
-                ));
+                tool_results.push_str(&build_tool_context(Some(&lint_result), Some(&test_result), None));
             }
 
             let new_hash = circuit_breaker_hash(&tool_results);

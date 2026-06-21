@@ -46,13 +46,7 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     }
     // Destructive device writes
     if normalized.starts_with("dd ") && normalized.contains("of=") {
-        let of_targets = [
-            "/dev/sda",
-            "/dev/nvme",
-            "/dev/mmcblk",
-            "/dev/vda",
-            "/dev/hda",
-        ];
+        let of_targets = ["/dev/sda", "/dev/nvme", "/dev/mmcblk", "/dev/vda", "/dev/hda"];
         if of_targets.iter().any(|t| normalized.contains(t)) {
             return true;
         }
@@ -66,18 +60,16 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
         return true;
     }
     // Destructive wget/curl to pipe to shell
-    if (normalized.starts_with("wget ") || normalized.starts_with("curl "))
-        && normalized.contains("| sh")
-    {
+    if (normalized.starts_with("wget ") || normalized.starts_with("curl ")) && normalized.contains("| sh") {
         return true;
     }
     // rm -rf targeting root or common critical dirs
     let words: Vec<&str> = normalized.split_whitespace().collect();
     if words.len() >= 3
         && (words[0] == "rm" || words[0] == "rmdir")
-        && words.iter().any(|w| {
-            *w == "/" || *w == "/." || *w == "/*" || *w == "/etc" || *w == "/boot" || *w == "/dev"
-        })
+        && words
+            .iter()
+            .any(|w| *w == "/" || *w == "/." || *w == "/*" || *w == "/etc" || *w == "/boot" || *w == "/dev")
     {
         return true;
     }
@@ -88,17 +80,7 @@ pub(crate) fn looks_like_shell_command(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or_default();
     matches!(
         first,
-        "ls" | "pwd"
-            | "cd"
-            | "mkdir"
-            | "cp"
-            | "mv"
-            | "touch"
-            | "cat"
-            | "echo"
-            | "rm"
-            | "find"
-            | "grep"
+        "ls" | "pwd" | "cd" | "mkdir" | "cp" | "mv" | "touch" | "cat" | "echo" | "rm" | "find" | "grep"
     )
 }
 

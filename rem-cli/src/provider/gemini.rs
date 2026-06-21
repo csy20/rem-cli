@@ -88,25 +88,13 @@ impl ProviderBackend for GeminiBackend {
             .models
             .unwrap_or_default()
             .into_iter()
-            .map(|m| {
-                m.name
-                    .strip_prefix("models/")
-                    .unwrap_or(&m.name)
-                    .to_string()
-            })
+            .map(|m| m.name.strip_prefix("models/").unwrap_or(&m.name).to_string())
             .filter(|n| n.contains("gemini"))
             .collect())
     }
 
-    async fn complete_json(
-        &self,
-        provider: &Provider,
-        user_prompt: &str,
-    ) -> Result<crate::ModelReply> {
-        let url = self.gemini_url(
-            provider,
-            &format!("/models/{}:generateContent", provider.model),
-        );
+    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
+        let url = self.gemini_url(provider, &format!("/models/{}:generateContent", provider.model));
         let payload = json!({
             "contents": [{"parts": [{"text": format!("{}\n\nUser request:\n{}\n\nReturn JSON only.", provider.system_prompt, user_prompt)}]}],
             "generationConfig": {
@@ -271,10 +259,8 @@ impl ProviderBackend for GeminiBackend {
         }
 
         if !tool_specs.is_empty() {
-            let declarations: Vec<serde_json::Value> = tool_specs
-                .iter()
-                .map(|t| t.to_gemini_function_declaration())
-                .collect();
+            let declarations: Vec<serde_json::Value> =
+                tool_specs.iter().map(|t| t.to_gemini_function_declaration()).collect();
             payload["tools"] = json!([{"function_declarations": declarations}]);
         }
 
@@ -312,12 +298,11 @@ impl ProviderBackend for GeminiBackend {
                                             let name = fc.name.unwrap_or_default();
                                             let args = fc.args.unwrap_or(serde_json::Value::Null);
                                             if !name.is_empty() {
-                                                early_tool_response =
-                                                    Some(ToolResponse::ToolCalls(vec![ToolCall {
-                                                        id: format!("fc_{}", name),
-                                                        name,
-                                                        arguments: args,
-                                                    }]));
+                                                early_tool_response = Some(ToolResponse::ToolCalls(vec![ToolCall {
+                                                    id: format!("fc_{}", name),
+                                                    name,
+                                                    arguments: args,
+                                                }]));
                                                 return Ok(false);
                                             }
                                         }
@@ -329,10 +314,7 @@ impl ProviderBackend for GeminiBackend {
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!(
-                    "response too large ({} bytes)",
-                    super::MAX_RESPONSE_BYTES
-                ));
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
             }
             Ok(true)
         })

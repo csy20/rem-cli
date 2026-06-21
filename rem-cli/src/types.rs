@@ -117,10 +117,7 @@ pub(crate) fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
             continue;
         }
 
-        if let Some(name) = trimmed
-            .strip_prefix("### ")
-            .or_else(|| trimmed.strip_prefix("## "))
-        {
+        if let Some(name) = trimmed.strip_prefix("### ").or_else(|| trimmed.strip_prefix("## ")) {
             current_name = name.trim().to_string();
             continue;
         }

@@ -25,12 +25,7 @@ pub struct Cli {
     pub provider: Option<String>,
     #[arg(long, global = true, help = "API key for OpenAI-compatible providers")]
     pub api_key: Option<String>,
-    #[arg(
-        long,
-        short = 'v',
-        global = true,
-        help = "Verbose output (show raw model responses)"
-    )]
+    #[arg(long, short = 'v', global = true, help = "Verbose output (show raw model responses)")]
     pub verbose: bool,
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -62,11 +57,7 @@ pub struct AskArgs {
     pub prompt: String,
     #[arg(long, help = "Optional file for context")]
     pub file: Option<PathBuf>,
-    #[arg(
-        long,
-        default_value = "text",
-        help = "Output format: text, json, json-pretty"
-    )]
+    #[arg(long, default_value = "text", help = "Output format: text, json, json-pretty")]
     pub format: String,
 }
 
@@ -106,10 +97,7 @@ pub struct IndexArgs {
     pub dir: Option<PathBuf>,
     #[arg(long, help = "Preview what would be indexed without writing any files")]
     pub dry_run: bool,
-    #[arg(
-        long,
-        help = "Compute embeddings (Ollama required) for semantic retrieval"
-    )]
+    #[arg(long, help = "Compute embeddings (Ollama required) for semantic retrieval")]
     pub embeddings: bool,
 }
 

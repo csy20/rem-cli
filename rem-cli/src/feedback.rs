@@ -57,12 +57,7 @@ impl FeedbackTracker {
     }
 
     /// Records a user correction to intent classification.
-    pub fn record_correction(
-        &mut self,
-        input: &str,
-        classified_as: &TaskIntent,
-        correct: &TaskIntent,
-    ) {
+    pub fn record_correction(&mut self, input: &str, classified_as: &TaskIntent, correct: &TaskIntent) {
         let classified_str = intent_to_str(classified_as);
         let correct_str = intent_to_str(correct);
 
@@ -91,9 +86,7 @@ impl FeedbackTracker {
             });
             if self.store.entries.len() > 500 {
                 self.store.entries.sort_by_key(|e| e.timestamp);
-                self.store
-                    .entries
-                    .drain(0..(self.store.entries.len() - 500));
+                self.store.entries.drain(0..(self.store.entries.len() - 500));
             }
         }
 

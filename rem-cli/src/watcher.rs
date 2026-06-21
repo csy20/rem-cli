@@ -134,11 +134,7 @@ mod tests {
             assert!(should_reindex(&make(kind)));
         }
 
-        for kind in [
-            EventKind::Access(AccessKind::Any),
-            EventKind::Any,
-            EventKind::Other,
-        ] {
+        for kind in [EventKind::Access(AccessKind::Any), EventKind::Any, EventKind::Other] {
             assert!(!should_reindex(&make(kind)));
         }
     }

@@ -105,8 +105,7 @@ impl ProviderBackend for AnthropicBackend {
         if !resp.status().is_success() {
             return Err(anyhow!("Anthropic API unreachable"));
         }
-        let parsed: AnthropicModelsResponse =
-            resp.json().await.context("invalid Anthropic response")?;
+        let parsed: AnthropicModelsResponse = resp.json().await.context("invalid Anthropic response")?;
         Ok(parsed
             .data
             .unwrap_or_default()
@@ -174,11 +173,7 @@ impl ProviderBackend for AnthropicBackend {
         provider.stream_anthropic_sse(resp).await
     }
 
-    async fn complete_json(
-        &self,
-        provider: &Provider,
-        user_prompt: &str,
-    ) -> Result<crate::ModelReply> {
+    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
         let key = provider.api_key.as_deref().unwrap_or("");
         let base = provider.base_url.trim_end_matches('/');
         let url = format!("{}/v1/messages", base);
@@ -253,9 +248,7 @@ impl ProviderBackend for AnthropicBackend {
             "stream": true
         });
 
-        if provider.reasoning_config.enabled
-            && crate::reasoning::is_reasoning_model(&provider.model)
-        {
+        if provider.reasoning_config.enabled && crate::reasoning::is_reasoning_model(&provider.model) {
             payload["thinking"] = json!({
                 "type": "enabled",
                 "budget_tokens": provider.reasoning_config.thinking_budget
@@ -302,8 +295,7 @@ impl ProviderBackend for AnthropicBackend {
             messages.push(json!({"role": "user", "content": user_prompt}));
         }
 
-        let tools: Vec<serde_json::Value> =
-            tool_specs.iter().map(|t| t.to_anthropic_tool()).collect();
+        let tools: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_anthropic_tool()).collect();
 
         let system_with_cache = json!([
             {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
@@ -352,9 +344,7 @@ impl ProviderBackend for AnthropicBackend {
                                     let idx = chunk.index.unwrap_or(0);
                                     let id = block.id.clone().unwrap_or_default();
                                     let name = block.name.clone().unwrap_or_default();
-                                    if let Some(pos) =
-                                        tool_calls.iter().position(|(i, _, _, _)| *i == idx)
-                                    {
+                                    if let Some(pos) = tool_calls.iter().position(|(i, _, _, _)| *i == idx) {
                                         tool_calls[pos].1 = id;
                                         tool_calls[pos].2 = name;
                                     } else {
@@ -372,9 +362,7 @@ impl ProviderBackend for AnthropicBackend {
                                 if delta.delta_type.as_deref() == Some("input_json_delta") {
                                     let idx = chunk.index.unwrap_or(0);
                                     if let Some(ref partial) = delta.partial_json {
-                                        if let Some(pos) =
-                                            tool_calls.iter().position(|(i, _, _, _)| *i == idx)
-                                        {
+                                        if let Some(pos) = tool_calls.iter().position(|(i, _, _, _)| *i == idx) {
                                             tool_calls[pos].3.push_str(partial);
                                         }
                                     }
@@ -388,10 +376,7 @@ impl ProviderBackend for AnthropicBackend {
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!(
-                    "response too large ({} bytes)",
-                    super::MAX_RESPONSE_BYTES
-                ));
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
             }
             Ok(true)
         })

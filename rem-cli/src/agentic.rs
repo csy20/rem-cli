@@ -113,13 +113,11 @@ pub fn run_test(path: &str) -> ToolResult {
 
     let result = match target {
         LintTarget::Rust => Command::new("cargo").args(["test", "--quiet"]).output(),
-        LintTarget::Python => Command::new("python3")
-            .args(["-m", "pytest", path, "-q"])
-            .output(),
+        LintTarget::Python => Command::new("python3").args(["-m", "pytest", path, "-q"]).output(),
         LintTarget::Go => Command::new("go").args(["test", "./..."]).output(),
-        LintTarget::JavaScript | LintTarget::TypeScript => Command::new("npx")
-            .args(["jest", path, "--no-coverage"])
-            .output(),
+        LintTarget::JavaScript | LintTarget::TypeScript => {
+            Command::new("npx").args(["jest", path, "--no-coverage"]).output()
+        }
         LintTarget::Css | LintTarget::Html | LintTarget::Unknown => {
             return ToolResult {
                 tool_name: "test".into(),
@@ -232,12 +230,7 @@ pub fn build_tool_context(
 }
 
 /// Builds the agentic loop prompt with iteration tracking and tool output.
-pub fn build_agentic_prompt(
-    task: &str,
-    tool_output: &str,
-    iteration: usize,
-    max_iterations: usize,
-) -> String {
+pub fn build_agentic_prompt(task: &str, tool_output: &str, iteration: usize, max_iterations: usize) -> String {
     format!(
         r##"You are REM in autonomous agent mode (iteration {}/{}).
 
@@ -329,10 +322,7 @@ mod tests {
     fn extract_goal_failed_signal() {
         let resp = "Tried approach A\nGOAL_FAILED: Compilation error persists";
         let result = extract_goal_signal(resp);
-        assert_eq!(
-            result,
-            Some((false, "Compilation error persists".to_string()))
-        );
+        assert_eq!(result, Some((false, "Compilation error persists".to_string())));
     }
 
     #[test]

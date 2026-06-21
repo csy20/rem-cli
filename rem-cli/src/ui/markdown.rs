@@ -44,12 +44,7 @@ pub fn render_welcome(model: &str, mode: &str, version: &str) -> Vec<String> {
     let bot = format!(
         " {} {} {}",
         theme::paint(&t, "accent", "\u{2570}", true),
-        theme::paint(
-            &t,
-            "text_faint",
-            &format!("\u{2500}{}", "\u{2500}".repeat(46)),
-            false
-        ),
+        theme::paint(&t, "text_faint", &format!("\u{2500}{}", "\u{2500}".repeat(46)), false),
         cmd_hint,
     );
     lines.push(bot);

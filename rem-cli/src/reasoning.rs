@@ -107,10 +107,7 @@ mod tests {
         assert_eq!(ReasoningEffort::from_str("low"), ReasoningEffort::Low);
         assert_eq!(ReasoningEffort::from_str("medium"), ReasoningEffort::Medium);
         assert_eq!(ReasoningEffort::from_str("high"), ReasoningEffort::High);
-        assert_eq!(
-            ReasoningEffort::from_str("unknown"),
-            ReasoningEffort::Medium
-        );
+        assert_eq!(ReasoningEffort::from_str("unknown"), ReasoningEffort::Medium);
     }
 
     #[test]

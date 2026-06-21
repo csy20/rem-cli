@@ -15,8 +15,7 @@ const DEFAULT_THEME_NAME: &str = "GHOST";
 
 /// Returns true if NO_COLOR or CLICOLOR=0 is set (disables ANSI output).
 fn no_color() -> bool {
-    std::env::var("NO_COLOR").is_ok()
-        || std::env::var("CLICOLOR").map(|v| v == "0").unwrap_or(false)
+    std::env::var("NO_COLOR").is_ok() || std::env::var("CLICOLOR").map(|v| v == "0").unwrap_or(false)
 }
 
 /// Custom theme definition for loading from TOML files.
@@ -46,8 +45,7 @@ struct CustomThemeDef {
     code_bg: String,
 }
 
-static CUSTOM_THEMES: LazyLock<Mutex<BTreeMap<String, Theme>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+static CUSTOM_THEMES: LazyLock<Mutex<BTreeMap<String, Theme>>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static CUSTOM_THEMES_LOADED: AtomicBool = AtomicBool::new(false);
 
 /// Loads a custom theme from a TOML file.
@@ -111,49 +109,49 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
     t.insert(
         "GHOST",
         Theme::build(
-            "GHOST", "#030303", "#0d0d0d", "#181818", "#e8e8e8", "#888888", "#7a8aa0", "#444444",
-            "#222222", "#1a1a1a", "#2a2a2a", "#e8e8e8", "#111111", "#1e1e1e", "#333333", "#1e1e1e",
-            "#141414", "#e8e8e8", "#888888", "#d87070", "#7ac890", "#0a0a0a",
+            "GHOST", "#030303", "#0d0d0d", "#181818", "#e8e8e8", "#888888", "#7a8aa0", "#444444", "#222222", "#1a1a1a",
+            "#2a2a2a", "#e8e8e8", "#111111", "#1e1e1e", "#333333", "#1e1e1e", "#141414", "#e8e8e8", "#888888",
+            "#d87070", "#7ac890", "#0a0a0a",
         ),
     );
     t.insert(
         "PHOSPHOR",
         Theme::build(
-            "PHOSPHOR", "#030a04", "#050e06", "#0d2010", "#3aff5a", "#2a8040", "#3acfa0",
-            "#1a4020", "#0d2010", "#061409", "#0d2a10", "#3aff5a", "#061409", "#0d2010", "#1a4020",
-            "#0d2010", "#0a1e0c", "#3aff5a", "#3aff5a", "#ff6a6a", "#3aff5a", "#050e06",
+            "PHOSPHOR", "#030a04", "#050e06", "#0d2010", "#3aff5a", "#2a8040", "#3acfa0", "#1a4020", "#0d2010",
+            "#061409", "#0d2a10", "#3aff5a", "#061409", "#0d2010", "#1a4020", "#0d2010", "#0a1e0c", "#3aff5a",
+            "#3aff5a", "#ff6a6a", "#3aff5a", "#050e06",
         ),
     );
     t.insert(
         "MIST",
         Theme::build(
-            "MIST", "#0c0f14", "#0f1420", "#1a2538", "#7ba8d4", "#4a6a90", "#8aa0c8", "#2a3a55",
-            "#1a2538", "#102040", "#1a3060", "#7ba8d4", "#0f1420", "#1a2538", "#2a3a55", "#1a2538",
-            "#102040", "#7ba8d4", "#7ba8d4", "#d49a9a", "#9ac8a8", "#0a0f18",
+            "MIST", "#0c0f14", "#0f1420", "#1a2538", "#7ba8d4", "#4a6a90", "#8aa0c8", "#2a3a55", "#1a2538", "#102040",
+            "#1a3060", "#7ba8d4", "#0f1420", "#1a2538", "#2a3a55", "#1a2538", "#102040", "#7ba8d4", "#7ba8d4",
+            "#d49a9a", "#9ac8a8", "#0a0f18",
         ),
     );
     t.insert(
         "PAPER",
         Theme::build(
-            "PAPER", "#f5f2eb", "#ede8df", "#d0cabb", "#3a3228", "#5a5248", "#6a6048", "#a09888",
-            "#c8c0b0", "#e0d8cc", "#c8c0b0", "#3a3228", "#e5e0d5", "#d0cabb", "#a09888", "#c8c0b0",
-            "#ddd8cc", "#3a3228", "#3a3228", "#a04848", "#4a7858", "#e8e4d8",
+            "PAPER", "#f5f2eb", "#ede8df", "#d0cabb", "#3a3228", "#5a5248", "#6a6048", "#a09888", "#c8c0b0", "#e0d8cc",
+            "#c8c0b0", "#3a3228", "#e5e0d5", "#d0cabb", "#a09888", "#c8c0b0", "#ddd8cc", "#3a3228", "#3a3228",
+            "#a04848", "#4a7858", "#e8e4d8",
         ),
     );
     t.insert(
         "SAKURA",
         Theme::build(
-            "SAKURA", "#1a1018", "#24151e", "#3a1e30", "#ff8cbc", "#c86090", "#e8a0c0", "#805870",
-            "#503848", "#3a1e30", "#4a2840", "#ffb0d0", "#24151e", "#3a1e30", "#805870", "#3a1e30",
-            "#2a1420", "#ff8cbc", "#ff8cbc", "#d84860", "#70b890", "#1a0e14",
+            "SAKURA", "#1a1018", "#24151e", "#3a1e30", "#ff8cbc", "#c86090", "#e8a0c0", "#805870", "#503848",
+            "#3a1e30", "#4a2840", "#ffb0d0", "#24151e", "#3a1e30", "#805870", "#3a1e30", "#2a1420", "#ff8cbc",
+            "#ff8cbc", "#d84860", "#70b890", "#1a0e14",
         ),
     );
     t.insert(
         "EMBER",
         Theme::build(
-            "EMBER", "#14100a", "#1e1810", "#302818", "#ff8833", "#cc6620", "#eeaa44", "#887050",
-            "#504030", "#302818", "#403020", "#ffbb88", "#1e1810", "#302818", "#887050", "#302818",
-            "#201810", "#ff8833", "#ff8833", "#cc3333", "#66aa44", "#0e0c08",
+            "EMBER", "#14100a", "#1e1810", "#302818", "#ff8833", "#cc6620", "#eeaa44", "#887050", "#504030", "#302818",
+            "#403020", "#ffbb88", "#1e1810", "#302818", "#887050", "#302818", "#201810", "#ff8833", "#ff8833",
+            "#cc3333", "#66aa44", "#0e0c08",
         ),
     );
     t
@@ -364,18 +362,12 @@ pub fn by_name(name: &str) -> Theme {
     if let Some(t) = custom.get(&upper) {
         return t.clone();
     }
-    THEMES
-        .get(DEFAULT_THEME_NAME)
-        .cloned()
-        .expect("default theme missing")
+    THEMES.get(DEFAULT_THEME_NAME).cloned().expect("default theme missing")
 }
 
 /// Returns the currently active theme.
 pub fn active() -> Arc<Theme> {
-    ACTIVE_THEME
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone()
+    ACTIVE_THEME.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Sets the active theme by name. Returns false if the name is unknown.
@@ -493,12 +485,7 @@ pub fn paint_rail_empty(t: &Theme) -> String {
 /// Paints a section header with rail styling.
 pub fn paint_rail_header(t: &Theme, title: &str) -> String {
     let rail = paint(t, "accent", "\u{258C}", true);
-    let title_text = paint(
-        t,
-        "accent",
-        &format!("\u{2500}\u{2500} {title} \u{2500}\u{2500}"),
-        true,
-    );
+    let title_text = paint(t, "accent", &format!("\u{2500}\u{2500} {title} \u{2500}\u{2500}"), true);
     format!("{rail}  {title_text}")
 }
 

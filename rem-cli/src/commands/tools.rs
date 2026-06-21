@@ -14,12 +14,7 @@ use std::fs;
 use std::path::Path;
 
 /// Performs a web search (`/search` command).
-pub(crate) async fn handle_search(
-    client: &Provider,
-    session: &mut ChatSession,
-    cfg: &AppConfig,
-    query: &str,
-) {
+pub(crate) async fn handle_search(client: &Provider, session: &mut ChatSession, cfg: &AppConfig, query: &str) {
     let t = ui::theme::active();
     println!(
         "{} {} searching the web...",
@@ -34,11 +29,7 @@ pub(crate) async fn handle_search(
     match perform_web_search(&client.client, query, search_provider.as_ref()).await {
         Ok(results) => {
             if results.is_empty() {
-                println!(
-                    "{} no results found for: {}",
-                    ui::theme::paint_warning(&t, "│"),
-                    query
-                );
+                println!("{} no results found for: {}", ui::theme::paint_warning(&t, "│"), query);
             } else {
                 println!(
                     "{} {} results for: {}",
@@ -51,11 +42,7 @@ pub(crate) async fn handle_search(
             }
         }
         Err(e) => {
-            println!(
-                "{} {}",
-                ui::theme::paint_error_label(&t, "│  search failed:"),
-                e
-            );
+            println!("{} {}", ui::theme::paint_error_label(&t, "│  search failed:"), e);
         }
     }
 }
@@ -64,16 +51,10 @@ pub(crate) async fn handle_search(
 pub(crate) async fn handle_explain(client: &Provider, session: &mut ChatSession, text: &str) {
     let t = ui::theme::active();
     if text.trim().is_empty() {
-        println!(
-            "{} usage: /explain <code snippet>",
-            ui::theme::paint_warning(&t, "│")
-        );
+        println!("{} usage: /explain <code snippet>", ui::theme::paint_warning(&t, "│"));
         return;
     }
-    println!(
-        "{} explaining...",
-        ui::theme::paint(&t, "accent", "\u{258C}", true)
-    );
+    println!("{} explaining...", ui::theme::paint(&t, "accent", "\u{258C}", true));
     let prompt = format!(
         "Explain what the following code does in clear, plain language. \
          Be concise but thorough. Cover: purpose, key components, control flow. \
@@ -101,21 +82,13 @@ pub(crate) async fn handle_test(client: &Provider, session: &mut ChatSession, pa
     let t = ui::theme::active();
     let file_path = Path::new(path.trim());
     if !file_path.exists() {
-        println!(
-            "{} file not found: {}",
-            ui::theme::paint_warning(&t, "│"),
-            path
-        );
+        println!("{} file not found: {}", ui::theme::paint_warning(&t, "│"), path);
         return;
     }
     let content = match fs::read_to_string(file_path) {
         Ok(c) => c,
         Err(e) => {
-            println!(
-                "{} cannot read file: {}",
-                ui::theme::paint_error_label(&t, "│"),
-                e
-            );
+            println!("{} cannot read file: {}", ui::theme::paint_error_label(&t, "│"), e);
             return;
         }
     };
@@ -159,21 +132,13 @@ pub(crate) async fn handle_refactor(client: &Provider, session: &mut ChatSession
     let t = ui::theme::active();
     let file_path = Path::new(path.trim());
     if !file_path.exists() {
-        println!(
-            "{} file not found: {}",
-            ui::theme::paint_warning(&t, "│"),
-            path
-        );
+        println!("{} file not found: {}", ui::theme::paint_warning(&t, "│"), path);
         return;
     }
     let content = match fs::read_to_string(file_path) {
         Ok(c) => c,
         Err(e) => {
-            println!(
-                "{} cannot read file: {}",
-                ui::theme::paint_error_label(&t, "│"),
-                e
-            );
+            println!("{} cannot read file: {}", ui::theme::paint_error_label(&t, "│"), e);
             return;
         }
     };
@@ -211,11 +176,7 @@ pub(crate) fn handle_lint(_session: &mut ChatSession, path: &str) {
     let t = ui::theme::active();
     let file_path = Path::new(path);
     if !file_path.exists() {
-        println!(
-            "{} file not found: {}",
-            ui::theme::paint_warning(&t, "\u{258C}"),
-            path
-        );
+        println!("{} file not found: {}", ui::theme::paint_warning(&t, "\u{258C}"), path);
         return;
     }
     println!(

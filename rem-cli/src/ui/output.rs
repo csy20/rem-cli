@@ -25,8 +25,8 @@ impl SpinnerGuard {
         let r = running.clone();
         let handle = tokio::spawn(async move {
             let chars = [
-                "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}",
-                "\u{2827}", "\u{2807}", "\u{280F}",
+                "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
+                "\u{2807}", "\u{280F}",
             ];
             let mut i = 0usize;
             while r.load(Ordering::Relaxed) {
@@ -101,19 +101,10 @@ pub fn print_reply(reply: &ModelReply, newline: bool) {
                 theme::println(&format!(
                     "    {}  {}",
                     icon,
-                    theme::paint(
-                        &t,
-                        "accent_dim",
-                        &format!("(unnamed) {} bytes", f.content.len()),
-                        false
-                    )
+                    theme::paint(&t, "accent_dim", &format!("(unnamed) {} bytes", f.content.len()), false)
                 ));
             } else {
-                theme::println(&format!(
-                    "    {}  {}",
-                    icon,
-                    theme::paint(&t, "accent", &f.path, false)
-                ));
+                theme::println(&format!("    {}  {}", icon, theme::paint(&t, "accent", &f.path, false)));
             }
         }
         theme::println(&format!(
@@ -123,10 +114,7 @@ pub fn print_reply(reply: &ModelReply, newline: bool) {
     } else if !reply.code.trim().is_empty() {
         theme::println(&format!("  {}", theme::paint_success(&t, "code:")));
         for code_line in reply.code.lines() {
-            theme::println(&format!(
-                "    {}",
-                theme::paint(&t, "accent_dim", code_line, false)
-            ));
+            theme::println(&format!("    {}", theme::paint(&t, "accent_dim", code_line, false)));
         }
         theme::println(&format!(
             "    {}",
@@ -134,10 +122,7 @@ pub fn print_reply(reply: &ModelReply, newline: bool) {
         ));
     }
     if !reply.commands.is_empty() {
-        theme::println(&format!(
-            "  {}",
-            theme::paint(&t, "accent", "commands:", true)
-        ));
+        theme::println(&format!("  {}", theme::paint(&t, "accent", "commands:", true)));
         for cmd in sanitize_commands(&reply.commands) {
             if is_command_blocked(cmd) {
                 theme::println(&format!(
@@ -145,18 +130,12 @@ pub fn print_reply(reply: &ModelReply, newline: bool) {
                     theme::paint_error(&t, &format!("[blocked] {}", cmd))
                 ));
             } else {
-                theme::println(&format!(
-                    "    $ {}",
-                    theme::paint(&t, "accent_dim", cmd, false)
-                ));
+                theme::println(&format!("    $ {}", theme::paint(&t, "accent_dim", cmd, false)));
             }
         }
     }
     if !reply.checks.is_empty() {
-        theme::println(&format!(
-            "  {}",
-            theme::paint(&t, "accent", "checks:", true)
-        ));
+        theme::println(&format!("  {}", theme::paint(&t, "accent", "checks:", true)));
         for item in &reply.checks {
             theme::println(&format!(
                 "    {}",

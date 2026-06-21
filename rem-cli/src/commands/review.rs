@@ -56,15 +56,8 @@ pub(crate) fn handle_diff(session: &ChatSession) {
                     ui::theme::paint_dim(&t, "(unchanged)")
                 );
             } else {
-                let added = f
-                    .content
-                    .lines()
-                    .count()
-                    .saturating_sub(existing.lines().count());
-                let removed = existing
-                    .lines()
-                    .count()
-                    .saturating_sub(f.content.lines().count());
+                let added = f.content.lines().count().saturating_sub(existing.lines().count());
+                let removed = existing.lines().count().saturating_sub(f.content.lines().count());
                 println!(
                     "{} {} {}",
                     ui::theme::paint_rail_empty(&t),
@@ -128,10 +121,7 @@ pub(crate) fn handle_diff(session: &ChatSession) {
                 ui::theme::paint_rail_empty(&t),
                 icon,
                 ui::theme::paint_bright(&t, &f.path.to_string()),
-                ui::theme::paint_success_label(
-                    &t,
-                    &format!("(new file) {} bytes", f.content.len())
-                )
+                ui::theme::paint_success_label(&t, &format!("(new file) {} bytes", f.content.len()))
             );
         }
     }
@@ -165,10 +155,7 @@ pub(crate) fn handle_diff(session: &ChatSession) {
 pub(crate) async fn handle_review(client: &Provider, session: &mut ChatSession) {
     let t = ui::theme::active();
     if session.last_files.is_empty() {
-        println!(
-            "{} no generated code to review",
-            ui::theme::paint_warning(&t, "│")
-        );
+        println!("{} no generated code to review", ui::theme::paint_warning(&t, "│"));
         return;
     }
 
@@ -207,11 +194,14 @@ pub(crate) async fn handle_review(client: &Provider, session: &mut ChatSession) 
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         session.last_files.len()
     );
-    match client.complete_chat_stream(
-        &review_prompt,
-        "[MODE: CHAT] You are a senior code reviewer. Review the code critically. Use clear markdown. Be specific.",
-        "",
-    ).await {
+    match client
+        .complete_chat_stream(
+            &review_prompt,
+            "[MODE: CHAT] You are a senior code reviewer. Review the code critically. Use clear markdown. Be specific.",
+            "",
+        )
+        .await
+    {
         Ok(response) => {
             println!();
             println!("{}", response);

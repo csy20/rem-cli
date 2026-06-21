@@ -30,11 +30,7 @@ fn write_file_atomic(abs_path: &Path, content: &str, t: &crate::ui::theme::Theme
             }
         }
         Err(e) => {
-            eprintln!(
-                "  {} failed: {}",
-                ui::theme::paint_error_label(t, "\u{2717}"),
-                e
-            );
+            eprintln!("  {} failed: {}", ui::theme::paint_error_label(t, "\u{2717}"), e);
             let _ = fs::remove_file(&tmp);
             false
         }
@@ -155,9 +151,7 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
             session.last_code.len()
         );
         if session.last_files_written.len() >= 5 {
-            session
-                .undo_stack
-                .push(std::mem::take(&mut session.last_files_written));
+            session.undo_stack.push(std::mem::take(&mut session.last_files_written));
             if session.undo_stack.len() > 10 {
                 session.undo_stack.remove(0);
             }
@@ -212,10 +206,7 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     println!(
         "{} {}",
         ui::theme::paint_rail_empty(&t),
-        ui::theme::paint_bright(
-            &t,
-            &format!("Plan: creating {} file(s)", safe_entries.len())
-        ),
+        ui::theme::paint_bright(&t, &format!("Plan: creating {} file(s)", safe_entries.len())),
     );
     for (f, abs_path) in &safe_entries {
         let icon = file_icon(&f.path);
@@ -239,10 +230,7 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     println!(
         "{} {} {}",
         ui::theme::paint(&t, "accent_info", "\u{2502}  ?", true),
-        ui::theme::paint_bright(
-            &t,
-            &format!("Write all {} files? [Y/n]", safe_entries.len())
-        ),
+        ui::theme::paint_bright(&t, &format!("Write all {} files? [Y/n]", safe_entries.len())),
         ui::theme::paint_dim(&t, "(press Enter to confirm)")
     );
     println!(
@@ -309,9 +297,7 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
 
     if !written.is_empty() {
         if !session.last_files_written.is_empty() {
-            session
-                .undo_stack
-                .push(std::mem::take(&mut session.last_files_written));
+            session.undo_stack.push(std::mem::take(&mut session.last_files_written));
             if session.undo_stack.len() > 10 {
                 session.undo_stack.remove(0);
             }
@@ -336,8 +322,7 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
         return;
     }
 
-    let total = session.last_files_written.len()
-        + session.undo_stack.iter().map(|v| v.len()).sum::<usize>();
+    let total = session.last_files_written.len() + session.undo_stack.iter().map(|v| v.len()).sum::<usize>();
     println!(
         "{} {}",
         ui::theme::paint(&t, "accent_info", "\u{258C}  ?", true),
@@ -372,9 +357,7 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
         for entry in batch {
             if entry.original.is_some() {
                 // Restore original content
-                if let Err(e) =
-                    fs::write(&entry.path, entry.original.as_deref().unwrap_or_default())
-                {
+                if let Err(e) = fs::write(&entry.path, entry.original.as_deref().unwrap_or_default()) {
                     println!(
                         "  {} failed to restore {}: {}",
                         ui::theme::paint_error_label(&t, "\u{258C}"),
@@ -493,10 +476,7 @@ pub(crate) fn print_last_files(session: &ChatSession) {
         println!("{}", highlighted);
         println!("{}", ui::theme::paint_dim(&t, "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}"));
     } else {
-        println!(
-            "  {} No code from last response.",
-            ui::theme::paint_warning(&t, "!")
-        );
+        println!("  {} No code from last response.", ui::theme::paint_warning(&t, "!"));
     }
 }
 
@@ -504,11 +484,7 @@ pub(crate) fn print_last_files(session: &ChatSession) {
 pub(crate) fn handle_copy(session: &ChatSession, n: usize) {
     let t = ui::theme::active();
     let response = if n == 1 || session.history.is_empty() {
-        session
-            .history
-            .last()
-            .map(|(_, a)| a.as_str())
-            .unwrap_or("")
+        session.history.last().map(|(_, a)| a.as_str()).unwrap_or("")
     } else {
         let total = session.history.len();
         if n > total {
@@ -519,18 +495,11 @@ pub(crate) fn handle_copy(session: &ChatSession, n: usize) {
             );
             return;
         }
-        session
-            .history
-            .get(total - n)
-            .map(|(_, a)| a.as_str())
-            .unwrap_or("")
+        session.history.get(total - n).map(|(_, a)| a.as_str()).unwrap_or("")
     };
 
     if response.is_empty() {
-        println!(
-            "{} nothing to copy",
-            ui::theme::paint_warning(&t, "\u{258C}")
-        );
+        println!("{} nothing to copy", ui::theme::paint_warning(&t, "\u{258C}"));
         return;
     }
 
@@ -538,10 +507,7 @@ pub(crate) fn handle_copy(session: &ChatSession, n: usize) {
 
     match copied {
         CopyResult::Success => {
-            println!(
-                "{} copied to console:",
-                ui::theme::paint_success_label(&t, "│ ✓")
-            );
+            println!("{} copied to console:", ui::theme::paint_success_label(&t, "│ ✓"));
             println!("{}", ui::theme::paint_rail_empty(&t));
             for line in response.lines().take(20) {
                 println!("{} {}", ui::theme::paint_rail_empty(&t), line);

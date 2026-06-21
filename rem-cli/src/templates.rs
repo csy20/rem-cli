@@ -709,9 +709,7 @@ mod tests {
 
     #[test]
     fn all_templates_return_non_empty_content() {
-        let names = [
-            "test", "test", "test", "test", "test", "test", "test", "test",
-        ];
+        let names = ["test", "test", "test", "test", "test", "test", "test", "test"];
         let templates: Vec<Vec<FileEntry>> = vec![
             template_bare(names[0]),
             template_portfolio(names[1]),
@@ -725,12 +723,7 @@ mod tests {
         for (i, files) in templates.iter().enumerate() {
             assert!(!files.is_empty(), "template {} returned empty", i);
             for f in files {
-                assert!(
-                    !f.content.is_empty(),
-                    "file {} is empty in template {}",
-                    f.path,
-                    i
-                );
+                assert!(!f.content.is_empty(), "file {} is empty in template {}", f.path, i);
             }
         }
     }

@@ -19,14 +19,9 @@ impl ProviderBackend for BedrockBackend {
         Ok(vec![provider.model.clone()])
     }
 
-    async fn complete_json(
-        &self,
-        provider: &Provider,
-        user_prompt: &str,
-    ) -> Result<crate::ModelReply> {
+    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
         let client = self.bedrock_client().await?;
-        let system_content =
-            aws_sdk_bedrockruntime::types::SystemContentBlock::Text(provider.system_prompt.clone());
+        let system_content = aws_sdk_bedrockruntime::types::SystemContentBlock::Text(provider.system_prompt.clone());
         let content = aws_sdk_bedrockruntime::types::ContentBlock::Text(format!(
             "{}\n\nReturn JSON only. Respond with a valid JSON object.",
             user_prompt
@@ -85,8 +80,7 @@ impl ProviderBackend for BedrockBackend {
         history: &str,
     ) -> Result<String> {
         let client = self.bedrock_client().await?;
-        let system_content =
-            aws_sdk_bedrockruntime::types::SystemContentBlock::Text(system_prompt.to_string());
+        let system_content = aws_sdk_bedrockruntime::types::SystemContentBlock::Text(system_prompt.to_string());
 
         let mut prompt = String::new();
         if !history.is_empty() {
@@ -126,9 +120,7 @@ impl ProviderBackend for BedrockBackend {
             }
             match event_stream.recv().await {
                 Ok(Some(ConverseStreamOutput::ContentBlockDelta(delta))) => {
-                    if let Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(t)) =
-                        delta.delta()
-                    {
+                    if let Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(t)) = delta.delta() {
                         full_text.push_str(t);
                     }
                 }
@@ -137,10 +129,7 @@ impl ProviderBackend for BedrockBackend {
                 Err(e) => return Err(anyhow!("Bedrock stream error: {}", e)),
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!(
-                    "response too large ({} bytes)",
-                    super::MAX_RESPONSE_BYTES
-                ));
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
             }
         }
         Ok(full_text)

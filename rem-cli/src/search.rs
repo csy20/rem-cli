@@ -9,8 +9,7 @@ use reqwest::Client;
 use std::sync::LazyLock;
 
 static RE_SEARCH_TITLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#)
-        .expect("invalid regex literal")
+    Regex::new(r#"class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>"#).expect("invalid regex literal")
 });
 static RE_SEARCH_SNIPPET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"class="result__snippet"[^>]*>([^<]*(?:<[^/>][^>]*>[^<]*</[^>]+>)*[^<]*)</a>"#)
@@ -39,30 +38,20 @@ pub(crate) async fn perform_web_search(
     provider: Option<&SearchProvider>,
 ) -> Result<Vec<SearchResult>> {
     match provider {
-        Some(SearchProvider::Google { api_key, cse_id }) => {
-            search_google(client, query, api_key, cse_id).await
-        }
+        Some(SearchProvider::Google { api_key, cse_id }) => search_google(client, query, api_key, cse_id).await,
         Some(SearchProvider::Bing { api_key }) => search_bing(client, query, api_key).await,
         _ => search_ddg(client, query).await,
     }
 }
 
-async fn search_google(
-    client: &Client,
-    query: &str,
-    api_key: &str,
-    cse_id: &str,
-) -> Result<Vec<SearchResult>> {
+async fn search_google(client: &Client, query: &str, api_key: &str, cse_id: &str) -> Result<Vec<SearchResult>> {
     let resp = client
         .get("https://www.googleapis.com/customsearch/v1")
         .query(&[("key", api_key), ("cx", cse_id), ("q", query), ("num", "8")])
         .send()
         .await
         .context("Google search request failed")?;
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .context("failed to parse Google search response")?;
+    let body: serde_json::Value = resp.json().await.context("failed to parse Google search response")?;
     let mut results = Vec::new();
     if let Some(items) = body["items"].as_array() {
         for item in items {
@@ -70,11 +59,7 @@ async fn search_google(
             let snippet = item["snippet"].as_str().unwrap_or("").to_string();
             let url = item["link"].as_str().unwrap_or("").to_string();
             if !title.is_empty() {
-                results.push(SearchResult {
-                    title,
-                    snippet,
-                    url,
-                });
+                results.push(SearchResult { title, snippet, url });
             }
         }
     }
@@ -89,10 +74,7 @@ async fn search_bing(client: &Client, query: &str, api_key: &str) -> Result<Vec<
         .send()
         .await
         .context("Bing search request failed")?;
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .context("failed to parse Bing search response")?;
+    let body: serde_json::Value = resp.json().await.context("failed to parse Bing search response")?;
     let mut results = Vec::new();
     if let Some(web_pages) = body["webPages"]["value"].as_array() {
         for item in web_pages {
@@ -100,11 +82,7 @@ async fn search_bing(client: &Client, query: &str, api_key: &str) -> Result<Vec<
             let snippet = item["snippet"].as_str().unwrap_or("").to_string();
             let url = item["url"].as_str().unwrap_or("").to_string();
             if !title.is_empty() {
-                results.push(SearchResult {
-                    title,
-                    snippet,
-                    url,
-                });
+                results.push(SearchResult { title, snippet, url });
             }
         }
     }
@@ -119,10 +97,7 @@ async fn search_ddg(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
         .send()
         .await
         .context("web search request failed")?;
-    let html = resp
-        .text()
-        .await
-        .context("failed to read search response")?;
+    let html = resp.text().await.context("failed to read search response")?;
     Ok(parse_ddg_html(&html))
 }
 
@@ -131,14 +106,8 @@ fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
     let mut remaining = html;
     while results.len() < 8 {
         if let Some(cap) = RE_SEARCH_TITLE.captures(remaining) {
-            let url = cap
-                .get(1)
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default();
-            let title = cap
-                .get(2)
-                .map(|m| strip_html(m.as_str()))
-                .unwrap_or_default();
+            let url = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let title = cap.get(2).map(|m| strip_html(m.as_str())).unwrap_or_default();
             let snippet_pos = cap.get(0).map(|m| m.end()).unwrap_or(0);
             let after_title = &remaining[snippet_pos..];
             let snippet = RE_SEARCH_SNIPPET
@@ -147,11 +116,7 @@ fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
                 .map(|m| strip_html(m.as_str()).trim().to_string())
                 .unwrap_or_default();
             if !title.is_empty() {
-                results.push(SearchResult {
-                    title,
-                    snippet,
-                    url,
-                });
+                results.push(SearchResult { title, snippet, url });
             }
             let advance = cap.get(0).map(|m| m.end()).unwrap_or(1);
             if advance >= remaining.len() {
@@ -223,29 +188,19 @@ pub fn print_search_results(results: &[SearchResult]) {
             ui::theme::paint_dim(&t, &r.url)
         );
         if !r.snippet.is_empty() {
-            println!(
-                "{}   {}",
-                ui::theme::paint(&t, "accent", "\u{258C}", true),
-                r.snippet
-            );
+            println!("{}   {}", ui::theme::paint(&t, "accent", "\u{258C}", true), r.snippet);
         }
         println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
     }
 }
 
 /// Builds a SearchProvider from config fields.
-pub(crate) fn provider_from_config(
-    provider_name: &str,
-    api_key: &str,
-    search_cse_id: &str,
-) -> Option<SearchProvider> {
+pub(crate) fn provider_from_config(provider_name: &str, api_key: &str, search_cse_id: &str) -> Option<SearchProvider> {
     match provider_name.to_lowercase().as_str() {
-        "google" if !api_key.is_empty() && !search_cse_id.is_empty() => {
-            Some(SearchProvider::Google {
-                api_key: api_key.to_string(),
-                cse_id: search_cse_id.to_string(),
-            })
-        }
+        "google" if !api_key.is_empty() && !search_cse_id.is_empty() => Some(SearchProvider::Google {
+            api_key: api_key.to_string(),
+            cse_id: search_cse_id.to_string(),
+        }),
         "bing" if !api_key.is_empty() => Some(SearchProvider::Bing {
             api_key: api_key.to_string(),
         }),

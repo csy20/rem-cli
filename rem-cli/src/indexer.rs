@@ -92,8 +92,7 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
                     }
                     // Rebuild inverted index if missing (e.g. migrated from v1)
                     if index.inverted_index.is_empty() {
-                        index.inverted_index =
-                            build_inverted_index(&index.chunks, &mut index.doc_freqs);
+                        index.inverted_index = build_inverted_index(&index.chunks, &mut index.doc_freqs);
                         index.num_chunks = index.chunks.len();
                     }
                     return Some(index);
@@ -133,10 +132,7 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
 }
 
 /// Builds the inverted index and computes document frequencies from chunks.
-fn build_inverted_index(
-    chunks: &[IndexChunk],
-    doc_freqs: &mut HashMap<String, u32>,
-) -> HashMap<String, Vec<usize>> {
+fn build_inverted_index(chunks: &[IndexChunk], doc_freqs: &mut HashMap<String, u32>) -> HashMap<String, Vec<usize>> {
     let mut inverted: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let mut seen_in_chunk: HashSet<String> = HashSet::new();
@@ -182,12 +178,7 @@ pub fn retrieve_relevant_chunks<'a>(
     const B: f64 = 0.75;
     let n = index.chunks.len() as f64;
     let avg_dl: f64 = if n > 0.0 {
-        index
-            .chunks
-            .iter()
-            .map(|c| c.content.len() as f64)
-            .sum::<f64>()
-            / n
+        index.chunks.iter().map(|c| c.content.len() as f64).sum::<f64>() / n
     } else {
         1.0
     };
@@ -235,13 +226,7 @@ pub fn retrieve_relevant_chunks<'a>(
                 if let Some(ref emb) = c.embedding {
                     let query_emb: Vec<f32> = q_words
                         .iter()
-                        .map(|w| {
-                            if c.content_lower.contains(w) {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        })
+                        .map(|w| if c.content_lower.contains(w) { 1.0 } else { 0.0 })
                         .collect();
                     if !query_emb.is_empty() && query_emb.len() == emb.len() {
                         let sim = cosine_similarity(emb, &query_emb);
@@ -309,9 +294,7 @@ pub fn build_retrieved_context(chunks: &[&IndexChunk], max_chars: usize) -> Stri
         used += add;
     }
     if out.len() > 30 {
-        out.push_str(
-            "[End of retrieved context — use @path for more specific files if needed]\n\n",
-        );
+        out.push_str("[End of retrieved context — use @path for more specific files if needed]\n\n");
     }
     out
 }
@@ -528,12 +511,7 @@ fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
         .to_lowercase();
 
     // Look at the first several lines for signature-like things
-    let head: String = content
-        .lines()
-        .take(12)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_lowercase();
+    let head: String = content.lines().take(12).collect::<Vec<_>>().join("\n").to_lowercase();
 
     match ext.as_str() {
         "rs" => {
@@ -613,11 +591,7 @@ fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
 }
 
 /// Writes the codebase index to `.rem/codebase_index.json` with inverted index and mtimes.
-pub fn write_codebase_index(
-    root: &Path,
-    chunks: Vec<IndexChunk>,
-    file_mtimes: HashMap<String, u64>,
-) -> Result<()> {
+pub fn write_codebase_index(root: &Path, chunks: Vec<IndexChunk>, file_mtimes: HashMap<String, u64>) -> Result<()> {
     let rem_dir = root.join(".rem");
     fs::create_dir_all(&rem_dir).context("failed to create .rem directory for index")?;
     let out_path = rem_dir.join("codebase_index.json");
@@ -695,10 +669,7 @@ pub fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
                 if let Some(embeddings) = body["embeddings"].as_array() {
                     if let Some(embedding) = embeddings.first() {
                         if let Some(vec) = embedding.as_array() {
-                            let v: Vec<f32> = vec
-                                .iter()
-                                .filter_map(|v| v.as_f64().map(|f| f as f32))
-                                .collect();
+                            let v: Vec<f32> = vec.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
                             if !v.is_empty() {
                                 chunk.embedding = Some(v);
                             }
@@ -918,10 +889,7 @@ mod tests {
 
     #[test]
     fn split_content_splits_large() {
-        let text = (0..100)
-            .map(|i| format!("line_{}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let text = (0..100).map(|i| format!("line_{}", i)).collect::<Vec<_>>().join("\n");
         let result = split_content_into_chunks(&text, 50);
         assert!(result.len() > 1, "should produce multiple chunks");
     }

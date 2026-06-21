@@ -74,9 +74,8 @@ pub const SKIP_NAMES: &[&str] = &[
 
 /// File suffixes that are always skipped even outside the above dirs.
 pub const SKIP_SUFFIXES: &[&str] = &[
-    ".min.js", ".min.css", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf",
-    ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".mp3", ".mp4", ".mov", ".woff", ".woff2", ".ttf",
-    ".otf", ".eot",
+    ".min.js", ".min.css", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".tar", ".gz",
+    ".bz2", ".xz", ".7z", ".mp3", ".mp4", ".mov", ".woff", ".woff2", ".ttf", ".otf", ".eot",
 ];
 
 /// Checks whether a directory name should be skipped during traversal.
@@ -285,11 +284,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_tree() -> PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "rem-find-test-{}-{}",
-            std::process::id(),
-            chrono_like_nanos()
-        ));
+        let base = std::env::temp_dir().join(format!("rem-find-test-{}-{}", std::process::id(), chrono_like_nanos()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
 
@@ -341,13 +336,7 @@ mod tests {
         let rels: Vec<String> = report
             .matches
             .iter()
-            .map(|m| {
-                m.path
-                    .strip_prefix(&root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
+            .map(|m| m.path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(rels.iter().any(|p| p == "index.html"));
         assert!(rels.iter().any(|p| p == "style.css"));
@@ -410,12 +399,7 @@ mod tests {
         };
         let report = find_matches(&root, "handle_lint", &opts);
         for m in &report.matches {
-            let rel = m
-                .path
-                .strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel = m.path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
             assert_ne!(rel, "empty.txt");
         }
     }
@@ -430,11 +414,8 @@ mod tests {
 
     #[test]
     fn max_depth_limits_recursion() {
-        let deep_root = std::env::temp_dir().join(format!(
-            "rem-find-deep-{}-{}",
-            std::process::id(),
-            chrono_like_nanos()
-        ));
+        let deep_root =
+            std::env::temp_dir().join(format!("rem-find-deep-{}-{}", std::process::id(), chrono_like_nanos()));
         let _ = fs::remove_dir_all(&deep_root);
         let deep = deep_root.join("a/b/c/d/e/f");
         fs::create_dir_all(&deep).unwrap();
