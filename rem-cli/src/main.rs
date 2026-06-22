@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
-use cli::{AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs};
+use cli::{AppConfig, AskArgs, Cli, Commands, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs, ThemeArgs};
 use walkdir::WalkDir;
 
 mod agentic;
@@ -225,6 +225,7 @@ async fn main() -> Result<()> {
         Some(Commands::Patch(args)) => run_patch(&client, &cfg, args).await,
         Some(Commands::New(_)) => unreachable!(),
         Some(Commands::Pull(_)) => unreachable!(),
+        Some(Commands::Theme(args)) => run_theme(args),
         None => {
             let is_pipe = !std::io::stdin().is_terminal();
             if is_pipe {
@@ -491,6 +492,47 @@ fn run_new(args: NewArgs, cfg: &AppConfig) -> Result<()> {
 // run_index delegates to the indexer module (see src/indexer.rs).
 // The thin wrapper keeps the CLI printing / arg handling in main while the
 // pure logic (chunking, writing, loading, retrieval) lives in its own module.
+
+/// Lists available themes or switches to a named theme.
+fn run_theme(args: ThemeArgs) -> Result<()> {
+    let t = ui::theme::active();
+    if let Some(name) = &args.name {
+        let upper = name.to_uppercase();
+        let names = ui::theme::list_names();
+        if names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            ui::theme::set_active(&upper);
+            let mut cfg = config::load_config().unwrap_or_default();
+            cfg.theme = upper.clone();
+            let _ = config::save_config(&cfg);
+            println!(
+                "{} theme switched to {}",
+                ui::theme::paint_success_label(&t, "✓"),
+                ui::theme::paint_bright(&t, &upper)
+            );
+        } else {
+            println!(
+                "{} unknown theme '{}'. Available: {}",
+                ui::theme::paint_warning(&t, "!"),
+                name,
+                names.join(", ")
+            );
+        }
+    } else {
+        println!("{}", ui::theme::paint_rail_header(&t, "THEMES"));
+        for name in ui::theme::list_names() {
+            println!("{}   {}", ui::theme::paint(&t, "accent", "\u{258C}", true), name);
+        }
+        println!("{}", ui::theme::paint_rail_empty(&t));
+        println!(
+            "{} use {} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "rem theme <name>"),
+            ui::theme::paint_dim(&t, "or /theme <name> in chat to switch")
+        );
+        println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+    }
+    Ok(())
+}
 
 fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     let t = ui::theme::active();

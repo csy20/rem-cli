@@ -48,6 +48,8 @@ pub enum Commands {
     Index(IndexArgs),
     #[command(about = "Pull a model via Ollama (e.g. `rem pull qwen2.5-coder:1.5b`)")]
     Pull(PullArgs),
+    #[command(about = "List or switch color themes")]
+    Theme(ThemeArgs),
 }
 
 /// Arguments for `rem ask`.
@@ -99,6 +101,13 @@ pub struct IndexArgs {
     pub dry_run: bool,
     #[arg(long, help = "Compute embeddings (Ollama required) for semantic retrieval")]
     pub embeddings: bool,
+}
+
+/// Arguments for `rem theme`.
+#[derive(Args, Debug)]
+pub struct ThemeArgs {
+    #[arg(help = "Theme name to switch to (e.g. GHOST, PAPER, SAKURA). Omit to list.")]
+    pub name: Option<String>,
 }
 
 /// Arguments for `rem pull`.

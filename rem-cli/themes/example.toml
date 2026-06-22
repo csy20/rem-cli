@@ -1,25 +1,50 @@
-# Example custom theme for REM
-# Place custom themes in ~/.config/rem-cli/themes/
-# Copy this file as ~/.config/rem-cli/themes/my_theme.toml and customize
+# ── REM Custom Theme ─────────────────────────────────────────────────────────
+#
+# How to create a custom theme:
+#   1. Copy this file to ~/.config/rem-cli/themes/<name>.toml
+#   2. Change the `name` field and all hex color values below
+#   3. Run `rem theme <NAME>` or use `/theme <NAME>` in chat to activate it
+#
+# Built-in themes: GHOST, PAPER, SAKURA, EMBER, PHOSPHOR, MIST
+# List them: `rem theme` or /theme in chat
+#
+# All 21 color fields are required. Use 6-digit hex codes (#rrggbb).
+
 name = "MY_THEME"
-bg = "#0a0a0f"
-surface = "#12121a"
-border = "#1e1e2e"
-accent = "#7c3aed"
-accent_dim = "#5b21b6"
-accent_info = "#8b5cf6"
-text_muted = "#6b7280"
-text_faint = "#4b5563"
-pill_bg = "#1e1e2e"
-pill_border = "#2e2e3e"
-pill_text = "#a78bfa"
-kbd_bg = "#12121a"
-kbd_border = "#2e2e3e"
-kbd_text = "#d1d5db"
-sys_color = "#f59e0b"
-sel_bg = "#1e1e2e"
-sel_left = "#7c3aed"
-cursor = "#a78bfa"
-error = "#ef4444"
-success = "#22c55e"
-code_bg = "#12121a"
+
+# Background and surface colors
+bg = "#0a0a0f"          # Main background
+surface = "#12121a"     # Panel/surface background
+border = "#1e1e2e"      # Border lines and dividers
+
+# Accent colors
+accent = "#7c3aed"      # Primary accent (headings, highlights)
+accent_dim = "#5b21b6"  # Dimmed accent (secondary highlights)
+accent_info = "#8b5cf6" # Info accent (tips, metadata)
+
+# Text colors
+text_muted = "#6b7280"  # Muted text (file sizes, timestamps)
+text_faint = "#4b5563"  # Faint text (subtle labels)
+
+# Pill/badge colors
+pill_bg = "#1e1e2e"     # Pill/badge background
+pill_border = "#2e2e3e" # Pill border
+pill_text = "#a78bfa"   # Pill text
+
+# Keyboard shortcut colors
+kbd_bg = "#12121a"      # Keyboard key background
+kbd_border = "#2e2e3e"  # Keyboard key border
+kbd_text = "#d1d5db"    # Keyboard key text
+
+# System and selection colors
+sys_color = "#f59e0b"   # System message color
+sel_bg = "#1e1e2e"      # Selection highlight background
+sel_left = "#7c3aed"    # Selection left border
+cursor = "#a78bfa"      # Cursor color
+
+# Status colors
+error = "#ef4444"       # Error messages
+success = "#22c55e"     # Success messages
+
+# Code
+code_bg = "#12121a"     # Code block background

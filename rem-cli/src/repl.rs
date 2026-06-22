@@ -627,9 +627,11 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             println!("{rail}");
         }
 
+        crate::provider::STREAM_TOKENS.store(true, std::sync::atomic::Ordering::SeqCst);
         let result = client
             .complete_chat_stream(&full_prompt, &system_prompt, &history_ctx)
             .await;
+        crate::provider::STREAM_TOKENS.store(false, std::sync::atomic::Ordering::SeqCst);
         let elapsed = start.elapsed();
         session.last_elapsed = elapsed;
 

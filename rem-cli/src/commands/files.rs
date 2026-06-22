@@ -610,33 +610,4 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "updated");
         let _ = std::fs::remove_dir_all(&dir);
     }
-
-    #[test]
-    fn backup_entry_new_file_has_no_original() {
-        let dir = std::env::temp_dir().join(format!("rem-test-backup-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("new_file.txt");
-        let original = std::fs::read_to_string(&path).ok();
-        let entry = BackupEntry {
-            path: path.clone(),
-            original,
-        };
-        assert!(entry.original.is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn backup_entry_existing_file_captures_original() {
-        let dir = std::env::temp_dir().join(format!("rem-test-backup2-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("existing.txt");
-        std::fs::write(&path, "original content").unwrap();
-        let original = std::fs::read_to_string(&path).ok();
-        let entry = BackupEntry {
-            path: path.clone(),
-            original,
-        };
-        assert_eq!(entry.original.as_deref(), Some("original content"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

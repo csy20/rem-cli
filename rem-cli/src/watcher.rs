@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
-use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::warn;
 
 /// Starts a file watcher on `root` that triggers `on_change` when files change.
@@ -81,15 +81,6 @@ where
     Ok(tx)
 }
 
-/// Determines whether a file event should trigger re-indexing.
-#[allow(dead_code)]
-pub fn should_reindex(event: &Event) -> bool {
-    matches!(
-        event.kind,
-        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
-    )
-}
-
 /// Watches for file changes and auto-triggers index regeneration.
 /// Call with the project root path. Returns a sender that stops the watcher.
 pub fn watch_and_reindex(root: &Path) -> Result<mpsc::Sender<()>> {
@@ -115,6 +106,14 @@ fn auto_reindex(root: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notify::EventKind;
+
+    fn should_reindex(event: &Event) -> bool {
+        matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+        )
+    }
 
     #[test]
     fn should_reindex_accepts_create_modify_remove() {

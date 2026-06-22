@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::OnceLock;
 
 use crate::agentic::{run_lint, run_test};
 use crate::find::{find_matches, FindOptions};
@@ -8,12 +7,6 @@ use crate::provider::tools::{builtin_tools, ToolCall, ToolResponse, ToolResult a
 use crate::provider::Provider;
 use crate::search::perform_web_search;
 use crate::ui;
-
-/// Lazily initialized tokio runtime reused for web search tool calls.
-fn web_search_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("failed to create tokio runtime for web search"))
-}
 
 /// Maximum tool call rounds before forcing a text response.
 const MAX_TOOL_ROUNDS: usize = 10;
@@ -149,8 +142,8 @@ fn execute_web_search_sync(tool_call: &ToolCall) -> ToolCallResult {
         Some(q) => q,
         None => return err_result(tool_call, "missing 'query' argument"),
     };
-    let runtime = web_search_runtime();
-    let results = runtime.block_on(perform_web_search(&reqwest::Client::new(), &query, None));
+    let handle = tokio::runtime::Handle::current();
+    let results = handle.block_on(perform_web_search(&reqwest::Client::new(), &query, None));
     match results {
         Ok(results) => {
             let mut content = String::new();

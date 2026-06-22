@@ -31,16 +31,26 @@ pub enum SearchProvider {
     Bing { api_key: String },
 }
 
-/// Performs a web search using the configured provider.
+/// Performs a web search using the configured provider, with automatic fallback.
+/// Tries the configured provider first, then falls back to DuckDuckGo on failure.
 pub(crate) async fn perform_web_search(
     client: &Client,
     query: &str,
     provider: Option<&SearchProvider>,
 ) -> Result<Vec<SearchResult>> {
-    match provider {
-        Some(SearchProvider::Google { api_key, cse_id }) => search_google(client, query, api_key, cse_id).await,
-        Some(SearchProvider::Bing { api_key }) => search_bing(client, query, api_key).await,
-        _ => search_ddg(client, query).await,
+    let primary = match provider {
+        Some(SearchProvider::Google { api_key, cse_id }) => Some(search_google(client, query, api_key, cse_id).await),
+        Some(SearchProvider::Bing { api_key }) => Some(search_bing(client, query, api_key).await),
+        None => None,
+    };
+
+    match primary {
+        Some(Ok(results)) => Ok(results),
+        Some(Err(primary_err)) => {
+            tracing::warn!("primary search failed, falling back to DDG: {primary_err}");
+            search_ddg(client, query).await
+        }
+        None => search_ddg(client, query).await,
     }
 }
 

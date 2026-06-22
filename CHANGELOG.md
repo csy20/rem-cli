@@ -3,63 +3,95 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
-
-### Added / Fixed
-
-- **Pure-Rust `rem index`** — revived the codebase retrieval index (writes
-  `.rem/codebase_index.json`). No Python/`remllm` package required anymore.
-  Keyword-based relevant-chunk injection in chat, ask, and `/goal` now works
-  out of the box for larger projects. `IndexChunk` lines are used in context
-  headers. Added roundtrip test. (Addresses the post-Python-pipeline regression.)
-- Expanded `.remcli.toml.example` with comments for all keys (including the
-  important `model_ctx` knob for scaling retrieval).
-
-### Changed
-
-- Removed `rem-cli/target/` (~5,942 files, ~2.4 GB of build artifacts)
-  from the git index. The directory is already listed in `.gitignore`
-  but had been committed before the ignore rule landed. The on-disk
-  `target/` is preserved; subsequent `cargo build` is incremental. Repo
-  size on `origin/main` shrinks accordingly. `.gitignore` additionally
-  ignores `**/*.rs.bk` and `Cargo.lock.bak`.
-- Updated clap help, code comments, and docs to remove stale "requires
-  Python remllm" references for the index subcommand. The CLI is now
-  fully self-contained for indexing + retrieval.
+## [0.4.0] — 2026-06-23
 
 ### Added
 
-- `/find <query>` — in-project text search. Walks the project (skipping
-  `node_modules`, `target`, `.git`, `dist`, `build`, `.rem`, lock files,
-  and common binary suffixes), returns matching lines with one-based
-  `path:line:column`. Caps at 500 matches / 8 KiB per file. Pure local,
-  no LLM, no network. New module `rem-cli/src/find.rs` + integration
-  test `rem-cli/tests/find.rs`.
-
-### Removed
-
-- **Python training pipeline** — the entire QLoRA fine-tuning, data
-  curation, GGUF export, and eval harness that previously lived at the
-  repo root has been removed. The repo is now exclusively the `rem`
-  Rust CLI (`rem-cli/`). The CLI is fully self-contained: it talks to
-  Ollama and does not need any Python tooling to run.
-
-  Specifically deleted:
-  - `src/remllm/` (Python package: data, train, eval, context, export, cli)
-  - `scripts/` (prepare_data, train_*, merge_adapter, export_gguf,
-    package_ollama*, fetch_benchmarks, run_full_eval, run_pipeline, etc.)
-  - `tests/` (181 pytest cases)
-  - `data/` (raw, train, val, eval, sources, curated, preferences, domains)
-  - `models/` (curriculum, evals, experiments, codebase_index.json)
-  - `config/` (config.yaml, llamafactory_qlora.yaml, domains/)
-  - `Modelfile`, `Modelfile.trained`
-  - `pyproject.toml`, `requirements.txt`
+- **Gzip-compressed session files** — `.rem/session.json` is now stored as
+  gzip-compressed JSON (backward compatible with plain JSON on read).
+- **Integration test suite** — 10 CLI integration tests for `rem --help`,
+  `rem new` (all project types), `rem index`, and error handling.
+  (`rem-cli/tests/cli_integration.rs`)
+- **`rem theme` subcommand** — list available themes or switch theme
+  from the command line. Works alongside existing `/theme` REPL command.
+- **Search provider fallback** — when Google/Bing search fails, falls back
+  to DuckDuckGo automatically instead of returning an error.
+- **Intent classifier trait** — `IntentClassifier` trait added with default
+  `HeuristicClassifier` implementation, making intent classification
+  extensible for future ML-based classifiers.
+- **Benchmarks** — timing-based benchmarks for `tokenize()` and
+  `split_content_into_chunks()` in the indexer test module, plus
+  criterion benchmark scaffolding (`benches/indexer.rs`).
+- **Criterion dev-dependency** for standardized benchmarking.
+- **CONTRIBUTING.md** and GitHub issue templates (bug report + feature request).
+- **Theme docs** — enhanced `themes/example.toml` with per-field descriptions.
+- **Streaming tokens** — `STREAM_TOKENS` flag is now wired to emit tokens
+  in real-time during REPL chat sessions.
+- **Pre-commit hook** now also runs `cargo clippy` (warns, doesn't block).
 
 ### Changed
 
-- `README.md` rewritten to focus on `rem` CLI install / usage only.
-- `CHANGELOG.md` older entries (v0.3.0 / v0.2.0) preserved below for
-  history; they describe the removed Python pipeline.
+- **Eliminated secondary tokio runtime** — `tool_executor.rs` no longer
+  creates a separate tokio runtime for web search; uses `Handle::current()`
+  instead, removing the `OnceLock<Runtime>` workaround.
+- **Dead code cleanup** — removed `#[allow(dead_code)]` from 6 locations,
+  removed unused serde fields (`finish_reason`, `call_type`, `display_name`,
+  `input`, `_type`), moved `should_reindex` to test-only.
+- **Duplicated test cleanup** — consolidated `BackupEntry` tests from
+  `commands/files.rs` and `commands/session.rs` into `types.rs`.
+- **Updated `.remcli.toml.example`** with comments for all keys (including
+  the important `model_ctx` knob for scaling retrieval).
+
+### Fixed
+
+- `warn_missing_api_key` properly called from `validate_config` (no longer
+  dead code).
+- All `#[allow(dead_code)]` serde fields removed; structs are leaner.
+- `should_reindex` moved to test-only scope to avoid dead-code warnings.
+
+## [Unreleased]
+
+### Added
+
+- **Integration test suite** — 10 CLI integration tests for `rem --help`,
+  `rem new` (all project types), `rem index`, and error handling.
+  (`rem-cli/tests/cli_integration.rs`)
+- **`rem theme` subcommand** — list available themes or switch theme
+  from the command line. Works alongside existing `/theme` REPL command.
+- **Search provider fallback** — when Google/Bing search fails, falls back
+  to DuckDuckGo automatically instead of returning an error.
+- **Intent classifier trait** — `IntentClassifier` trait added with default
+  `HeuristicClassifier` implementation, making intent classification
+  extensible for future ML-based classifiers.
+- **Benchmarks** — timing-based benchmarks for `tokenize()` and
+  `split_content_into_chunks()` in the indexer test module, plus
+  criterion benchmark scaffolding (`benches/indexer.rs`).
+- **Criterion dev-dependency** for standardized benchmarking.
+- **CONTRIBUTING.md** and GitHub issue templates (bug report + feature request).
+- **Theme docs** — enhanced `themes/example.toml` with per-field descriptions.
+- **Streaming tokens** — `STREAM_TOKENS` flag is now wired to emit tokens
+  in real-time during REPL chat sessions.
+- **Pre-commit hook** now also runs `cargo clippy` (warns, doesn't block).
+
+### Changed
+
+- **Eliminated secondary tokio runtime** — `tool_executor.rs` no longer
+  creates a separate tokio runtime for web search; uses `Handle::current()`
+  instead, removing the `OnceLock<Runtime>` workaround.
+- **Dead code cleanup** — removed `#[allow(dead_code)]` from 6 locations,
+  removed unused serde fields (`finish_reason`, `call_type`, `display_name`,
+  `input`, `_type`), moved `should_reindex` to test-only.
+- **Duplicated test cleanup** — consolidated `BackupEntry` tests from
+  `commands/files.rs` and `commands/session.rs` into `types.rs`.
+- **Updated `.remcli.toml.example`** with comments for all keys (including
+  the important `model_ctx` knob for scaling retrieval).
+
+### Fixed
+
+- `warn_missing_api_key` properly called from `validate_config` (no longer
+  dead code).
+- All `#[allow(dead_code)]` serde fields removed; structs are leaner.
+- `should_reindex` moved to test-only scope to avoid dead-code warnings.
 
 ## [0.3.0] — Scaling Week (REMOVED)
 

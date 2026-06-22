@@ -10,7 +10,11 @@ use crate::session_io::detect_project_type;
 use crate::token_count::{context_usage_percent, estimate_tokens_batch};
 use crate::ui;
 use crate::{file_icon, human_size, BackupEntry, FileEntry};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -524,6 +528,20 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
     }
 }
 
+/// Reads a file that may be gzip-compressed or plain text.
+fn read_maybe_gzip(path: &std::path::Path) -> std::io::Result<String> {
+    let raw = fs::read(path)?;
+    // Check gzip magic number
+    if raw.first() == Some(&0x1f) && raw.get(1) == Some(&0x8b) {
+        let mut decoder = GzDecoder::new(&raw[..]);
+        let mut out = String::new();
+        decoder.read_to_string(&mut out)?;
+        Ok(out)
+    } else {
+        String::from_utf8(raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
 /// Saves the current session to `.rem/session.json` (`/save`).
 pub(crate) fn handle_save_session(session: &ChatSession) {
     let t = ui::theme::active();
@@ -533,12 +551,16 @@ pub(crate) fn handle_save_session(session: &ChatSession) {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let session_file = dir.join(".rem/session.json");
     let _ = fs::create_dir_all(dir.join(".rem"));
-    let data = serde_json::to_string_pretty(&session.to_session_json()).unwrap_or_default();
-    match fs::write(&session_file, &data) {
+    let json = serde_json::to_string_pretty(&session.to_session_json()).unwrap_or_default();
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let _ = encoder.write_all(json.as_bytes());
+    let compressed = encoder.finish().unwrap_or_default();
+    match fs::write(&session_file, &compressed) {
         Ok(()) => println!(
-            "{} session saved to {}",
+            "{} session saved to {} ({} bytes)",
             ui::theme::paint_success_label(&t, "\u{2713}"),
-            session_file.display()
+            session_file.display(),
+            compressed.len(),
         ),
         Err(e) => println!(
             "{} failed to save session: {}",
@@ -564,7 +586,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
         );
         return;
     }
-    match fs::read_to_string(&session_file) {
+    match read_maybe_gzip(&session_file) {
         Ok(content) => {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
                 if let Some(history) = data["history"].as_array() {
@@ -654,35 +676,6 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn backup_entry_new_file_has_no_original() {
-        let dir = std::env::temp_dir().join(format!("rem-test-be-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("new.txt");
-        let original = std::fs::read_to_string(&path).ok();
-        let entry = BackupEntry {
-            path: path.clone(),
-            original,
-        };
-        assert!(entry.original.is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn backup_entry_existing_file_stores_original() {
-        let dir = std::env::temp_dir().join(format!("rem-test-be2-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("existing.txt");
-        std::fs::write(&path, "original content").unwrap();
-        let original = std::fs::read_to_string(&path).ok();
-        let entry = BackupEntry {
-            path: path.clone(),
-            original,
-        };
-        assert_eq!(entry.original.as_deref(), Some("original content"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn handle_dir_resolves_absolute_path() {

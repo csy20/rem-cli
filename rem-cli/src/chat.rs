@@ -233,15 +233,20 @@ impl ChatSession {
 
     /// Auto-saves the session to `.rem/session.json` every N messages.
     pub(crate) fn auto_save_session(&self) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
         let dir = self.session_dir();
         let session_file = dir.join(".rem/session.json");
         if let Err(e) = std::fs::create_dir_all(dir.join(".rem")) {
             tracing::warn!("failed to create session dir: {}", e);
         }
-        if let Err(e) = std::fs::write(
-            &session_file,
-            serde_json::to_string_pretty(&self.to_session_json()).unwrap_or_default(),
-        ) {
+        let json = serde_json::to_string_pretty(&self.to_session_json()).unwrap_or_default();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let _ = encoder.write_all(json.as_bytes());
+        let compressed = encoder.finish().unwrap_or_default();
+        if let Err(e) = std::fs::write(&session_file, &compressed) {
             tracing::warn!("failed to auto-save session: {}", e);
         }
     }

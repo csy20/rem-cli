@@ -16,7 +16,7 @@ use std::collections::HashMap;
 /// Metadata about a registered slash command.
 #[derive(Clone, Copy)]
 pub(crate) struct CommandInfo {
-    /// Human-readable description shown in `/help`.
+    /// Human-readable description for the planned dynamic `/help` system.
     #[allow(dead_code)]
     pub(crate) description: &'static str,
 }

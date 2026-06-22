@@ -30,9 +30,6 @@ pub struct OpenAIStreamChunk {
 #[derive(Debug, Deserialize)]
 pub struct OpenAIStreamChoice {
     pub delta: OpenAIStreamDelta,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,10 +44,6 @@ pub struct OpenAIStreamToolCall {
     pub index: i64,
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(rename = "type")]
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub call_type: Option<String>,
     #[serde(default)]
     pub function: Option<OpenAIStreamToolCallFunction>,
 }

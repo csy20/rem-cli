@@ -1,6 +1,6 @@
 #!/bin/bash
-# Pre-commit hook: auto-format Rust code and abort if clippy has warnings.
-# This prevents CI failures due to formatting issues permanently.
+# Pre-commit hook: auto-format Rust code, check clippy, and abort on issues.
+# This prevents CI failures due to formatting or lint warnings.
 
 set -e
 
@@ -23,10 +23,18 @@ for file in $RUST_STAGED; do
     fi
 done
 
-# Check that formatting is clean (should always pass after fmt)
+# Check that formatting is clean
 if ! (cd rem-cli && cargo fmt --all -- --check 2>/dev/null); then
     echo "❌ cargo fmt --check failed even after formatting. Aborting commit."
     exit 1
 fi
 
 echo "✅ Rust formatting OK"
+
+# Quick clippy check (catches warnings, doesn't block commit — CI enforces hard failure)
+echo "🔍 Pre-commit: running clippy..."
+if (cd rem-cli && cargo clippy --all-targets 2>/dev/null); then
+    echo "✅ Clippy passed"
+else
+    echo "⚠️  Clippy has warnings (CI will enforce zero warnings). Consider fixing before pushing."
+fi

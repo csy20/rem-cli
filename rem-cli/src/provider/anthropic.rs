@@ -29,9 +29,6 @@ pub struct AnthropicContentBlock {
     pub id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub input: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,12 +76,7 @@ pub struct AnthropicModelsResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct AnthropicModelEntry {
-    #[allow(dead_code)]
-    #[serde(rename = "type")]
-    pub _type: Option<String>,
     pub id: Option<String>,
-    #[allow(dead_code)]
-    pub display_name: Option<String>,
 }
 
 pub(super) struct AnthropicBackend;

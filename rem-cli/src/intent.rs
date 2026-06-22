@@ -1,6 +1,9 @@
 //! User intent classification.
 //! Analyzes user input to determine intent (FastAnswer, Planning, WebNeeded,
 //! CodeAction) using keyword heuristics and phrase matching.
+//!
+//! The [`IntentClassifier`] trait allows different classification strategies
+//! to be swapped in. The default [`HeuristicClassifier`] uses keyword matching.
 
 use std::sync::LazyLock;
 
@@ -11,6 +14,12 @@ pub enum TaskIntent {
     Planning,
     WebNeeded,
     CodeAction,
+}
+
+/// Pluggable intent classifier trait.
+/// Implementations analyze user input and return a [`TaskIntent`].
+pub trait IntentClassifier: Send + Sync {
+    fn classify(&self, input: &str) -> TaskIntent;
 }
 
 static VERB_PHRASES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
@@ -154,8 +163,27 @@ static VERB_PHRASES_SPACE: LazyLock<Vec<String>> =
 static PHRASE_COMBINATIONS_SPACE: LazyLock<Vec<String>> =
     LazyLock::new(|| PHRASE_COMBINATIONS.iter().map(|p| format!(" {}", p)).collect());
 
+/// Heuristic keyword-based intent classifier.
+pub struct HeuristicClassifier;
+
+impl IntentClassifier for HeuristicClassifier {
+    fn classify(&self, input: &str) -> TaskIntent {
+        classify_intent_heuristic(input)
+    }
+}
+
+/// Default global intent classifier instance.
+static CLASSIFIER: LazyLock<HeuristicClassifier> = LazyLock::new(|| HeuristicClassifier);
+
 /// Classifies user input into a [`TaskIntent`] using keyword heuristics.
+/// Delegates to the global default [`IntentClassifier`].
 pub fn classify_intent(input: &str) -> TaskIntent {
+    CLASSIFIER.classify(input)
+}
+
+// ── Heuristic implementation ────────────────────────────────────────────────
+
+fn classify_intent_heuristic(input: &str) -> TaskIntent {
     let lower = input.to_lowercase();
 
     let web_explicit = lower.contains("search the web")

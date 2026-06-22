@@ -147,7 +147,7 @@ fn build_inverted_index(chunks: &[IndexChunk], doc_freqs: &mut HashMap<String, u
 }
 
 /// Tokenizes text into lowercase alphanumeric tokens (min 3 chars).
-fn tokenize(text: &str) -> Vec<String> {
+pub(crate) fn tokenize(text: &str) -> Vec<String> {
     let estimated = text.len() / 20;
     let mut tokens = Vec::with_capacity(estimated.max(16));
     tokens.extend(
@@ -459,7 +459,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     Ok((chunks, file_mtimes))
 }
 
-fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, String)> {
+pub(crate) fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, String)> {
     let mut out = Vec::new();
     let mut buf = String::with_capacity(target + 256);
     let mut cur_start_line = 1usize;
@@ -899,5 +899,41 @@ mod tests {
         let text = "a\nb\nc\nd\ne\n";
         let result = split_content_into_chunks(text, 4);
         assert!(result.len() >= 2);
+    }
+
+    // ── Quick benchmarks (timing-based, runs with cargo test) ──────────
+
+    #[test]
+    fn bench_tokenize_large_text() {
+        let text = (0..1000)
+            .map(|i| format!("word_{} fn_login_authenticate_validate_token_{}", i, i))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let start = std::time::Instant::now();
+        let tokens = tokenize(&text);
+        let elapsed = start.elapsed();
+        assert!(tokens.len() > 1000, "should produce many tokens");
+        assert!(
+            elapsed.as_millis() < 200,
+            "tokenizing 1000 words took {}ms (expected <200ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn bench_split_content_large_file() {
+        let text = (0..10_000)
+            .map(|i| format!("line_{}: some content here", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = std::time::Instant::now();
+        let chunks = split_content_into_chunks(&text, 200);
+        let elapsed = start.elapsed();
+        assert!(chunks.len() > 1, "should split 10k lines into chunks");
+        assert!(
+            elapsed.as_millis() < 1000,
+            "splitting 10k lines took {}ms (expected <1000ms)",
+            elapsed.as_millis()
+        );
     }
 }

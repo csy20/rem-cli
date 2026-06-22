@@ -58,8 +58,6 @@ pub struct GeminiModelsResponse {
 #[derive(Debug, Deserialize)]
 pub struct GeminiModelEntry {
     pub name: String,
-    #[allow(dead_code)]
-    pub display_name: Option<String>,
 }
 
 pub(super) struct GeminiBackend;
