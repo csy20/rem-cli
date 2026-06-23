@@ -3,7 +3,7 @@
 //! calls the LLM provider, and manages the conversational workflow.
 
 use std::borrow::Cow;
-use std::io;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -11,12 +11,12 @@ use anyhow::Result;
 use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
 use crate::commands::{
-    auto_write_files, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy, handle_diff,
-    handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint_with_fallback, handle_list_files,
-    handle_memory, handle_memory_set, handle_mode, handle_model, handle_plan, handle_provider, handle_reasoning,
-    handle_refactor, handle_reset, handle_resume_session, handle_review, handle_save_session, handle_search,
-    handle_test, handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why, handle_write,
-    print_chat_help, print_last_files, prompt_for_path,
+    auto_write_files, handle_apply, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy,
+    handle_diff, handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint_with_fallback,
+    handle_list_files, handle_memory, handle_memory_set, handle_mode, handle_model, handle_plan, handle_provider,
+    handle_reasoning, handle_refactor, handle_reset, handle_resume_session, handle_review, handle_save_session,
+    handle_search, handle_test, handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why,
+    handle_write, print_chat_help, print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskIntent};
@@ -26,7 +26,6 @@ use crate::provider::Provider;
 use crate::session_io::{build_prompt, language_specific_guidance, print_welcome, validate_chat_response};
 use crate::token_count::estimate_tokens;
 use crate::ui;
-use crate::ui::output::SpinnerGuard;
 use crate::{
     exit_requested, extract_code_blocks_with_names, file_icon, reset_ctrlc_count, CHAT_SYSTEM_PROMPT_CODE,
     CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN,
@@ -254,6 +253,10 @@ async fn dispatch_slash_command(
             handle_diff(session);
             return false;
         }
+        "/apply" => {
+            handle_apply(session);
+            return false;
+        }
         "/tokens" => {
             handle_tokens(session, client);
             return false;
@@ -363,7 +366,7 @@ fn build_llm_prompt(session: &mut ChatSession, trimmed: &str, intent: &TaskInten
         format!("User request: {}\n\nSave file at: {}", trimmed, path)
     } else {
         session.add_history(trimmed);
-        if let Some(ref dir) = session.project_dir {
+        if let Some(ref dir) = session.ctx.project_dir {
             format!("User request: {}\n\nWorking directory: {}", trimmed, dir.display())
         } else {
             format!("User request: {}", trimmed)
@@ -405,7 +408,7 @@ fn build_llm_prompt(session: &mut ChatSession, trimmed: &str, intent: &TaskInten
 
 /// Builds the "last generated code/files" context for follow-up requests.
 fn build_last_code_context(session: &ChatSession, trimmed: &str) -> String {
-    if session.last_code.is_empty() && session.last_files.is_empty() {
+    if session.code_out.last_code.is_empty() && session.code_out.last_files.is_empty() {
         return String::new();
     }
     let mod_triggers = [
@@ -436,13 +439,13 @@ fn build_last_code_context(session: &ChatSession, trimmed: &str) -> String {
     }
 
     let mut ctx = String::new();
-    if !session.last_code.is_empty() {
-        let truncated = crate::truncate_bytes(&session.last_code, 6000);
+    if !session.code_out.last_code.is_empty() {
+        let truncated = crate::truncate_bytes(&session.code_out.last_code, 6000);
         ctx = format!("\n[Last generated code (for reference)]:\n```\n{}\n```\n", truncated);
     }
-    if !session.last_files.is_empty() {
+    if !session.code_out.last_files.is_empty() {
         let mut files_ctx = String::from("\n[Last generated files]:\n");
-        for f in &session.last_files {
+        for f in &session.code_out.last_files {
             if !f.path.is_empty() {
                 let truncated = crate::truncate_bytes(&f.content, 3000);
                 files_ctx.push_str(&format!("\n### {}\n```\n{}\n```\n", f.path, truncated));
@@ -497,14 +500,14 @@ fn handle_llm_response(
     display_performance_stats(client, session, elapsed, t);
 
     if !cleaned.is_empty() {
-        session.history.push((trimmed.to_string(), cleaned));
-        if session.history.len() > 12 {
-            session.history.remove(0);
+        session.history_mgr.history.push((trimmed.to_string(), cleaned));
+        if session.history_mgr.history.len() > 12 {
+            session.history_mgr.history.remove(0);
         }
-        session.messages_since_save += 1;
-        if session.messages_since_save >= 5 {
+        session.history_mgr.messages_since_save += 1;
+        if session.history_mgr.messages_since_save >= 5 {
             session.auto_save_session();
-            session.messages_since_save = 0;
+            session.history_mgr.messages_since_save = 0;
         }
     }
 }
@@ -517,7 +520,6 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
     let t = ui::theme::active();
 
     loop {
-        crate::provider::STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
         let prompt = build_prompt(&session, client);
 
         let line = match read_user_input(&mut session, &prompt, &t) {
@@ -578,7 +580,6 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         println!("{label} {model_tag} {dot} {mode_tag}");
 
         let start = std::time::Instant::now();
-        let _chat_spinner = SpinnerGuard::new("REM is writing...");
         let system_prompt = match session.mode {
             RunMode::Chat => CHAT_SYSTEM_PROMPT_CONVERSATIONAL,
             RunMode::Code => CHAT_SYSTEM_PROMPT_CODE,
@@ -627,11 +628,33 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             println!("{rail}");
         }
 
+        // Reset cancellation flag right before the LLM call
+        crate::provider::STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Static thinking indicator (no spinner to avoid TTY conflict with token streaming)
+        eprint!("  {} ", ui::theme::paint_dim(&t, "thinking..."));
+        let _ = std::io::stderr().flush();
+
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Clear thinking indicator and show streaming label
+        eprint!("\r{}\r", " ".repeat(30));
+        let _ = std::io::stderr().flush();
+        let stream_label = ui::theme::paint_dim(&t, "▸ ");
+        eprint!("  {stream_label}");
+        let _ = std::io::stderr().flush();
+
         crate::provider::STREAM_TOKENS.store(true, std::sync::atomic::Ordering::SeqCst);
         let result = client
             .complete_chat_stream(&full_prompt, &system_prompt, &history_ctx)
             .await;
         crate::provider::STREAM_TOKENS.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // Clear the streaming label after completion
+        eprint!("\r{}\r", " ".repeat(35));
+        let _ = std::io::stderr().flush();
         let elapsed = start.elapsed();
         session.last_elapsed = elapsed;
 
@@ -666,8 +689,8 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
     let files = extract_code_blocks_with_names(cleaned);
 
     if !files.is_empty() {
-        session.last_files = files.clone();
-        session.last_code = if code.is_empty() { String::new() } else { code };
+        session.code_out.last_files = files.clone();
+        session.code_out.last_code = if code.is_empty() { String::new() } else { code };
         let gen_label = ui::theme::paint_success_label(t, "generated:");
         let gen_count = ui::theme::paint_bright(t, &format!("{} file(s)", files.len()));
         println!("{}", rail_chr());
@@ -684,8 +707,8 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
         println!("{}", rail_chr());
         auto_write_files(session, &files);
     } else if !code.is_empty() {
-        session.last_code = code;
-        session.last_files.clear();
+        session.code_out.last_code = code;
+        session.code_out.last_files.clear();
         let msg = ui::theme::paint_success_label(t, "detected code block \u{2014} use /write <path> to save");
         println!("{}", rail_chr());
         println!("{} {}", rail_chr(), msg);

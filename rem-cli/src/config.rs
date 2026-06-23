@@ -9,7 +9,12 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use tracing::warn;
+
+/// Cached config to avoid repeated TOML parsing from disk.
+static CONFIG_CACHE: LazyLock<Mutex<Option<AppConfig>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Returns the config directory path, checking XDG_CONFIG_HOME first.
 fn config_dir() -> Option<std::path::PathBuf> {
@@ -21,6 +26,7 @@ fn config_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Saves config to XDG config dir or `~/.config/rem-cli/config.toml`.
+/// Invalidates the in-memory cache so subsequent [`load_config`] calls re-read from disk.
 pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
     if let Some(dir) = config_dir() {
         fs::create_dir_all(&dir)?;
@@ -28,6 +34,7 @@ pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
         let text = toml::to_string_pretty(cfg).context("failed to serialize config")?;
         fs::write(&path, text).context("failed to write config")?;
     }
+    invalidate_config_cache();
     Ok(())
 }
 
@@ -106,7 +113,14 @@ pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
 }
 
 /// Loads and merges global (XDG_CONFIG_HOME or `~/.config/rem-cli/config.toml`) and local (`.remcli.toml`) config.
+/// Results are cached in a global [`CONFIG_CACHE`] to avoid repeated TOML parsing.
 pub(crate) fn load_config() -> Result<AppConfig> {
+    {
+        let cache = CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref cached) = *cache {
+            return Ok(cached.clone());
+        }
+    }
     let mut cfg = AppConfig::default();
     if let Some(dir) = config_dir() {
         let path = dir.join("config.toml");
@@ -122,7 +136,15 @@ pub(crate) fn load_config() -> Result<AppConfig> {
         let partial: PartialConfig = toml::from_str(&text).context("invalid local config")?;
         cfg.apply_partial(partial);
     }
+    let mut cache = CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    *cache = Some(cfg.clone());
     Ok(cfg)
+}
+
+/// Invalidates the in-memory config cache so the next [`load_config`] re-reads from disk.
+pub(crate) fn invalidate_config_cache() {
+    let mut cache = CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    *cache = None;
 }
 
 /// Builds a [`Provider`] from config, resolving API keys and model defaults.

@@ -17,7 +17,7 @@ use crate::ui;
 pub(crate) fn check_system_resources() {
     let t = ui::theme::active();
     let mem_gb = detect_system_ram_gb();
-    if mem_gb > 0 && mem_gb <= 16 {
+    if mem_gb > 0 && mem_gb <= 8 {
         eprintln!(
             "{} {} GB RAM detected \u{2014} Ollama may be slow on CPU.",
             ui::theme::paint_warning(&t, "\u{258C} system:"),

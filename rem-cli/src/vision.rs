@@ -24,6 +24,7 @@ pub(crate) async fn handle_vision(client: &Provider, session: &mut ChatSession, 
         Path::new(image_path).to_path_buf()
     } else {
         let base = session
+            .ctx
             .project_dir
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -78,6 +79,7 @@ pub(crate) async fn handle_vision(client: &Provider, session: &mut ChatSession, 
         Ok(text) => {
             println!("\n{}", text);
             session
+                .history_mgr
                 .history
                 .push((format!("/vision {} {}", image_path, prompt), text));
         }

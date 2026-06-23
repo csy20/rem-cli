@@ -7,7 +7,7 @@ use crate::indexer::{build_retrieved_context, load_codebase_index, retrieve_rele
 use crate::intent::TaskIntent;
 use crate::memory::ProjectMemory;
 use crate::search::SearchResult;
-use crate::session_io::{build_project_context, detect_project_type};
+use crate::session_io::build_project_context;
 use crate::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
 use rustyline::config::Configurer;
@@ -33,71 +33,32 @@ impl ProjectListingCache {
     }
 }
 
-/// Holds all mutable state for an interactive chat session.
-pub(crate) struct ChatSession {
+/// Readline and conversation history management.
+pub(crate) struct HistoryManager {
     pub(crate) rl: DefaultEditor,
-    pub(crate) last_code: String,
-    pub(crate) last_files: Vec<FileEntry>,
-    pub(crate) last_files_written: Vec<crate::BackupEntry>,
-    pub(crate) undo_stack: Vec<Vec<crate::BackupEntry>>,
-    pub(crate) last_search: Vec<SearchResult>,
-    pub(crate) last_intent: TaskIntent,
-    pub(crate) last_user_input: String,
-    pub(crate) project_dir: Option<PathBuf>,
-    pub(crate) workspace_dir: Option<PathBuf>,
     pub(crate) history: Vec<(String, String)>,
-    pub(crate) feedback: FeedbackTracker,
-    pub(crate) mode: RunMode,
-    pub(crate) last_tokens: u32,
-    pub(crate) last_elapsed: std::time::Duration,
-    pub(crate) project_memory: ProjectMemory,
     pub(crate) messages_since_save: usize,
-    pub(crate) project_type: Option<String>,
-    listing_cache: Option<ProjectListingCache>,
-    /// Cached codebase index to avoid reloading from disk on every turn.
-    cached_index: Option<(PathBuf, CodebaseIndex)>,
 }
 
-impl ChatSession {
+impl HistoryManager {
     fn history_path() -> PathBuf {
         dirs::home_dir()
             .map(|h| h.join(".config/rem-cli/history.txt"))
             .unwrap_or_else(|| PathBuf::from(".rem_history.txt"))
     }
 
-    /// Creates a new chat session with the given model and optional workspace.
-    pub(crate) fn new(model: &str, workspace: Option<PathBuf>) -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let mut rl = DefaultEditor::new().context("failed to start line editor")?;
         let history_path = Self::history_path();
         let _ = rl.load_history(&history_path);
         rl.set_max_history_size(1000).ok();
-        let project_dir = workspace.clone();
-        let project_memory = ProjectMemory::load(project_dir.as_deref().unwrap_or_else(|| Path::new(".")));
         Ok(Self {
             rl,
-            last_code: String::new(),
-            last_files: Vec::new(),
-            last_files_written: Vec::new(),
-            undo_stack: Vec::new(),
-            last_search: Vec::new(),
-            last_intent: TaskIntent::FastAnswer,
-            last_user_input: String::new(),
-            project_dir: workspace.clone(),
-            workspace_dir: workspace,
             history: Vec::new(),
-            feedback: FeedbackTracker::new(model),
-            mode: RunMode::Chat,
-            last_tokens: 0,
-            last_elapsed: std::time::Duration::from_secs(0),
-            project_memory,
             messages_since_save: 0,
-            project_type: None,
-            listing_cache: None,
-            cached_index: None,
         })
     }
 
-    /// Saves the readline history to disk.
     pub(crate) fn save_history(&mut self) {
         let path = Self::history_path();
         if let Some(parent) = path.parent() {
@@ -106,14 +67,173 @@ impl ChatSession {
         let _ = self.rl.save_history(&path);
     }
 
-    /// Reads a line from the terminal with the given prompt.
     pub(crate) fn readline(&mut self, prompt: &str) -> io::Result<String> {
         self.rl.readline(prompt).map_err(io::Error::other)
     }
 
-    /// Adds a line to the readline history.
     pub(crate) fn add_history(&mut self, line: &str) {
         let _ = self.rl.add_history_entry(line);
+    }
+
+    pub(crate) fn build_chat_history(&self) -> String {
+        if self.history.is_empty() {
+            return String::new();
+        }
+        let mut out = String::from("[Previous conversation — keep context in mind]:\n\n");
+        for (user, assistant) in self.history.iter().rev().take(6).rev() {
+            let truncated_assistant = crate::truncate_to_lines(assistant, 15);
+            out.push_str(&format!("User: {}\nREM: {}\n\n", user, truncated_assistant));
+        }
+        out
+    }
+}
+
+/// Tracks last generated code, files, writes, and undo stack.
+pub(crate) struct CodeOutput {
+    pub(crate) last_code: String,
+    pub(crate) last_files: Vec<FileEntry>,
+    pub(crate) last_files_written: Vec<crate::BackupEntry>,
+    pub(crate) undo_stack: Vec<Vec<crate::BackupEntry>>,
+}
+
+impl CodeOutput {
+    pub(crate) fn new() -> Self {
+        Self {
+            last_code: String::new(),
+            last_files: Vec::new(),
+            last_files_written: Vec::new(),
+            undo_stack: Vec::new(),
+        }
+    }
+}
+
+/// Project directory, file listing cache, and codebase index cache.
+pub(crate) struct ProjectContext {
+    pub(crate) project_dir: Option<PathBuf>,
+    pub(crate) workspace_dir: Option<PathBuf>,
+    pub(crate) project_type: Option<String>,
+    pub(crate) project_memory: ProjectMemory,
+    listing_cache: Option<ProjectListingCache>,
+    cached_index: Option<(PathBuf, CodebaseIndex)>,
+}
+
+impl ProjectContext {
+    pub(crate) fn new(workspace: Option<PathBuf>) -> Self {
+        let project_dir = workspace.clone();
+        let project_memory = ProjectMemory::load(project_dir.as_deref().unwrap_or_else(|| Path::new(".")));
+        Self {
+            project_dir,
+            workspace_dir: workspace,
+            project_type: None,
+            project_memory,
+            listing_cache: None,
+            cached_index: None,
+        }
+    }
+
+    pub(crate) fn session_dir(&self) -> PathBuf {
+        self.project_dir
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    }
+
+    pub(crate) fn get_project_type(&mut self) -> &str {
+        if self.project_type.is_none() {
+            let t = self
+                .project_dir
+                .as_deref()
+                .map(crate::session_io::detect_project_type)
+                .unwrap_or("")
+                .to_string();
+            self.project_type = Some(t);
+        }
+        self.project_type.as_deref().unwrap_or("")
+    }
+
+    pub(crate) fn build_memory_context(&self) -> String {
+        self.project_memory.as_context()
+    }
+
+    pub(crate) fn build_relevant_project_context(&mut self, query: &str) -> String {
+        let dir = match &self.project_dir {
+            Some(d) => d.clone(),
+            None => return String::new(),
+        };
+
+        let should_reload = self
+            .cached_index
+            .as_ref()
+            .map(|(cached_dir, _)| cached_dir != &dir)
+            .unwrap_or(true);
+        if should_reload {
+            self.cached_index = load_codebase_index(&dir).map(|i| (dir.clone(), i));
+        }
+
+        if let Some((_, idx)) = &self.cached_index {
+            let hits = retrieve_relevant_chunks(idx, query, 8, 4500);
+            if !hits.is_empty() {
+                return build_retrieved_context(&hits, 4800);
+            }
+        }
+
+        if self.listing_cache.is_none() {
+            self.listing_cache = Some(ProjectListingCache {
+                listing: String::new(),
+                dir: PathBuf::new(),
+            });
+        }
+        if let Some(ref mut cache) = self.listing_cache {
+            return cache.get_or_build(&dir, 6000).to_string();
+        }
+        String::new()
+    }
+}
+
+/// Holds all mutable state for an interactive chat session.
+pub(crate) struct ChatSession {
+    pub(crate) history_mgr: HistoryManager,
+    pub(crate) code_out: CodeOutput,
+    pub(crate) ctx: ProjectContext,
+    pub(crate) last_search: Vec<SearchResult>,
+    pub(crate) last_intent: TaskIntent,
+    pub(crate) last_user_input: String,
+    pub(crate) feedback: FeedbackTracker,
+    pub(crate) mode: RunMode,
+    pub(crate) last_tokens: u32,
+    pub(crate) last_elapsed: std::time::Duration,
+}
+
+impl ChatSession {
+    /// Creates a new chat session with the given model and optional workspace.
+    pub(crate) fn new(model: &str, workspace: Option<PathBuf>) -> Result<Self> {
+        Ok(Self {
+            history_mgr: HistoryManager::new()?,
+            code_out: CodeOutput::new(),
+            ctx: ProjectContext::new(workspace),
+            last_search: Vec::new(),
+            last_intent: TaskIntent::FastAnswer,
+            last_user_input: String::new(),
+            feedback: FeedbackTracker::new(model),
+            mode: RunMode::Chat,
+            last_tokens: 0,
+            last_elapsed: std::time::Duration::from_secs(0),
+        })
+    }
+
+    /// Saves the readline history to disk.
+    pub(crate) fn save_history(&mut self) {
+        self.history_mgr.save_history();
+    }
+
+    /// Reads a line from the terminal with the given prompt.
+    pub(crate) fn readline(&mut self, prompt: &str) -> io::Result<String> {
+        self.history_mgr.readline(prompt)
+    }
+
+    /// Adds a line to the readline history.
+    pub(crate) fn add_history(&mut self, line: &str) {
+        self.history_mgr.add_history(line);
     }
 
     /// Builds a context string from the last web search results.
@@ -128,107 +248,48 @@ impl ChatSession {
         ctx
     }
 
-    /// Query-aware project context. When a codebase_index.json exists for the project,
-    /// performs keyword retrieval of relevant chunks (by content/name match against the
-    /// user task) and returns a targeted "Relevant code chunks" block. This is the key
-    /// mechanism for scaling rem to larger codebases without prompt explosion.
-    /// Falls back to the classic exhaustive (but capped) file listing when no index.
-    /// Builds project context for the given query.
-    /// Uses codebase index for retrieval when available; falls back to file listing.
-    /// The index is cached in memory to avoid reloading from disk on every turn.
+    /// Query-aware project context. Delegates to [`ProjectContext::build_relevant_project_context`].
     pub(crate) fn build_relevant_project_context(&mut self, query: &str) -> String {
-        let dir = match &self.project_dir {
-            Some(d) => d.clone(),
-            None => return String::new(),
-        };
-
-        // Load/reload index if dir changed or not yet cached
-        let should_reload = self
-            .cached_index
-            .as_ref()
-            .map(|(cached_dir, _)| cached_dir != &dir)
-            .unwrap_or(true);
-        if should_reload {
-            self.cached_index = load_codebase_index(&dir).map(|i| (dir.clone(), i));
-        }
-
-        // Use cached index for BM25 retrieval
-        if let Some((_, idx)) = &self.cached_index {
-            let hits = retrieve_relevant_chunks(idx, query, 8, 4500);
-            if !hits.is_empty() {
-                return build_retrieved_context(&hits, 4800);
-            }
-        }
-
-        // No index or no hits: use cached file listing
-        if self.listing_cache.is_none() {
-            self.listing_cache = Some(ProjectListingCache {
-                listing: String::new(),
-                dir: PathBuf::new(),
-            });
-        }
-        if let Some(ref mut cache) = self.listing_cache {
-            return cache.get_or_build(&dir, 6000).to_string();
-        }
-        String::new()
+        self.ctx.build_relevant_project_context(query)
     }
 
     /// Builds a truncated history string from recent conversation turns.
     pub(crate) fn build_chat_history(&self) -> String {
-        if self.history.is_empty() {
-            return String::new();
-        }
-        let mut out = String::from("[Previous conversation — keep context in mind]:\n\n");
-        for (user, assistant) in self.history.iter().rev().take(6).rev() {
-            let truncated_assistant = crate::truncate_to_lines(assistant, 15);
-            out.push_str(&format!("User: {}\nREM: {}\n\n", user, truncated_assistant));
-        }
-        out
+        self.history_mgr.build_chat_history()
     }
 
     /// Returns the cached project type, computing it on first call.
     pub(crate) fn get_project_type(&mut self) -> &str {
-        if self.project_type.is_none() {
-            let t = self
-                .project_dir
-                .as_deref()
-                .map(detect_project_type)
-                .unwrap_or("")
-                .to_string();
-            self.project_type = Some(t);
-        }
-        self.project_type.as_deref().unwrap_or("")
+        self.ctx.get_project_type()
     }
 
     /// Returns the project memory as context for the LLM prompt.
     pub(crate) fn build_memory_context(&self) -> String {
-        self.project_memory.as_context()
+        self.ctx.build_memory_context()
     }
 
     /// Returns the session data as a JSON value for persistence.
     pub(crate) fn to_session_json(&self) -> serde_json::Value {
         let last_files_json: Vec<serde_json::Value> = self
+            .code_out
             .last_files
             .iter()
             .map(|f| serde_json::json!({"path": f.path, "content": f.content}))
             .collect();
         serde_json::json!({
-            "history": self.history.iter().map(|(u, a)| serde_json::json!({"user": u, "assistant": a})).collect::<Vec<_>>(),
+            "history": self.history_mgr.history.iter().map(|(u, a)| serde_json::json!({"user": u, "assistant": a})).collect::<Vec<_>>(),
             "mode": self.mode.label(),
-            "workspace": self.project_dir.as_ref().map(|d| d.display().to_string()),
+            "workspace": self.ctx.project_dir.as_ref().map(|d| d.display().to_string()),
             "saved_at": crate::format_timestamp(),
-            "last_code": self.last_code,
+            "last_code": self.code_out.last_code,
             "last_files": last_files_json,
-            "last_files_written": self.last_files_written.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
+            "last_files_written": self.code_out.last_files_written.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
         })
     }
 
     /// Returns the project directory, falling back to cwd.
     pub(crate) fn session_dir(&self) -> std::path::PathBuf {
-        self.project_dir
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        self.ctx.session_dir()
     }
 
     /// Auto-saves the session to `.rem/session.json` every N messages.
@@ -273,7 +334,7 @@ impl ChatSession {
                     PathBuf::from(ref_path)
                 }
             } else {
-                let base = self.project_dir.as_deref().unwrap_or_else(|| Path::new("."));
+                let base = self.ctx.project_dir.as_deref().unwrap_or_else(|| Path::new("."));
                 match crate::resolve_safe_path(base, ref_path) {
                     Some(p) => p,
                     None => continue,
@@ -390,8 +451,8 @@ mod tests {
     #[test]
     fn to_session_json_roundtrip() {
         let mut session = make_session();
-        session.last_code = "fn main() {}".into();
-        session.history.push(("hello".into(), "world".into()));
+        session.code_out.last_code = "fn main() {}".into();
+        session.history_mgr.history.push(("hello".into(), "world".into()));
         let json = session.to_session_json();
         assert_eq!(json["mode"], "CHAT");
         assert_eq!(json["last_code"], "fn main() {}");

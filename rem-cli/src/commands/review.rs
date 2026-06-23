@@ -5,14 +5,14 @@
 use crate::chat::ChatSession;
 use crate::provider::Provider;
 use crate::ui;
-use crate::{file_icon, truncate_bytes};
+use crate::{file_icon, truncate_bytes, BackupEntry};
 use similar::{ChangeTag, TextDiff};
 use std::fs;
 use std::path::PathBuf;
 
 pub(crate) fn handle_diff(session: &ChatSession) {
     let t = ui::theme::active();
-    if session.last_files.is_empty() {
+    if session.code_out.last_files.is_empty() {
         println!(
             "{} No generated files to compare.",
             ui::theme::paint_warning(&t, "\u{2502}")
@@ -21,6 +21,7 @@ pub(crate) fn handle_diff(session: &ChatSession) {
     }
 
     let base_dir = session
+        .ctx
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -33,7 +34,7 @@ pub(crate) fn handle_diff(session: &ChatSession) {
     );
     println!("{}", ui::theme::paint_dim(&t, "\u{2502}"));
 
-    for f in &session.last_files {
+    for f in &session.code_out.last_files {
         if f.path.is_empty() {
             continue;
         }
@@ -152,15 +153,97 @@ pub(crate) fn handle_diff(session: &ChatSession) {
     println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
+/// Applies the last diff (writes all changed files) with automatic backup for undo.
+pub(crate) fn handle_apply(session: &mut ChatSession) {
+    let t = ui::theme::active();
+    if session.code_out.last_files.is_empty() {
+        println!(
+            "{} No generated files to apply.",
+            ui::theme::paint_warning(&t, "\u{2502}")
+        );
+        return;
+    }
+
+    let base_dir = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let mut backup_entries: Vec<BackupEntry> = Vec::new();
+    let mut applied = 0u32;
+
+    for f in &session.code_out.last_files {
+        if f.path.is_empty() {
+            continue;
+        }
+        let rel_path = PathBuf::from(&f.path);
+        let abs_path = if rel_path.is_relative() {
+            base_dir.join(&rel_path)
+        } else {
+            rel_path
+        };
+
+        // Capture original content for undo
+        let original = fs::read_to_string(&abs_path).ok();
+        backup_entries.push(BackupEntry {
+            path: abs_path.clone(),
+            original,
+        });
+
+        // Write the file
+        if let Some(parent) = abs_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::write(&abs_path, &f.content) {
+            Ok(()) => {
+                let icon = file_icon(&f.path);
+                let path_display = ui::theme::paint_bright(&t, &f.path);
+                println!(
+                    "  {} {} {} applied ({} bytes)",
+                    icon,
+                    path_display,
+                    ui::theme::paint_success_label(&t, "\u{2713}"),
+                    f.content.len()
+                );
+                applied += 1;
+            }
+            Err(e) => {
+                println!(
+                    "  {} {} {} failed: {}",
+                    ui::theme::paint_warning(&t, "\u{2717}"),
+                    ui::theme::paint_bright(&t, &f.path),
+                    ui::theme::paint_error_label(&t, "error"),
+                    e
+                );
+            }
+        }
+    }
+
+    if !backup_entries.is_empty() {
+        session.code_out.undo_stack.push(backup_entries);
+    }
+
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    if applied > 0 {
+        println!(
+            "  {} {} file(s) applied \u{2014} use /undo to revert",
+            ui::theme::paint_success_label(&t, "\u{2713}"),
+            applied
+        );
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
 pub(crate) async fn handle_review(client: &Provider, session: &mut ChatSession) {
     let t = ui::theme::active();
-    if session.last_files.is_empty() {
+    if session.code_out.last_files.is_empty() {
         println!("{} no generated code to review", ui::theme::paint_warning(&t, "│"));
         return;
     }
 
     let mut code_for_review = String::new();
-    for f in &session.last_files {
+    for f in &session.code_out.last_files {
         if f.path.is_empty() {
             continue;
         }
@@ -170,8 +253,8 @@ pub(crate) async fn handle_review(client: &Provider, session: &mut ChatSession) 
             truncate_bytes(&f.content, 3000)
         ));
     }
-    if code_for_review.is_empty() && !session.last_code.is_empty() {
-        code_for_review = format!("```\n{}\n```", truncate_bytes(&session.last_code, 3000));
+    if code_for_review.is_empty() && !session.code_out.last_code.is_empty() {
+        code_for_review = format!("```\n{}\n```", truncate_bytes(&session.code_out.last_code, 3000));
     }
     if code_for_review.is_empty() {
         println!("{} no code to review", ui::theme::paint_warning(&t, "│"));
@@ -192,7 +275,7 @@ pub(crate) async fn handle_review(client: &Provider, session: &mut ChatSession) 
     println!(
         "{} reviewing {} file(s)...",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
-        session.last_files.len()
+        session.code_out.last_files.len()
     );
     match client
         .complete_chat_stream(
@@ -205,7 +288,7 @@ pub(crate) async fn handle_review(client: &Provider, session: &mut ChatSession) 
         Ok(response) => {
             println!();
             println!("{}", response);
-            session.history.push(("/review".to_string(), response));
+            session.history_mgr.history.push(("/review".to_string(), response));
         }
         Err(e) => {
             println!("\n{} review failed: {}", ui::theme::paint_error_label(&t, "│"), e);

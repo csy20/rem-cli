@@ -69,7 +69,7 @@ pub(crate) async fn handle_explain(client: &Provider, session: &mut ChatSession,
         Ok(response) => {
             println!("\n{}", response);
             session.add_history(&format!("/explain {}", text));
-            session.history.push((format!("/explain {}", text), response));
+            session.history_mgr.history.push((format!("/explain {}", text), response));
         }
         Err(e) => {
             println!("\n{} explain failed: {}", ui::theme::paint_error_label(&t, "│"), e);
@@ -112,10 +112,10 @@ pub(crate) async fn handle_test(client: &Provider, session: &mut ChatSession, pa
         Ok(response) => {
             println!();
             println!("{}", response);
-            session.last_code = extract_code_block(&response);
+            session.code_out.last_code = extract_code_block(&response);
             session.add_history(&format!("/test {}", path));
-            session.history.push((format!("/test {}", path), response));
-            if !session.last_code.is_empty() {
+            session.history_mgr.history.push((format!("/test {}", path), response));
+            if !session.code_out.last_code.is_empty() {
                 println!("{} tests ready — use {} to save",
                     ui::theme::paint_success_label(&t, "│"),
                     ui::theme::paint_bright(&t, "/write <path>"));
@@ -163,7 +163,7 @@ pub(crate) async fn handle_refactor(client: &Provider, session: &mut ChatSession
             println!();
             println!("{}", response);
             session.add_history(&format!("/refactor {}", path));
-            session.history.push((format!("/refactor {}", path), response));
+            session.history_mgr.history.push((format!("/refactor {}", path), response));
         }
         Err(e) => {
             println!("\n{} refactor analysis failed: {}", ui::theme::paint_error_label(&t, "│"), e);
@@ -192,20 +192,22 @@ pub(crate) fn handle_lint(_session: &mut ChatSession, path: &str) {
 pub(crate) fn handle_lint_with_fallback(session: &mut ChatSession, args: &str) {
     let t = ui::theme::active();
     if args.is_empty() {
-        if session.last_files.is_empty() && session.last_files_written.is_empty() {
+        if session.code_out.last_files.is_empty() && session.code_out.last_files_written.is_empty() {
             println!(
                 "{} no files to lint. Generate code first.",
                 ui::theme::paint_warning(&t, "\u{258C}")
             );
         } else {
-            let paths: Vec<String> = if !session.last_files_written.is_empty() {
+            let paths: Vec<String> = if !session.code_out.last_files_written.is_empty() {
                 session
+                    .code_out
                     .last_files_written
                     .iter()
                     .map(|p| p.path.display().to_string())
                     .collect()
             } else {
                 session
+                    .code_out
                     .last_files
                     .iter()
                     .filter(|f| !f.path.is_empty())
@@ -244,6 +246,7 @@ pub(crate) fn handle_find(session: &ChatSession, query: &str) {
     }
 
     let root = session
+        .ctx
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());

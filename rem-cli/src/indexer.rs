@@ -26,9 +26,10 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::find;
+use futures_util::future::join_all;
+use std::io::Write;
 
 const INDEX_VERSION: u32 = 2;
 
@@ -158,8 +159,9 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
     tokens
 }
 
-/// BM25 retrieval using `doc_freqs` from the pre-built index for correct IDF computation.
-/// Still scans all chunks to include name/path/chunk-type bonuses even on zero-BM25 chunks.
+/// BM25 retrieval using the pre-built inverted index for O(log n) candidate lookup
+/// instead of scanning all chunks. Name/path/type bonuses are still checked on all
+/// chunks for completeness.
 pub fn retrieve_relevant_chunks<'a>(
     index: &'a CodebaseIndex,
     query: &str,
@@ -174,6 +176,16 @@ pub fn retrieve_relevant_chunks<'a>(
         return vec![];
     }
 
+    // Use inverted index to find candidate chunks (ones containing at least one query term)
+    let mut candidate_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for w in &q_words {
+        if let Some(ids) = index.inverted_index.get(w) {
+            for &id in ids {
+                candidate_indices.insert(id);
+            }
+        }
+    }
+
     const K1: f64 = 1.5;
     const B: f64 = 0.75;
     let n = index.chunks.len() as f64;
@@ -183,61 +195,72 @@ pub fn retrieve_relevant_chunks<'a>(
         1.0
     };
 
-    let has_any_embedding = index.chunks.iter().any(|c| c.embedding.is_some());
+    let mut scored: Vec<(f64, &IndexChunk)> = Vec::with_capacity(candidate_indices.len() + 16);
 
-    let mut scored: Vec<(f64, &IndexChunk)> = index
-        .chunks
-        .iter()
-        .filter_map(|c| {
-            let mut score = 0.0f64;
-            let dl = c.content.len() as f64;
+    // BM25 scoring only on candidate chunks (those containing query terms in content)
+    for &idx in &candidate_indices {
+        let c = &index.chunks[idx];
+        let mut score = 0.0f64;
+        let dl = c.content.len() as f64;
 
-            for w in &q_words {
-                let tf_val = count_occurrences(&c.content_lower, w);
-                if tf_val == 0 {
-                    continue;
-                }
-                let tf = tf_val as f64;
-                let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg_dl)));
-                let df = index.doc_freqs.get(w).copied().unwrap_or(1) as f64;
-                let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-
-                score += tf_norm * idf;
+        for w in &q_words {
+            let tf_val = count_occurrences(&c.content_lower, w);
+            if tf_val == 0 {
+                continue;
             }
+            let tf = tf_val as f64;
+            let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg_dl)));
+            let df = index.doc_freqs.get(w).copied().unwrap_or(1) as f64;
+            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            score += tf_norm * idf;
+        }
 
-            // Name/path bonus
-            for w in &q_words {
-                if c.name_lower.contains(w) || c.path_lower.contains(w) {
-                    score += 2.0;
-                }
+        // Name/path bonus for candidates
+        for w in &q_words {
+            if c.name_lower.contains(w) || c.path_lower.contains(w) {
+                score += 2.0;
             }
+        }
 
-            // Chunk type bonus
-            if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
-                score += 0.5;
+        // Chunk type bonus
+        if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
+            score += 0.5;
+        }
+
+        // Semantic score from embeddings
+        if let Some(ref emb) = c.embedding {
+            let query_emb: Vec<f32> = q_words
+                .iter()
+                .map(|w| if c.content_lower.contains(w) { 1.0 } else { 0.0 })
+                .collect();
+            if !query_emb.is_empty() && query_emb.len() == emb.len() {
+                score += cosine_similarity(emb, &query_emb) * 3.0;
             }
+        }
 
-            if score <= 0.0 {
-                return None;
+        if score > 0.0 {
+            scored.push((score, c));
+        }
+    }
+
+    // Also scan all chunks for name/path matches that weren't content candidates
+    for (idx, c) in index.chunks.iter().enumerate() {
+        if candidate_indices.contains(&idx) {
+            continue; // already scored
+        }
+        let mut bonus = 0.0f64;
+        for w in &q_words {
+            if c.name_lower.contains(w) || c.path_lower.contains(w) {
+                bonus += 2.0;
             }
-
-            // Semantic score from embeddings (if available)
-            if has_any_embedding {
-                if let Some(ref emb) = c.embedding {
-                    let query_emb: Vec<f32> = q_words
-                        .iter()
-                        .map(|w| if c.content_lower.contains(w) { 1.0 } else { 0.0 })
-                        .collect();
-                    if !query_emb.is_empty() && query_emb.len() == emb.len() {
-                        let sim = cosine_similarity(emb, &query_emb);
-                        score += sim * 3.0;
-                    }
-                }
-            }
-
-            Some((score, c))
-        })
-        .collect();
+        }
+        if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
+            bonus += 0.5;
+        }
+        if bonus > 0.0 {
+            scored.push((bonus, c));
+        }
+    }
 
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -318,6 +341,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     let mut file_entries: Vec<FileEntryToProcess> = Vec::new();
     let mut file_mtimes: HashMap<String, u64> = HashMap::new();
     let mut changed_files = 0u32;
+    let mut scanned_count = 0u32;
 
     for entry in WalkBuilder::new(root)
         .max_depth(Some(8))
@@ -361,6 +385,12 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
             continue;
         }
 
+        scanned_count += 1;
+        if scanned_count % 100 == 0 {
+            eprint!("\r  scanning... {} files", scanned_count);
+            let _ = std::io::stderr().flush();
+        }
+
         let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if name.ends_with(".rs.bk") || name.contains(".lock") || name.ends_with(".bin") {
             continue;
@@ -397,6 +427,12 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
             line_count,
         });
         changed_files += 1;
+    }
+
+    // Clear progress line
+    if scanned_count >= 100 {
+        eprint!("\r{}\r", " ".repeat(60));
+        let _ = std::io::stderr().flush();
     }
 
     // If nothing changed, recycle existing chunks
@@ -639,10 +675,11 @@ fn file_mtime(path: &Path) -> u64 {
 }
 
 /// Computes embeddings for chunks using Ollama's /api/embed endpoint.
+/// Uses async reqwest with batched concurrent requests for large chunk sets.
 /// Falls back silently if Ollama is unavailable.
-pub fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+pub async fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
         .build()
         .ok();
     let client = match client {
@@ -650,32 +687,45 @@ pub fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
         None => return,
     };
 
-    for chunk in chunks.iter_mut() {
-        let text = if chunk.content.len() > 8000 {
-            &chunk.content[..8000]
-        } else {
-            &chunk.content
-        };
-        if text.trim().is_empty() {
-            continue;
-        }
-        let url = format!("{}/api/embed", ollama_url.trim_end_matches('/'));
-        let payload = json!({
-            "model": "nomic-embed-text",
-            "input": text
-        });
-        if let Ok(resp) = client.post(&url).json(&payload).send() {
-            if let Ok(body) = resp.json::<serde_json::Value>() {
-                if let Some(embeddings) = body["embeddings"].as_array() {
-                    if let Some(embedding) = embeddings.first() {
-                        if let Some(vec) = embedding.as_array() {
-                            let v: Vec<f32> = vec.iter().filter_map(|v| v.as_f64().map(|f| f as f32)).collect();
-                            if !v.is_empty() {
-                                chunk.embedding = Some(v);
-                            }
-                        }
-                    }
+    let url = format!("{}/api/embed", ollama_url.trim_end_matches('/'));
+    let batch_size = 10;
+    for batch in chunks.chunks_mut(batch_size) {
+        let mut futures = Vec::with_capacity(batch.len());
+        for chunk in batch.iter() {
+            let text = if chunk.content.len() > 8000 {
+                &chunk.content[..8000]
+            } else {
+                &chunk.content
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let payload = serde_json::json!({
+                "model": "nomic-embed-text",
+                "input": text
+            });
+            let req = client.post(&url).json(&payload).send();
+            futures.push(async move {
+                let resp = req.await.ok()?;
+                let body: serde_json::Value = resp.json().await.ok()?;
+                let embeddings = body.get("embeddings")?.as_array()?;
+                let embedding = embeddings.first()?;
+                let vec: Vec<f32> = embedding
+                    .as_array()?
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+                if vec.is_empty() {
+                    None
+                } else {
+                    Some(vec)
                 }
+            });
+        }
+        let results: Vec<Option<Vec<f32>>> = join_all(futures).await;
+        for (chunk, result) in batch.iter_mut().zip(results) {
+            if let Some(emb) = result {
+                chunk.embedding = Some(emb);
             }
         }
     }

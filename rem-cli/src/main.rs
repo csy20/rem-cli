@@ -19,6 +19,7 @@ mod chat;
 mod cli;
 mod commands;
 mod config;
+mod constants;
 mod feedback;
 mod find;
 mod highlight;
@@ -152,7 +153,32 @@ RULES — follow strictly:
 4. THIRD: propose an approach with alternatives and trade-offs.
 5. FOURTH: recommend a concrete next step.
 6. DO NOT generate any code. DO NOT output files. NO code fences. NO JSON.
-7. Respond in clear markdown sections: ## Analysis, ## Approach, ## Trade-offs, ## Recommendation.
+7. Respond using this exact structured format:
+
+## Analysis
+<what needs to be done, context, requirements>
+
+## Proposed Approach
+<your recommended solution with architecture decisions>
+
+## Implementation Plan
+### Step 1: <short description>
+- **File(s):** <paths>
+- **Action:** <what to do>
+
+### Step 2: <short description>
+- **File(s):** <paths>
+- **Action:** <what to do>
+
+## Alternatives Considered
+<briefly mention 1-2 alternatives and why they weren't chosen>
+
+## Trade-offs & Risks
+<key trade-offs, risks, and mitigations>
+
+## Recommendation
+<concise next step>
+
 8. End with: "Should I proceed with this plan? Type /mode to switch to CODE when ready."
 "##;
 
@@ -196,7 +222,7 @@ async fn main() -> Result<()> {
         return run_new(args, &cfg);
     }
     if let Some(Commands::Index(args)) = cli.command {
-        return run_index(args, &cfg);
+        return run_index(args, &cfg).await;
     }
     if let Some(Commands::Pull(args)) = cli.command {
         return run_pull(args, &cfg);
@@ -534,7 +560,7 @@ fn run_theme(args: ThemeArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
+async fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     let t = ui::theme::active();
     let dir = args.dir.clone().unwrap_or_else(|| {
         cfg.workspace_dir
@@ -574,7 +600,7 @@ fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
             ui::theme::paint(&t, "accent", "\u{258C}", true),
             ui::theme::paint_dim(&t, "\u{2699}")
         );
-        indexer::compute_embeddings(&mut chunks, &cfg.ollama_url);
+        indexer::compute_embeddings(&mut chunks, &cfg.ollama_url).await;
         let embedded = chunks.iter().filter(|c| c.embedding.is_some()).count();
         println!(
             "{} {} {} chunks embedded",

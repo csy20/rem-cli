@@ -159,7 +159,7 @@ pub(crate) fn handle_plan(session: &mut ChatSession, cfg: &mut AppConfig) {
 
 pub(crate) fn handle_clear(session: &mut ChatSession) {
     let t = ui::theme::active();
-    session.history.clear();
+    session.history_mgr.history.clear();
     session.last_search.clear();
     session.last_tokens = 0;
     let rail = ui::theme::paint_rail_empty(&t);
@@ -171,12 +171,12 @@ pub(crate) fn handle_clear(session: &mut ChatSession) {
 
 pub(crate) fn handle_reset(session: &mut ChatSession) {
     let t = ui::theme::active();
-    session.history.clear();
+    session.history_mgr.history.clear();
     session.last_search.clear();
     session.last_tokens = 0;
-    session.last_code.clear();
-    session.last_files.clear();
-    session.last_files_written.clear();
+    session.code_out.last_code.clear();
+    session.code_out.last_files.clear();
+    session.code_out.last_files_written.clear();
     let rail = ui::theme::paint_rail_empty(&t);
     let msg = ui::theme::paint_success_label(&t, "full reset \u{2014} history, code cache, and results cleared");
     let sub = ui::theme::paint_dim(&t, "(memory preserved \u{2014} use /memory to clear project memory)");
@@ -287,6 +287,7 @@ pub(crate) fn handle_reasoning(client: &mut Provider, cfg: &mut AppConfig, tail:
 pub(crate) fn handle_watch(session: &ChatSession) {
     let t = ui::theme::active();
     let dir = session
+        .ctx
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());

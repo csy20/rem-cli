@@ -66,10 +66,10 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
 
                 let files = extract_code_blocks_with_names(&text);
                 if !files.is_empty() {
-                    session.last_files = files.clone();
+                    session.code_out.last_files = files.clone();
                     crate::commands::auto_write_files(session, &files);
                 }
-                session.history.push((format!("/goal {}", condition), text));
+                session.history_mgr.history.push((format!("/goal {}", condition), text));
             }
             Err(e) => {
                 println!(
@@ -146,18 +146,21 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         };
 
         let cleaned = text.trim().to_string();
-        session.history.push((format!("/goal {}", condition), cleaned.clone()));
+        session
+            .history_mgr
+            .history
+            .push((format!("/goal {}", condition), cleaned.clone()));
 
         let files = extract_code_blocks_with_names(&cleaned);
         let code = extract_code_block(&cleaned);
         if !files.is_empty() {
-            session.last_files = files.clone();
-            session.last_code = if code.is_empty() { String::new() } else { code };
+            session.code_out.last_files = files.clone();
+            session.code_out.last_code = if code.is_empty() { String::new() } else { code };
             crate::commands::auto_write_files(session, &files);
             last_written_files = files.iter().map(|f| f.path.clone()).collect();
         } else if !code.is_empty() {
-            session.last_code = code;
-            session.last_files.clear();
+            session.code_out.last_code = code;
+            session.code_out.last_files.clear();
             println!(
                 "{} {} use /write <path> to save",
                 ui::theme::paint(&t, "accent", "\u{258C}", true),

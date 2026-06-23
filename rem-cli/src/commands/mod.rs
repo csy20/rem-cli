@@ -151,6 +151,12 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/apply",
+            CommandInfo {
+                description: "Apply the last diff (write changed files with backup for undo)",
+            },
+        ),
+        (
             "/tokens",
             CommandInfo {
                 description: "Show token usage statistics",
@@ -287,7 +293,7 @@ pub(crate) use repl::{
     handle_clear, handle_mode, handle_model, handle_plan, handle_provider, handle_reasoning, handle_reset,
     handle_theme, handle_watch, handle_why,
 };
-pub(crate) use review::{handle_diff, handle_review};
+pub(crate) use review::{handle_apply, handle_diff, handle_review};
 pub(crate) use session::{
     handle_compact, handle_config, handle_config_set, handle_dir, handle_init, handle_list_files, handle_memory,
     handle_memory_set, handle_resume_session, handle_save_session, handle_tokens,

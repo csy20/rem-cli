@@ -73,8 +73,8 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
     };
 
     if resolved.exists() {
-        session.project_dir = Some(resolved.clone());
-        session.workspace_dir = Some(resolved.clone());
+        session.ctx.project_dir = Some(resolved.clone());
+        session.ctx.workspace_dir = Some(resolved.clone());
         persist_workspace(&resolved);
         println!(
             "  {} workspace set to {}",
@@ -90,8 +90,8 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
             println!("  {} failed: {}", ui::theme::paint_error_label(&t, "✗"), e);
             return;
         }
-        session.project_dir = Some(resolved.clone());
-        session.workspace_dir = Some(resolved.clone());
+        session.ctx.project_dir = Some(resolved.clone());
+        session.ctx.workspace_dir = Some(resolved.clone());
         persist_workspace(&resolved);
         println!(
             "  {} workspace set to {}",
@@ -104,6 +104,7 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
 /// Lists project files in a tree view (`/files` command).
 pub(crate) fn handle_list_files(session: &ChatSession) {
     let dir = session
+        .ctx
         .project_dir
         .as_ref()
         .cloned()
@@ -211,6 +212,7 @@ pub(crate) fn handle_config(session: &ChatSession, client: &Provider) {
         ui::theme::paint_dim(
             &t,
             &session
+                .ctx
                 .project_dir
                 .as_ref()
                 .map(|d| d.display().to_string())
@@ -261,6 +263,7 @@ pub(crate) fn handle_tokens(session: &ChatSession, client: &Provider) {
     let tokens = session.last_tokens;
     let elapsed = session.last_elapsed.as_secs_f64();
     let history_tokens: usize = session
+        .history_mgr
         .history
         .iter()
         .map(|(u, a)| estimate_tokens_batch(&[u, a]))
@@ -308,7 +311,11 @@ pub(crate) fn handle_tokens(session: &ChatSession, client: &Provider) {
             ui::theme::paint_bright(&t, "context history:"),
             ui::theme::paint_dim(
                 &t,
-                &format!("~{} tokens ({} turns)", history_tokens, session.history.len())
+                &format!(
+                    "~{} tokens ({} turns)",
+                    history_tokens,
+                    session.history_mgr.history.len()
+                )
             )
         );
 
@@ -366,8 +373,8 @@ pub(crate) fn handle_tokens(session: &ChatSession, client: &Provider) {
 pub(crate) fn handle_memory(session: &ChatSession) {
     let t = ui::theme::active();
     println!("{}", ui::theme::paint_rail_header(&t, "MEMORY"));
-    if session.project_memory.loaded && !session.project_memory.content.is_empty() {
-        for line in session.project_memory.content.lines() {
+    if session.ctx.project_memory.loaded && !session.ctx.project_memory.content.is_empty() {
+        for line in session.ctx.project_memory.content.lines() {
             println!(
                 "{} {}",
                 ui::theme::paint(&t, "accent", "\u{258C}", true),
@@ -399,14 +406,14 @@ pub(crate) fn handle_memory(session: &ChatSession) {
 pub(crate) fn handle_memory_set(session: &mut ChatSession, args: &str) {
     let t = ui::theme::active();
     if args.eq_ignore_ascii_case("clear") {
-        session.project_memory.content.clear();
-        session.project_memory.loaded = false;
-        let _ = session.project_memory.save();
+        session.ctx.project_memory.content.clear();
+        session.ctx.project_memory.loaded = false;
+        let _ = session.ctx.project_memory.save();
         println!("{} memory cleared", ui::theme::paint_success_label(&t, "\u{2713}"));
         return;
     }
     if let Some(text) = args.strip_prefix("add ") {
-        if let Err(e) = session.project_memory.append(text) {
+        if let Err(e) = session.ctx.project_memory.append(text) {
             println!("{} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
         } else {
             println!(
@@ -417,7 +424,7 @@ pub(crate) fn handle_memory_set(session: &mut ChatSession, args: &str) {
         }
         return;
     }
-    if let Err(e) = session.project_memory.set(args) {
+    if let Err(e) = session.ctx.project_memory.set(args) {
         println!("{} failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e);
     } else {
         println!(
@@ -431,6 +438,7 @@ pub(crate) fn handle_memory_set(session: &mut ChatSession, args: &str) {
 /// Generates starter project memory (`/init` command).
 pub(crate) fn handle_init(session: &mut ChatSession) {
     let dir = session
+        .ctx
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -449,7 +457,7 @@ pub(crate) fn handle_init(session: &mut ChatSession) {
         ui::theme::paint_dim(&t, "generating .rem/memory.md...")
     );
     let starter = ProjectMemory::generate_starter(&dir, ptype);
-    if let Err(e) = session.project_memory.set(&starter) {
+    if let Err(e) = session.ctx.project_memory.set(&starter) {
         println!(
             "{} {} failed: {}",
             ui::theme::paint_error_label(&t, "\u{258C}"),
@@ -476,7 +484,7 @@ pub(crate) fn handle_init(session: &mut ChatSession) {
 /// Compacts conversation history via LLM summarization (`/compact`).
 pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession) {
     let t = ui::theme::active();
-    if session.history.is_empty() {
+    if session.history_mgr.history.is_empty() {
         println!(
             "{} nothing to compact — history is empty",
             ui::theme::paint_warning(&t, "│")
@@ -491,9 +499,9 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
     println!(
         "{} compacting {} turns...",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
-        session.history.len()
+        session.history_mgr.history.len()
     );
-    let saved_history = session.history.clone();
+    let saved_history = session.history_mgr.history.clone();
     match client
         .complete_chat_stream(
             &compact_prompt,
@@ -503,9 +511,10 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
         .await
     {
         Ok(summary) => {
-            let old_count = session.history.len();
-            session.history.clear();
+            let old_count = session.history_mgr.history.len();
+            session.history_mgr.history.clear();
             session
+                .history_mgr
                 .history
                 .push(("[compacted summary]".to_string(), summary.trim().to_string()));
             println!(
@@ -513,11 +522,11 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
                 ui::theme::paint(&t, "accent", "\u{258C}", true),
                 ui::theme::paint_success_label(&t, "✓ compacted:"),
                 old_count,
-                session.history.len()
+                session.history_mgr.history.len()
             );
         }
         Err(e) => {
-            session.history = saved_history;
+            session.history_mgr.history = saved_history;
             println!(
                 "{} {} compact failed: {}",
                 ui::theme::paint(&t, "accent", "\u{258C}", true),
@@ -546,6 +555,7 @@ fn read_maybe_gzip(path: &std::path::Path) -> std::io::Result<String> {
 pub(crate) fn handle_save_session(session: &ChatSession) {
     let t = ui::theme::active();
     let dir = session
+        .ctx
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -574,6 +584,7 @@ pub(crate) fn handle_save_session(session: &ChatSession) {
 pub(crate) fn handle_resume_session(session: &mut ChatSession) {
     let t = ui::theme::active();
     let dir = session
+        .ctx
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
@@ -593,7 +604,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                     let mut restored = 0;
                     for entry in history {
                         if let (Some(u), Some(a)) = (entry["user"].as_str(), entry["assistant"].as_str()) {
-                            session.history.push((u.to_string(), a.to_string()));
+                            session.history_mgr.history.push((u.to_string(), a.to_string()));
                             restored += 1;
                         }
                     }
@@ -618,7 +629,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                 }
                 if let Some(code) = data["last_code"].as_str() {
                     if !code.is_empty() {
-                        session.last_code = code.to_string();
+                        session.code_out.last_code = code.to_string();
                         println!(
                             "{} {} {}",
                             ui::theme::paint_dim(&t, "\u{258C}"),
@@ -644,7 +655,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                             ui::theme::paint_dim(&t, "last files:"),
                             restored_files.len()
                         );
-                        session.last_files = restored_files;
+                        session.code_out.last_files = restored_files;
                     }
                 }
                 if let Some(paths) = data["last_files_written"].as_array() {
@@ -658,7 +669,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                         })
                         .collect();
                     if !written.is_empty() {
-                        session.last_files_written = written;
+                        session.code_out.last_files_written = written;
                     }
                 }
             } else {
@@ -684,7 +695,7 @@ mod tests {
         let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
 
         handle_dir(&mut session, tmp.to_str().unwrap());
-        assert_eq!(session.project_dir, Some(tmp.clone()));
+        assert_eq!(session.ctx.project_dir, Some(tmp.clone()));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
