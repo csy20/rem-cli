@@ -57,6 +57,14 @@ pub(crate) fn format_timestamp() -> String {
 
     let mut y = 1970i64;
     let mut d = days as i64;
+    // Fast-forward by 400-year blocks (146097 days) to avoid iterating
+    // year-by-year for large day offsets.
+    const DAYS_IN_400_YEARS: i64 = 146097;
+    if d >= DAYS_IN_400_YEARS {
+        let blocks = d / DAYS_IN_400_YEARS;
+        y += blocks * 400;
+        d -= blocks * DAYS_IN_400_YEARS;
+    }
     loop {
         let year_days = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
             366
@@ -150,5 +158,58 @@ mod tests {
         let out = truncate_bytes(s, 5);
         assert_eq!(out, "Hell\n...[truncated]");
         assert!(!out.contains('\u{00e9}'));
+    }
+
+    #[test]
+    fn prop_truncate_bytes_never_exceeds_limit() {
+        proptest::proptest!(|(s: String, limit in 0usize..1000)| {
+            let result = truncate_bytes(&s, limit);
+            // The truncated suffix "\n...[truncated]" is 14 bytes,
+            // but we bound by limit + 20 for a reasonable upper bound.
+            assert!(result.len() <= limit + 20,
+                "truncate_bytes({}, {}) = {} (len {})",
+                s, limit, result, result.len());
+        });
+    }
+
+    #[test]
+    fn prop_truncate_bytes_preserves_prefix() {
+        proptest::proptest!(|(s: String, limit in 10usize..500usize)| {
+            let result = truncate_bytes(&s, limit);
+            if s.is_empty() {
+                assert!(result.contains("[truncated]"), "empty string should return truncated");
+            } else if s.len() > limit {
+                assert!(result.contains("[truncated]"), "result should indicate truncation");
+                if result != "[truncated]" {
+                    let suffix = "\n...[truncated]";
+                    let prefix = &result[..result.len() - suffix.len()];
+                    assert!(s.starts_with(prefix),
+                        "truncated result should be a prefix of original");
+                }
+            } else {
+                assert_eq!(result, s, "result should equal original when under limit");
+            }
+        });
+    }
+
+    #[test]
+    fn prop_human_size_never_empty() {
+        proptest::proptest!(|(bytes: u64)| {
+            let result = human_size(bytes);
+            assert!(!result.is_empty(), "human_size({}) should not be empty", bytes);
+            assert!(result.len() < 20, "human_size({}) = '{}' should be compact", bytes, result);
+        });
+    }
+
+    #[test]
+    fn prop_truncate_to_lines_respects_limit() {
+        proptest::proptest!(|(lines in proptest::collection::vec("[a-z]{0,20}", 0..50), max_lines in 1usize..20usize)| {
+            let text = lines.join("\n");
+            let result = truncate_to_lines(&text, max_lines);
+            let result_lines = result.lines().count();
+            // May have +1 for the "[truncated]" line
+            assert!(result_lines <= max_lines + 1,
+                "truncate_to_lines with max_lines={} returned {} lines", max_lines, result_lines);
+        });
     }
 }

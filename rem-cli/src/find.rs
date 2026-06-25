@@ -2,15 +2,14 @@
 //! Walks the project tree with `walkdir`, reads each file with a size cap,
 //! and returns every line matching the query. Skips hidden/build/lock dirs.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use ignore::WalkBuilder;
-
-const DEFAULT_MAX_FILE_BYTES: u64 = 64 * 1024;
-const DEFAULT_MAX_RESULTS: usize = 500;
-const DEFAULT_MAX_DEPTH: usize = 8;
 
 /// A single hit in a single file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,9 +34,9 @@ pub struct FindOptions {
 impl Default for FindOptions {
     fn default() -> Self {
         Self {
-            max_results: DEFAULT_MAX_RESULTS,
-            max_file_bytes: DEFAULT_MAX_FILE_BYTES,
-            max_depth: DEFAULT_MAX_DEPTH,
+            max_results: crate::constants::FIND_MAX_RESULTS,
+            max_file_bytes: crate::constants::FIND_MAX_FILE_BYTES,
+            max_depth: crate::constants::FIND_MAX_DEPTH,
             case_sensitive: true,
             use_regex: false,
         }
@@ -77,6 +76,8 @@ pub const SKIP_SUFFIXES: &[&str] = &[
     ".min.js", ".min.css", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".tar", ".gz",
     ".bz2", ".xz", ".7z", ".mp3", ".mp4", ".mov", ".woff", ".woff2", ".ttf", ".otf", ".eot",
 ];
+
+static REGEX_CACHE: LazyLock<Mutex<HashMap<String, regex::Regex>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Checks whether a directory name should be skipped during traversal.
 pub fn should_skip_dir(name: &str) -> bool {
@@ -133,7 +134,13 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
         } else {
             format!("(?i){}", query)
         };
-        regex::Regex::new(&re_query).ok()
+        let mut cache = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        Some(
+            cache
+                .entry(re_query.clone())
+                .or_insert_with(|| regex::Regex::new(&re_query).expect("invalid regex pattern"))
+                .clone(),
+        )
     } else {
         None
     };

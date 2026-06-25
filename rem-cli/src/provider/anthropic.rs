@@ -81,6 +81,105 @@ pub struct AnthropicModelEntry {
 
 pub(super) struct AnthropicBackend;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anthropic_usage_default() {
+        let usage = AnthropicUsage::default();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn anthropic_usage_clone() {
+        let usage = AnthropicUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_creation_input_tokens: 5,
+            cache_read_input_tokens: 3,
+        };
+        let cloned = usage.clone();
+        assert_eq!(cloned.input_tokens, 10);
+        assert_eq!(cloned.output_tokens, 20);
+        assert_eq!(cloned.cache_creation_input_tokens, 5);
+        assert_eq!(cloned.cache_read_input_tokens, 3);
+    }
+
+    #[test]
+    fn anthropic_response_deserialize() {
+        let json = r#"{"content":[{"type":"text","text":"hello"}]}"#;
+        let resp: AnthropicResponse = serde_json::from_str(json).unwrap();
+        let text = resp.content.and_then(|c| c.into_iter().next()).and_then(|b| b.text);
+        assert_eq!(text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn anthropic_response_empty_content() {
+        let json = r#"{}"#;
+        let resp: AnthropicResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.content.is_none());
+    }
+
+    #[test]
+    fn anthropic_stream_chunk_content_block_delta() {
+        let json = r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}"#;
+        let chunk: AnthropicStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.chunk_type.as_deref(), Some("content_block_delta"));
+        assert_eq!(chunk.delta.as_ref().and_then(|d| d.text.as_deref()), Some("world"));
+    }
+
+    #[test]
+    fn anthropic_stream_chunk_message_start_with_usage() {
+        let json = r#"{"type":"message_start","message":{"usage":{"input_tokens":15,"output_tokens":5}}}"#;
+        let chunk: AnthropicStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.chunk_type.as_deref(), Some("message_start"));
+        let usage = chunk.message.and_then(|m| m.usage);
+        assert!(usage.is_some());
+        assert_eq!(usage.as_ref().and_then(|u| u.input_tokens), Some(15));
+    }
+
+    #[test]
+    fn anthropic_stream_chunk_message_delta_with_usage() {
+        let json = r#"{"type":"message_delta","usage":{"output_tokens":25}}"#;
+        let chunk: AnthropicStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.chunk_type.as_deref(), Some("message_delta"));
+        assert_eq!(chunk.usage.as_ref().and_then(|u| u.output_tokens), Some(25));
+    }
+
+    #[test]
+    fn anthropic_content_block_with_tool_use() {
+        let json = r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"read_file"}}"#;
+        let chunk: AnthropicStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.chunk_type.as_deref(), Some("content_block_start"));
+        let block = chunk.content_block.as_ref().unwrap();
+        assert_eq!(block.block_type.as_deref(), Some("tool_use"));
+        assert_eq!(block.id.as_deref(), Some("tu_1"));
+        assert_eq!(block.name.as_deref(), Some("read_file"));
+    }
+
+    #[test]
+    fn anthropic_delta_with_partial_json() {
+        let json = r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#;
+        let chunk: AnthropicStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            chunk.delta.as_ref().and_then(|d| d.delta_type.as_deref()),
+            Some("input_json_delta")
+        );
+        assert!(chunk.delta.as_ref().and_then(|d| d.partial_json.as_deref()).is_some());
+    }
+
+    #[test]
+    fn anthropic_models_response_deserialize() {
+        let json = r#"{"data":[{"id":"claude-sonnet-4-20250514"},{"id":"claude-haiku"}]}"#;
+        let resp: AnthropicModelsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.as_ref().map(|d| d.len()), Some(2));
+    }
+}
+
 #[async_trait]
 impl ProviderBackend for AnthropicBackend {
     async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
@@ -143,7 +242,7 @@ impl ProviderBackend for AnthropicBackend {
             "messages": [
                 {"role": "user", "content": content_blocks}
             ],
-            "max_tokens": 4096,
+            "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
             "stream": true
         });
 
@@ -180,7 +279,7 @@ impl ProviderBackend for AnthropicBackend {
             "messages": [
                 {"role": "user", "content": format!("{}\n\nReturn JSON only. Respond with a valid JSON object.", user_prompt)}
             ],
-            "max_tokens": 512
+            "max_tokens": crate::constants::JSON_MAX_TOKENS
         });
 
         let resp = provider
@@ -236,7 +335,7 @@ impl ProviderBackend for AnthropicBackend {
             "model": provider.model,
             "system": system_with_cache,
             "messages": messages,
-            "max_tokens": 4096,
+            "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
             "stream": true
         });
 
@@ -297,7 +396,7 @@ impl ProviderBackend for AnthropicBackend {
             "model": provider.model,
             "system": system_with_cache,
             "messages": messages,
-            "max_tokens": 4096,
+            "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
             "stream": true
         });
         if !tools.is_empty() {
@@ -319,7 +418,7 @@ impl ProviderBackend for AnthropicBackend {
             return Err(provider.parse_api_error("Anthropic", resp).await);
         }
 
-        let mut full_text = String::with_capacity(4096);
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
         let mut tool_calls: Vec<(u32, String, String, String)> = Vec::new();
 
         Provider::stream_buf(resp, |trimmed| {

@@ -172,3 +172,201 @@ pub fn detect_language_from_content(code: &str) -> &str {
     }
     ""
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_html_from_doctype() {
+        assert_eq!(detect_language_from_content("<!DOCTYPE html>"), "html");
+    }
+
+    #[test]
+    fn detect_html_from_tag() {
+        assert_eq!(detect_language_from_content("<div>"), "html");
+    }
+
+    #[test]
+    fn detect_rust_from_fn() {
+        assert_eq!(detect_language_from_content("fn main() {"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_pub() {
+        assert_eq!(detect_language_from_content("pub fn foo() {"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_impl() {
+        assert_eq!(detect_language_from_content("impl Foo {"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_struct() {
+        assert_eq!(detect_language_from_content("struct Point {"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_use() {
+        assert_eq!(detect_language_from_content("use std::collections;"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_hash_bracket() {
+        assert_eq!(detect_language_from_content("#[derive(Debug)]"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_unsafe() {
+        assert_eq!(detect_language_from_content("unsafe {"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_enum() {
+        assert_eq!(detect_language_from_content("enum Color {"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_trait() {
+        assert_eq!(detect_language_from_content("trait Animal {"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_mod() {
+        assert_eq!(detect_language_from_content("mod foo;"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_let() {
+        assert_eq!(detect_language_from_content("let x = 5;"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_const() {
+        assert_eq!(detect_language_from_content("const MAX: usize = 100;"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_static() {
+        assert_eq!(detect_language_from_content("static NAME: &str = \"hello\";"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_async() {
+        assert_eq!(detect_language_from_content("async fn fetch() {"), "rust");
+    }
+
+    #[test]
+    fn detect_rust_from_type() {
+        assert_eq!(
+            detect_language_from_content("type Result<T> = std::result::Result<T, Error>;"),
+            "rust"
+        );
+    }
+
+    #[test]
+    fn detect_rust_from_macro_rules() {
+        assert_eq!(detect_language_from_content("macro_rules! vec {"), "rust");
+    }
+
+    #[test]
+    fn detect_go_from_func() {
+        assert_eq!(detect_language_from_content("func main() {"), "go");
+    }
+
+    #[test]
+    fn detect_go_from_package() {
+        assert_eq!(detect_language_from_content("package main"), "go");
+    }
+
+    #[test]
+    fn detect_go_from_import_string() {
+        assert_eq!(detect_language_from_content("import \"fmt\""), "go");
+    }
+
+    #[test]
+    fn detect_python_from_def() {
+        assert_eq!(detect_language_from_content("def hello():"), "python");
+    }
+
+    #[test]
+    fn detect_python_from_class() {
+        assert_eq!(detect_language_from_content("class MyClass:"), "python");
+    }
+
+    #[test]
+    fn detect_python_from_print() {
+        assert_eq!(detect_language_from_content("print(\"hello\")"), "python");
+    }
+
+    #[test]
+    fn detect_c_from_include() {
+        assert_eq!(detect_language_from_content("#include <stdio.h>"), "c");
+    }
+
+    #[test]
+    fn detect_c_from_int() {
+        assert_eq!(detect_language_from_content("int main() {"), "c");
+    }
+
+    #[test]
+    fn detect_c_from_void() {
+        assert_eq!(detect_language_from_content("void foo() {"), "c");
+    }
+
+    #[test]
+    fn detect_js_from_function() {
+        assert_eq!(detect_language_from_content("function foo() {"), "js");
+    }
+
+    #[test]
+    fn detect_empty_string() {
+        assert_eq!(detect_language_from_content(""), "");
+    }
+
+    #[test]
+    fn detect_whitespace() {
+        assert_eq!(detect_language_from_content("   "), "");
+    }
+
+    #[test]
+    fn highlight_html_wraps_in_colored_output() {
+        let result = highlight_code("<div class=\"foo\">hello</div>", "html");
+        assert!(result.contains("hello"));
+        assert!(result.contains("div"));
+    }
+
+    #[test]
+    fn highlight_css_wraps_in_colored_output() {
+        let result = highlight_code("body { color: red; }", "css");
+        assert!(result.contains("body"));
+        assert!(result.contains("color"));
+    }
+
+    #[test]
+    fn highlight_js_wraps_in_colored_output() {
+        let result = highlight_code("const x = 1;", "js");
+        assert!(result.contains("const"));
+        assert!(result.contains("x"));
+    }
+
+    #[test]
+    fn highlight_typescript_wraps_in_colored_output() {
+        let result = highlight_code("const x: number = 1;", "typescript");
+        assert!(result.contains("const"));
+    }
+
+    #[test]
+    fn highlight_generic_returns_unchanged() {
+        let code = "some random code without known language";
+        let result = highlight_code(code, "unknown");
+        assert_eq!(result, code);
+    }
+
+    #[test]
+    fn highlight_empty_string() {
+        let result = highlight_code("", "html");
+        assert_eq!(result, "");
+    }
+}

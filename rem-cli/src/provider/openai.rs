@@ -4,9 +4,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::tools::{ToolResponse, ToolSpec};
-use super::{Provider, ProviderBackend};
+use super::{ProviderBackend, ProviderContext};
 
-/// Response from a non-streaming OpenAI chat completion.
 #[derive(Debug, Deserialize)]
 pub struct OpenAIResponse {
     pub choices: Vec<OpenAIChoice>,
@@ -125,62 +124,167 @@ pub struct OpenAIModelEntry {
 
 pub(super) struct OpenAIBackend;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tool_call(index: i64, id: &str, name: &str, args: &str) -> OpenAIStreamToolCall {
+        OpenAIStreamToolCall {
+            index,
+            id: if id.is_empty() { None } else { Some(id.to_string()) },
+            function: Some(OpenAIStreamToolCallFunction {
+                name: if name.is_empty() { None } else { Some(name.to_string()) },
+                arguments: if args.is_empty() { None } else { Some(args.to_string()) },
+            }),
+        }
+    }
+
+    #[test]
+    fn accumulated_tool_calls_empty_initially() {
+        let acc = AccumulatedToolCalls::default();
+        assert!(acc.is_empty());
+        assert!(acc.calls.is_empty());
+    }
+
+    #[test]
+    fn accumulated_tool_calls_absorb_single() {
+        let mut acc = AccumulatedToolCalls::default();
+        let calls = vec![make_tool_call(0, "call_1", "read_file", r#"{"path":"x"}"#)];
+        acc.absorb_chunk(&calls);
+        assert!(!acc.is_empty());
+        assert_eq!(acc.calls.len(), 1);
+        assert_eq!(acc.calls[0].id, "call_1");
+        assert_eq!(acc.calls[0].name, "read_file");
+        assert_eq!(acc.calls[0].arguments, r#"{"path":"x"}"#);
+    }
+
+    #[test]
+    fn accumulated_tool_calls_absorb_multiple_indices() {
+        let mut acc = AccumulatedToolCalls::default();
+        let calls = vec![
+            make_tool_call(0, "call_0", "read_file", r#"{"path":"a"}"#),
+            make_tool_call(2, "call_2", "write_file", r#"{"path":"b"}"#),
+        ];
+        acc.absorb_chunk(&calls);
+        assert_eq!(acc.calls.len(), 3);
+        assert_eq!(acc.calls[0].id, "call_0");
+        assert!(acc.calls[1].id.is_empty());
+        assert_eq!(acc.calls[2].id, "call_2");
+    }
+
+    #[test]
+    fn accumulated_tool_calls_absorb_chunked_arguments() {
+        let mut acc = AccumulatedToolCalls::default();
+        acc.absorb_chunk(&[make_tool_call(0, "call_1", "read_file", r##"{"path":""##)]);
+        acc.absorb_chunk(&[make_tool_call(0, "", "", r#"test.txt"}"#)]);
+        assert_eq!(acc.calls[0].arguments, r#"{"path":"test.txt"}"#);
+    }
+
+    #[test]
+    fn accumulated_tool_calls_to_tool_calls() {
+        let mut acc = AccumulatedToolCalls::default();
+        acc.absorb_chunk(&[make_tool_call(0, "id1", "search", r#"{"q":"hello"}"#)]);
+        let tcs = acc.to_tool_calls();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id, "id1");
+        assert_eq!(tcs[0].name, "search");
+        assert_eq!(tcs[0].arguments["q"], "hello");
+    }
+
+    #[test]
+    fn accumulated_tool_calls_to_tool_calls_empty() {
+        let acc = AccumulatedToolCalls::default();
+        assert!(acc.to_tool_calls().is_empty());
+    }
+
+    #[test]
+    fn accumulated_tool_calls_id_only_set_once() {
+        let mut acc = AccumulatedToolCalls::default();
+        acc.absorb_chunk(&[make_tool_call(0, "first_id", "tool_a", "")]);
+        acc.absorb_chunk(&[make_tool_call(0, "second_id", "tool_b", "")]);
+        assert_eq!(acc.calls[0].id, "first_id");
+        assert_eq!(acc.calls[0].name, "tool_a");
+    }
+
+    #[test]
+    fn openai_stream_chunk_deserialize() {
+        let json = r#"{"choices":[{"delta":{"content":"hello"}}]}"#;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(json).unwrap();
+        assert_eq!(chunk.choices.len(), 1);
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn openai_response_deserialize() {
+        let json = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
+        let resp: OpenAIResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.choices[0].message.content, "hi");
+    }
+
+    #[test]
+    fn openai_models_response_deserialize() {
+        let json = r#"{"data":[{"id":"gpt-4"},{"id":"gpt-3.5"}]}"#;
+        let resp: OpenAIModelsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.len(), 2);
+        assert_eq!(resp.data[0].id, "gpt-4");
+    }
+
+    #[test]
+    fn openai_stream_chunk_with_tool_calls() {
+        let json = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\":\"x\"}"}}]}}]}"#;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(json).unwrap();
+        let tcs = chunk.choices[0].delta.tool_calls.as_ref().unwrap();
+        assert_eq!(tcs.len(), 1);
+        assert_eq!(tcs[0].id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn openai_stream_delta_default_tool_calls() {
+        let json = r#"{"choices":[{"delta":{"content":"hello"}}]}"#;
+        let chunk: OpenAIStreamChunk = serde_json::from_str(json).unwrap();
+        assert!(chunk.choices[0].delta.tool_calls.is_none());
+    }
+}
+
 #[async_trait]
 impl ProviderBackend for OpenAIBackend {
-    async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
-        let url = provider.openai_models_url();
-        let resp = provider.add_openai_auth(provider.client.get(&url)).send().await?;
+    async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
+        let url = super::openai_models_url(&ctx.base_url);
+        let resp = super::add_openai_auth(ctx.client.get(&url), ctx.api_key_str(), ctx.kind)
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("OpenAI API unreachable at {}", provider.base_url));
+            return Err(anyhow!("OpenAI API unreachable at {}", ctx.base_url));
         }
         let parsed: OpenAIModelsResponse = resp.json().await.context("invalid models response")?;
         Ok(parsed.data.into_iter().map(|m| m.id).collect())
     }
 
-    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
-        let url = provider.openai_chat_url();
-        let resp = provider
-            .add_openai_auth(provider.client.post(&url))
-            .json(&json!({
-                "model": provider.model,
-                "messages": [
-                    {"role": "system", "content": provider.system_prompt},
-                    {"role": "user", "content": format!("{}\n\nReturn JSON only.", user_prompt)}
-                ],
-                "temperature": 0.3,
-                "max_tokens": 512,
-                "response_format": {"type": "json_object"}
-            }))
-            .send()
-            .await
-            .context("failed to call OpenAI API")?;
-
-        if !resp.status().is_success() {
-            return Err(provider.parse_api_error("OpenAI", resp).await);
-        }
-
-        let parsed: OpenAIResponse = resp.json().await.context("invalid OpenAI response")?;
-        let content = parsed.choices.first().map(|c| c.message.content.as_str()).unwrap_or("");
-
-        Provider::parse_json_fallback(content)
+    async fn complete_json(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
+        super::openai_compat_complete_json(ctx, ctx.kind, "OpenAI", system_prompt, user_prompt).await
     }
 
     async fn complete_chat_stream(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = provider.openai_chat_url();
+        let url = super::openai_chat_url(&ctx.base_url, ctx.kind);
 
-        let is_reasoning = crate::reasoning::is_reasoning_model(&provider.model);
-        let no_system = crate::reasoning::system_prompt_not_supported(&provider.model);
-        let no_stream = crate::reasoning::requires_non_streaming(&provider.model);
+        let is_reasoning = crate::reasoning::is_reasoning_model(&ctx.model);
+        let no_system = crate::reasoning::system_prompt_not_supported(&ctx.model);
+        let no_stream = crate::reasoning::requires_non_streaming(&ctx.model);
 
         let mut messages: Vec<serde_json::Value> = vec![];
         if no_system {
-            let combined = format!("{}\n\n{}", system_prompt, user_prompt);
+            let combined = format!("{system_prompt}\n\n{user_prompt}");
             messages.push(json!({"role": "user", "content": combined}));
         } else {
             messages.push(json!({"role": "system", "content": system_prompt}));
@@ -191,15 +295,15 @@ impl ProviderBackend for OpenAIBackend {
         }
 
         let mut payload = serde_json::Map::new();
-        payload.insert("model".into(), json!(provider.model));
+        payload.insert("model".into(), json!(&ctx.model));
         payload.insert("messages".into(), json!(messages));
-        payload.insert("max_tokens".into(), json!(4096));
+        payload.insert("max_tokens".into(), json!(crate::constants::DEFAULT_MAX_TOKENS));
 
-        if is_reasoning && provider.reasoning_config.enabled {
-            let effort = provider.reasoning_config.effort.as_str();
+        if is_reasoning && ctx.reasoning_config.enabled {
+            let effort = ctx.reasoning_config.effort.as_str();
             payload.insert("reasoning_effort".into(), json!(effort));
         } else {
-            payload.insert("temperature".into(), json!(0.7));
+            payload.insert("temperature".into(), json!(crate::constants::DEFAULT_TEMPERATURE));
         }
 
         if !no_stream {
@@ -207,120 +311,71 @@ impl ProviderBackend for OpenAIBackend {
         }
 
         if no_stream {
-            let resp = provider
-                .add_openai_auth(provider.client.post(&url))
+            let resp = super::add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), ctx.kind)
                 .json(&payload)
                 .send()
                 .await
                 .context("failed to call OpenAI API")?;
             if !resp.status().is_success() {
-                return Err(provider.parse_api_error("OpenAI", resp).await);
+                return Err(super::parse_api_error("OpenAI", resp).await);
             }
             let parsed: OpenAIResponse = resp.json().await.context("invalid OpenAI response")?;
             let content = parsed.choices.first().map(|c| c.message.content.as_str()).unwrap_or("");
             return Ok(content.to_string());
         }
 
-        let resp = provider
-            .add_openai_auth(provider.client.post(&url))
+        let resp = super::add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), ctx.kind)
             .json(&payload)
             .send()
             .await
             .context("failed to call OpenAI API")?;
 
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("OpenAI", resp).await);
+            return Err(super::parse_api_error("OpenAI", resp).await);
         }
 
-        provider.stream_sse_response(resp).await
+        super::stream_sse_response(resp).await
     }
 
     async fn complete_chat_stream_with_vision(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        let url = provider.openai_chat_url();
-        let data_uri = format!("data:{};base64,{}", mime_type, base64_data);
-
-        let mut messages: Vec<serde_json::Value> = vec![];
-        messages.push(json!({"role": "system", "content": system_prompt}));
-        if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
-        }
-        messages.push(json!({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": user_prompt},
-                {"type": "image_url", "image_url": {"url": data_uri}}
-            ]
-        }));
-
-        let payload = json!({
-            "model": provider.model,
-            "messages": messages,
-            "stream": true,
-            "max_tokens": 4096
-        });
-
-        let resp = provider
-            .add_openai_auth(provider.client.post(&url))
-            .json(&payload)
-            .send()
-            .await
-            .context("failed to call OpenAI vision API")?;
-
-        if !resp.status().is_success() {
-            return Err(provider.parse_api_error("OpenAI", resp).await);
-        }
-
-        provider.stream_sse_response(resp).await
+        super::openai_compat_chat_stream_with_vision(
+            ctx,
+            ctx.kind,
+            "OpenAI",
+            user_prompt,
+            system_prompt,
+            history,
+            mime_type,
+            base64_data,
+        )
+        .await
     }
 
     async fn complete_chat_stream_with_tools(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
         tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        let url = provider.openai_chat_url();
-        let mut messages: Vec<serde_json::Value> = vec![];
-        messages.push(json!({"role": "system", "content": system_prompt}));
-        if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
-        }
-        messages.push(json!({"role": "user", "content": user_prompt}));
-
-        let tools: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
-        let mut payload = json!({
-            "model": provider.model,
-            "messages": messages,
-            "stream": true,
-            "temperature": 0.7,
-            "max_tokens": 4096,
-        });
-        if !tools.is_empty() {
-            payload["tools"] = json!(tools);
-            payload["tool_choice"] = json!("auto");
-        }
-
-        let resp = provider
-            .add_openai_auth(provider.client.post(&url))
-            .json(&payload)
-            .send()
-            .await
-            .context("failed to call OpenAI API")?;
-
-        if !resp.status().is_success() {
-            return Err(provider.parse_api_error("OpenAI", resp).await);
-        }
-
-        Provider::stream_openai_tool_response(resp).await
+        super::openai_compat_chat_stream_with_tools(
+            ctx,
+            ctx.kind,
+            "OpenAI",
+            user_prompt,
+            system_prompt,
+            history,
+            tool_specs,
+        )
+        .await
     }
 }

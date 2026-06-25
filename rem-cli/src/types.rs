@@ -170,17 +170,20 @@ pub(crate) fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
         expanded
     };
 
-    let resolved = if candidate.exists() {
-        std::fs::canonicalize(&candidate).ok()?
-    } else {
-        // For new files, canonicalize the parent directory instead
-        let parent = candidate.parent()?;
-        let file_name = candidate.file_name()?;
-        let canonical_parent = std::fs::canonicalize(parent).ok()?;
-        canonical_parent.join(file_name)
+    // Try canonicalize directly; on failure (e.g. file doesn't exist yet),
+    // canonicalize the parent directory instead. This avoids TOCTOU between
+    // exists() and canonicalize().
+    let resolved = match std::fs::canonicalize(&candidate) {
+        Ok(p) => p,
+        Err(_) => {
+            let parent = candidate.parent()?;
+            let file_name = candidate.file_name()?;
+            let canonical_parent = std::fs::canonicalize(parent).ok()?;
+            canonical_parent.join(file_name)
+        }
     };
 
-    let canonical_base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let canonical_base = std::fs::canonicalize(base).ok()?;
     if resolved.starts_with(&canonical_base) {
         Some(resolved)
     } else {
@@ -327,5 +330,29 @@ mod tests {
         };
         assert_eq!(entry.original.as_deref(), Some("original content"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prop_resolve_safe_path_never_escapes_workspace() {
+        proptest::proptest!(|(workspace in "[a-z]{1,10}", sub_path in "[a-z/]{1,20}")| {
+            let workspace_dir = std::env::temp_dir().join(format!("rem-proptest-{workspace}"));
+            let _ = std::fs::create_dir_all(&workspace_dir);
+            let target = workspace_dir.join(&sub_path);
+            let result = resolve_safe_path(&workspace_dir, target.to_str().unwrap_or("/tmp/test"));
+            if let Some(p) = result {
+                assert!(p.starts_with(&workspace_dir) || p == workspace_dir,
+                    "resolve_safe_path should stay within workspace");
+            }
+            let _ = std::fs::remove_dir_all(&workspace_dir);
+        });
+    }
+
+    #[test]
+    fn prop_file_icon_never_empty_for_known_extensions() {
+        proptest::proptest!(|(ext in "[a-z]{1,5}")| {
+            let path = format!("test.{}", ext);
+            let icon = file_icon(&path);
+            assert!(!icon.is_empty(), "file_icon for .{} should return non-empty", ext);
+        });
     }
 }

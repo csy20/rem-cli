@@ -1,8 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use serde_json::json;
 
-use super::openai::OpenAIResponse;
 use super::tools::{ToolResponse, ToolSpec};
 use super::{Provider, ProviderBackend};
 
@@ -22,28 +20,7 @@ impl ProviderBackend for OpenRouterBackend {
     }
 
     async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
-        let url = provider.openai_chat_url();
-        let resp = provider
-            .add_openai_auth(provider.client.post(&url))
-            .json(&json!({
-                "model": provider.model,
-                "messages": [
-                    {"role": "system", "content": provider.system_prompt},
-                    {"role": "user", "content": format!("{}\n\nReturn JSON only.", user_prompt)}
-                ],
-                "temperature": 0.3,
-                "max_tokens": 512,
-                "response_format": {"type": "json_object"}
-            }))
-            .send()
-            .await
-            .context("failed to call OpenRouter API")?;
-        if !resp.status().is_success() {
-            return Err(provider.parse_api_error("OpenRouter", resp).await);
-        }
-        let parsed: OpenAIResponse = resp.json().await.context("invalid OpenRouter response")?;
-        let content = parsed.choices.first().map(|c| c.message.content.as_str()).unwrap_or("");
-        Provider::parse_json_fallback(content)
+        provider.openai_compat_complete_json("OpenRouter", user_prompt).await
     }
 
     async fn complete_chat_stream(

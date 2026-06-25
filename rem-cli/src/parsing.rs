@@ -34,7 +34,7 @@ pub fn extract_code_block(text: &str) -> String {
 /// Extracts a filename from a bold markdown segment (e.g., `**file.rs**`).
 pub fn current_name_from_bold(line: &str) -> Option<String> {
     if let Some(cap) = RE_BOLD.captures(line) {
-        let name = cap.get(1)?.as_str().trim().to_lowercase();
+        let name = cap.get(1)?.as_str().trim().to_string();
         if name.contains('.') {
             return Some(name);
         }

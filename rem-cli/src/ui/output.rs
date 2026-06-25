@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
+use crate::blocklist::{is_command_blocked, sanitize_commands};
 use crate::provider::Provider;
+use crate::types::{file_icon, ModelReply};
 use crate::ui::theme;
-use crate::{file_icon, is_command_blocked, sanitize_commands, ModelReply};
 
 /// An animated terminal spinner shown during long-running operations.
 pub struct SpinnerGuard {

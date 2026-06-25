@@ -8,6 +8,7 @@ pub mod goal;
 pub mod help;
 pub mod repl;
 pub mod review;
+pub mod runner;
 pub mod session;
 pub mod tools;
 
@@ -16,14 +17,16 @@ use std::collections::HashMap;
 /// Metadata about a registered slash command.
 #[derive(Clone, Copy)]
 pub(crate) struct CommandInfo {
-    /// Human-readable description for the planned dynamic `/help` system.
-    #[allow(dead_code)]
+    /// Human-readable description for the dynamic help system.
     pub(crate) description: &'static str,
+    /// Usage line displayed in help output (e.g. `"/model <name>"`).
+    pub(crate) usage: &'static str,
 }
 
 /// O(1) lookup for command metadata by name.
 pub(crate) struct CommandRegistry {
     commands: HashMap<&'static str, CommandInfo>,
+    entries: Vec<(&'static str, CommandInfo)>,
 }
 
 impl CommandRegistry {
@@ -32,7 +35,10 @@ impl CommandRegistry {
         for &(name, info) in entries {
             commands.insert(name, info);
         }
-        Self { commands }
+        Self {
+            commands,
+            entries: entries.to_vec(),
+        }
     }
 
     /// Returns true if the input is a registered command.
@@ -49,6 +55,70 @@ impl CommandRegistry {
             (input, "")
         }
     }
+
+    /// Prints formatted help text for all registered commands.
+    pub fn print_help(&self) {
+        let t = crate::ui::theme::active();
+        println!("{}", crate::ui::theme::paint_rail_empty(&t));
+        println!("{}", crate::ui::theme::paint_rail_header(&t, "COMMANDS"));
+        let mut seen_descriptions: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for &(name, info) in &self.entries {
+            if !name.starts_with('/') || !seen_descriptions.insert(info.description) {
+                continue;
+            }
+            println!(
+                "{}",
+                crate::ui::theme::paint_help_line(&t, info.usage, info.description)
+            );
+        }
+        println!("{}", crate::ui::theme::paint_rail_empty(&t));
+        println!("{}", crate::ui::theme::paint_rail_header(&t, "TIPS"));
+        println!(
+            "{}",
+            crate::ui::theme::paint_bullet_line(
+                &t,
+                &[
+                    ("text_faint", "use ", false),
+                    ("accent", "@<path>", true),
+                    ("text_faint", " to include file context: @src/main.rs", false),
+                ]
+            )
+        );
+        println!(
+            "{}",
+            crate::ui::theme::paint_bullet_line(
+                &t,
+                &[
+                    ("text_faint", "use ", false),
+                    ("accent", "/mode", true),
+                    ("text_faint", " to toggle between chat, code, and plan modes", false),
+                ]
+            )
+        );
+        println!(
+            "{}",
+            crate::ui::theme::paint_bullet_line(
+                &t,
+                &[
+                    ("accent", "/plan", true),
+                    (
+                        "text_faint",
+                        " for analysis first — REM explores codebase before coding",
+                        false
+                    ),
+                ]
+            )
+        );
+        println!(
+            "{}",
+            crate::ui::theme::paint_rail_bullet(&t, "describe what you want — REM detects intent")
+        );
+        println!(
+            "{}",
+            crate::ui::theme::paint_rail_bullet(&t, "multi-file intent and auto-writes after confirmation")
+        );
+        println!("{}", crate::ui::theme::paint_rail_empty(&t));
+    }
 }
 
 /// Builds the static command registry.
@@ -58,228 +128,266 @@ pub(crate) fn registry() -> CommandRegistry {
             "/help",
             CommandInfo {
                 description: "Show this help message",
+                usage: "/help",
             },
         ),
         (
             "help",
             CommandInfo {
                 description: "Show this help message",
+                usage: "help",
             },
         ),
         (
             "exit",
             CommandInfo {
                 description: "Exit the REPL",
+                usage: "exit",
             },
         ),
         (
             "quit",
             CommandInfo {
                 description: "Exit the REPL",
+                usage: "quit",
             },
         ),
         (
             "/theme",
             CommandInfo {
                 description: "Change the color theme",
+                usage: "/theme [name]",
             },
         ),
         (
             "/model",
             CommandInfo {
                 description: "Show or change the active model",
+                usage: "/model <name>",
             },
         ),
         (
             "/provider",
             CommandInfo {
                 description: "Show or change the LLM provider",
+                usage: "/provider <name>",
             },
         ),
         (
             "/mode",
             CommandInfo {
                 description: "Switch between chat and code mode",
+                usage: "/mode",
             },
         ),
         (
             "/plan",
             CommandInfo {
                 description: "Switch to plan mode for structured output",
+                usage: "/plan",
             },
         ),
         (
             "/clear",
             CommandInfo {
                 description: "Clear the chat history",
+                usage: "/clear",
             },
         ),
         (
             "/reset",
             CommandInfo {
                 description: "Reset the session",
+                usage: "/reset",
             },
         ),
         (
             "/why",
             CommandInfo {
                 description: "Explain the last response",
+                usage: "/why",
             },
         ),
         (
             "/code",
             CommandInfo {
                 description: "Show last generated files",
+                usage: "/code",
             },
         ),
         (
             "/undo",
             CommandInfo {
                 description: "Undo last file write",
+                usage: "/undo",
             },
         ),
         (
             "/files",
             CommandInfo {
                 description: "List all project files",
+                usage: "/files",
             },
         ),
         (
             "/diff",
             CommandInfo {
                 description: "Show diff of last changes",
+                usage: "/diff",
             },
         ),
         (
             "/apply",
             CommandInfo {
                 description: "Apply the last diff (write changed files with backup for undo)",
+                usage: "/apply",
             },
         ),
         (
             "/tokens",
             CommandInfo {
                 description: "Show token usage statistics",
+                usage: "/tokens",
             },
         ),
         (
             "/memory",
             CommandInfo {
                 description: "View or update project memory",
+                usage: "/memory [key=value]",
             },
         ),
         (
             "/init",
             CommandInfo {
                 description: "Initialize project scaffolding",
+                usage: "/init",
             },
         ),
         (
             "/config",
             CommandInfo {
                 description: "Show or update configuration",
+                usage: "/config [key=value]",
             },
         ),
         (
             "/lint",
             CommandInfo {
                 description: "Lint the last written files or a specific path",
+                usage: "/lint [file]",
             },
         ),
         (
             "/find",
             CommandInfo {
                 description: "Search text inside the project",
+                usage: "/find <query>",
             },
         ),
         (
             "/write",
             CommandInfo {
                 description: "Write content to a file",
+                usage: "/write <path>",
             },
         ),
         (
             "/save",
             CommandInfo {
                 description: "Save the session or write content to a file",
+                usage: "/save [<path>]",
             },
         ),
         (
             "/dir",
             CommandInfo {
                 description: "Change the project directory",
+                usage: "/dir <path>",
             },
         ),
         (
             "/copy",
             CommandInfo {
                 description: "Copy last N files to clipboard",
+                usage: "/copy [N]",
             },
         ),
         (
             "/resume",
             CommandInfo {
                 description: "Resume a saved session",
+                usage: "/resume",
             },
         ),
         (
             "/compact",
             CommandInfo {
                 description: "Compact the chat context",
+                usage: "/compact",
             },
         ),
         (
             "/search",
             CommandInfo {
                 description: "Search the web",
+                usage: "/search <query>",
             },
         ),
         (
             "/explain",
             CommandInfo {
                 description: "Explain the selected code",
+                usage: "/explain <code>",
             },
         ),
         (
             "/test",
             CommandInfo {
                 description: "Generate tests for the selected code",
+                usage: "/test <file>",
             },
         ),
         (
             "/refactor",
             CommandInfo {
                 description: "Refactor the selected code",
+                usage: "/refactor <file>",
             },
         ),
         (
             "/review",
             CommandInfo {
                 description: "Review changes for quality issues",
+                usage: "/review",
             },
         ),
         (
             "/goal",
             CommandInfo {
                 description: "Run autonomous goal-driven loop",
+                usage: "/goal <condition>",
             },
         ),
         (
             "/vision",
             CommandInfo {
                 description: "Analyze an image with the LLM",
+                usage: "/vision <path>",
             },
         ),
         (
             "/reasoning",
             CommandInfo {
                 description: "Configure reasoning/thinking mode",
+                usage: "/reasoning [on|off|effort]",
             },
         ),
         (
             "/watch",
             CommandInfo {
                 description: "Watch files for changes and auto-retry",
+                usage: "/watch",
             },
         ),
     ])

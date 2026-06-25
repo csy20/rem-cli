@@ -5,8 +5,8 @@
 use crate::chat::ChatSession;
 use crate::highlight;
 use crate::intent::TaskIntent;
+use crate::types::{file_icon, resolve_safe_path, BackupEntry, FileEntry};
 use crate::ui;
-use crate::{file_icon, resolve_safe_path, BackupEntry, FileEntry};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -155,11 +155,7 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
         if session.code_out.last_files_written.len() >= 5 {
             session
                 .code_out
-                .undo_stack
-                .push(std::mem::take(&mut session.code_out.last_files_written));
-            if session.code_out.undo_stack.len() > 10 {
-                session.code_out.undo_stack.remove(0);
-            }
+                .push_undo(std::mem::take(&mut session.code_out.last_files_written));
         }
         session.code_out.last_files_written.push(BackupEntry {
             path: abs_path,
@@ -305,11 +301,7 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
         if !session.code_out.last_files_written.is_empty() {
             session
                 .code_out
-                .undo_stack
-                .push(std::mem::take(&mut session.code_out.last_files_written));
-            if session.code_out.undo_stack.len() > 10 {
-                session.code_out.undo_stack.remove(0);
-            }
+                .push_undo(std::mem::take(&mut session.code_out.last_files_written));
         }
         session.code_out.last_files_written = written;
         println!(
@@ -355,55 +347,53 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
     let mut modified = 0;
     let mut dirs_to_clean: Vec<PathBuf> = Vec::new();
 
-    let mut batches = Vec::new();
-    if !session.code_out.last_files_written.is_empty() {
-        batches.push(std::mem::take(&mut session.code_out.last_files_written));
-    }
-    while let Some(next) = session.code_out.undo_stack.pop() {
-        batches.push(next);
+    // Only undo the current batch (last_files_written), not the entire stack
+    let batch = std::mem::take(&mut session.code_out.last_files_written);
+
+    // If there's a previous batch in undo_stack, restore it for next undo
+    if let Some(prev) = session.code_out.undo_stack.pop() {
+        session.code_out.last_files_written = prev;
     }
 
-    for batch in &batches {
-        for entry in batch {
-            if entry.original.is_some() {
-                // Restore original content
-                if let Err(e) = fs::write(&entry.path, entry.original.as_deref().unwrap_or_default()) {
+    for entry in &batch {
+        if entry.original.is_some() {
+            // Restore original content
+            if let Err(e) = fs::write(&entry.path, entry.original.as_deref().unwrap_or_default()) {
+                println!(
+                    "  {} failed to restore {}: {}",
+                    ui::theme::paint_error_label(&t, "\u{258C}"),
+                    entry.path.display(),
+                    e
+                );
+            } else {
+                println!(
+                    "  {} restored {}",
+                    ui::theme::paint_warning(&t, "\u{258C}"),
+                    ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
+                );
+                modified += 1;
+            }
+        } else if entry.path.exists() {
+            // File was new, delete it
+            if let Some(parent) = entry.path.parent() {
+                dirs_to_clean.push(parent.to_path_buf());
+            }
+            match fs::remove_file(&entry.path) {
+                Ok(()) => {
                     println!(
-                        "  {} failed to restore {}: {}",
-                        ui::theme::paint_error_label(&t, "\u{258C}"),
-                        entry.path.display(),
-                        e
-                    );
-                } else {
-                    println!(
-                        "  {} restored {}",
+                        "  {} removed {}",
                         ui::theme::paint_warning(&t, "\u{258C}"),
                         ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
                     );
                     modified += 1;
                 }
-            } else if entry.path.exists() {
-                // File was new, delete it
-                if let Some(parent) = entry.path.parent() {
-                    dirs_to_clean.push(parent.to_path_buf());
-                }
-                match fs::remove_file(&entry.path) {
-                    Ok(()) => {
-                        println!(
-                            "  {} removed {}",
-                            ui::theme::paint_warning(&t, "\u{258C}"),
-                            ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
-                        );
-                        modified += 1;
-                    }
-                    Err(e) => {
-                        println!(
-                            "  {} failed to remove {}: {}",
-                            ui::theme::paint_error_label(&t, "\u{258C}"),
-                            entry.path.display(),
-                            e
-                        );
-                    }
+                Err(e) => {
+                    println!(
+                        "  {} failed to remove {}: {}",
+                        ui::theme::paint_error_label(&t, "\u{258C}"),
+                        entry.path.display(),
+                        e
+                    );
                 }
             }
         }
@@ -559,13 +549,22 @@ enum CopyResult {
 }
 
 fn try_copy_to_clipboard(text: &str) -> CopyResult {
-    for (tool, args) in [
-        ("xclip", &["-selection", "clipboard"] as &[_]),
-        ("xsel", &["--clipboard", "--input"] as &[_]),
-        ("pbcopy", &[] as &[_]),
-    ] {
+    let clipboard_tools: Vec<(&str, &[&str])> = vec![
+        #[cfg(target_os = "linux")]
+        ("wl-copy", &[]),
+        #[cfg(target_os = "linux")]
+        ("xclip", &["-selection", "clipboard"]),
+        #[cfg(target_os = "linux")]
+        ("xsel", &["--clipboard", "--input"]),
+        #[cfg(target_os = "macos")]
+        ("pbcopy", &[]),
+        #[cfg(target_os = "windows")]
+        ("clip", &[]),
+    ];
+
+    for (tool, args) in &clipboard_tools {
         let mut child = match std::process::Command::new(tool)
-            .args(args)
+            .args(args.iter().copied())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -589,6 +588,58 @@ fn try_copy_to_clipboard(text: &str) -> CopyResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::ChatSession;
+
+    fn make_session() -> ChatSession {
+        ChatSession::new("test", None).unwrap()
+    }
+
+    #[test]
+    fn handle_undo_undoes_only_current_batch() {
+        let mut session = make_session();
+        let tmp = std::env::temp_dir().join(format!("rem-test-undo-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+
+        // Write first batch (simulate 5 files to trigger stack push)
+        for i in 0..5 {
+            let p = tmp.join(format!("batch1_{}.txt", i));
+            std::fs::write(&p, "original").unwrap();
+            session.code_out.last_files_written.push(BackupEntry {
+                path: p,
+                original: Some("original".into()),
+            });
+        }
+        // Push to undo_stack and start new batch
+        session
+            .code_out
+            .undo_stack
+            .push(std::mem::take(&mut session.code_out.last_files_written));
+
+        // Write second batch
+        for i in 0..3 {
+            let p = tmp.join(format!("batch2_{}.txt", i));
+            std::fs::write(&p, "new").unwrap();
+            session.code_out.last_files_written.push(BackupEntry {
+                path: p,
+                original: None,
+            });
+        }
+
+        assert_eq!(session.code_out.last_files_written.len(), 3);
+        assert_eq!(session.code_out.undo_stack.len(), 1);
+
+        // Undo should only undo the last batch (3 files) and restore previous
+        let _batch = std::mem::take(&mut session.code_out.last_files_written);
+        if let Some(prev) = session.code_out.undo_stack.pop() {
+            session.code_out.last_files_written = prev;
+        }
+
+        // After undo: last_files_written should have the restored batch (5 files)
+        assert_eq!(session.code_out.last_files_written.len(), 5);
+        assert!(session.code_out.undo_stack.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn write_file_atomic_creates_file() {

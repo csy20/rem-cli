@@ -201,3 +201,206 @@ pub fn provider_supports_tools(kind: &super::ProviderKind) -> bool {
             | super::ProviderKind::Ollama
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_tools_count() {
+        let tools = builtin_tools();
+        assert_eq!(tools.len(), 8);
+    }
+
+    #[test]
+    fn builtin_tools_have_names() {
+        let tools = builtin_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"search_files"));
+        assert!(names.contains(&"run_lint"));
+        assert!(names.contains(&"run_test"));
+        assert!(names.contains(&"web_search"));
+        assert!(names.contains(&"list_files"));
+        assert!(names.contains(&"run_command"));
+    }
+
+    #[test]
+    fn builtin_tools_have_non_empty_descriptions() {
+        for tool in &builtin_tools() {
+            assert!(!tool.description.is_empty(), "tool {} has empty description", tool.name);
+        }
+    }
+
+    #[test]
+    fn builtin_tools_have_required_params() {
+        for tool in &builtin_tools() {
+            let params = tool.parameters.as_object().expect("parameters should be an object");
+            let required = params.get("required").and_then(|r| r.as_array());
+            assert!(required.is_some(), "tool {} has no required field", tool.name);
+            assert!(!required.unwrap().is_empty(), "tool {} has empty required", tool.name);
+        }
+    }
+
+    #[test]
+    fn to_openai_tool_format() {
+        let spec = ToolSpec {
+            name: "test_tool".into(),
+            description: "a test".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"x": {"type": "string"}}}),
+        };
+        let v = spec.to_openai_tool();
+        assert_eq!(v["type"], "function");
+        assert_eq!(v["function"]["name"], "test_tool");
+        assert_eq!(v["function"]["description"], "a test");
+        assert!(v["function"]["parameters"].is_object());
+    }
+
+    #[test]
+    fn to_anthropic_tool_format() {
+        let spec = ToolSpec {
+            name: "anthropic_tool".into(),
+            description: "anthropic desc".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let v = spec.to_anthropic_tool();
+        assert_eq!(v["name"], "anthropic_tool");
+        assert_eq!(v["description"], "anthropic desc");
+        assert_eq!(v["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn to_gemini_function_declaration_format() {
+        let spec = ToolSpec {
+            name: "gemini_func".into(),
+            description: "gemini desc".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let v = spec.to_gemini_function_declaration();
+        assert_eq!(v["name"], "gemini_func");
+        assert_eq!(v["description"], "gemini desc");
+        assert_eq!(v["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn tool_result_construction() {
+        let result = ToolResult {
+            call_id: "call_1".into(),
+            name: "read_file".into(),
+            content: "file content".into(),
+            is_error: false,
+        };
+        assert_eq!(result.call_id, "call_1");
+        assert_eq!(result.name, "read_file");
+        assert_eq!(result.content, "file content");
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn tool_result_error_flag() {
+        let result = ToolResult {
+            call_id: "call_err".into(),
+            name: "run_command".into(),
+            content: "command failed".into(),
+            is_error: true,
+        };
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn tool_response_text_variant() {
+        let response = ToolResponse::Text("hello".into());
+        match response {
+            ToolResponse::Text(t) => assert_eq!(t, "hello"),
+            _ => panic!("expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn tool_response_tool_calls_variant() {
+        let calls = vec![ToolCall {
+            id: "1".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({"path": "test.txt"}),
+        }];
+        let response = ToolResponse::ToolCalls(calls);
+        match response {
+            ToolResponse::ToolCalls(c) => {
+                assert_eq!(c.len(), 1);
+                assert_eq!(c[0].name, "read_file");
+            }
+            _ => panic!("expected ToolCalls variant"),
+        }
+    }
+
+    #[test]
+    fn tool_call_arguments() {
+        let tc = ToolCall {
+            id: "1".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path": "f.txt", "content": "hi"}),
+        };
+        assert_eq!(tc.arguments["path"], "f.txt");
+        assert_eq!(tc.arguments["content"], "hi");
+    }
+
+    #[test]
+    fn provider_supports_tools_openai() {
+        assert!(provider_supports_tools(&super::super::ProviderKind::OpenAI));
+    }
+
+    #[test]
+    fn provider_supports_tools_anthropic() {
+        assert!(provider_supports_tools(&super::super::ProviderKind::Anthropic));
+    }
+
+    #[test]
+    fn provider_supports_tools_gemini() {
+        assert!(provider_supports_tools(&super::super::ProviderKind::Gemini));
+    }
+
+    #[test]
+    fn provider_supports_tools_azure() {
+        assert!(provider_supports_tools(&super::super::ProviderKind::Azure));
+    }
+
+    #[test]
+    fn provider_supports_tools_openrouter() {
+        assert!(provider_supports_tools(&super::super::ProviderKind::OpenRouter));
+    }
+
+    #[test]
+    fn provider_supports_tools_ollama() {
+        assert!(provider_supports_tools(&super::super::ProviderKind::Ollama));
+    }
+
+    #[cfg(feature = "bedrock")]
+    #[test]
+    fn provider_supports_tools_bedrock() {
+        assert!(!provider_supports_tools(&super::super::ProviderKind::Bedrock));
+    }
+
+    #[test]
+    fn tool_spec_debug_and_clone() {
+        let spec = ToolSpec {
+            name: "test".into(),
+            description: "desc".into(),
+            parameters: serde_json::json!({}),
+        };
+        let cloned = spec.clone();
+        assert_eq!(spec.name, cloned.name);
+        let debug_str = format!("{:?}", spec);
+        assert!(debug_str.contains("test"));
+    }
+
+    #[test]
+    fn tool_call_default_arguments_null() {
+        let tc = ToolCall {
+            id: "2".into(),
+            name: "search".into(),
+            arguments: serde_json::Value::Null,
+        };
+        assert!(tc.arguments.is_null());
+    }
+}

@@ -284,3 +284,157 @@ impl AppConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_app_config_default() {
+        let config = AppConfig::default();
+        assert_eq!(config.model, "rem-coder:latest");
+        assert_eq!(config.ollama_url, "http://localhost:11434");
+        assert_eq!(config.timeout_s, 120);
+        assert_eq!(config.max_context_bytes, 16_000);
+        assert_eq!(config.model_ctx, 4096);
+        assert_eq!(config.provider, "ollama");
+        assert_eq!(config.theme, "GHOST");
+        assert_eq!(config.mode, "CHAT");
+        assert_eq!(config.search_provider, "ddg");
+    }
+
+    #[test]
+    fn test_apply_partial_overrides_model() {
+        let mut config = AppConfig::default();
+        let partial = PartialConfig {
+            model: Some("test-model".to_string()),
+            ..Default::default()
+        };
+        config.apply_partial(partial);
+        assert_eq!(config.model, "test-model");
+        // Ensure other fields remain default
+        assert_eq!(config.ollama_url, "http://localhost:11434");
+    }
+
+    #[test]
+    fn test_apply_partial_overrides_all() {
+        let mut config = AppConfig::default();
+        let partial = PartialConfig {
+            model: Some("m1".to_string()),
+            ollama_url: Some("u1".to_string()),
+            timeout_s: Some(1),
+            max_context_bytes: Some(2),
+            model_ctx: Some(3),
+            prompts_dir: Some("pd".to_string()),
+            workspace_dir: Some("wd".to_string()),
+            provider: Some("p1".to_string()),
+            api_url: Some("au".to_string()),
+            api_key: Some("ak".to_string()),
+            theme: Some("t1".to_string()),
+            mode: Some("m1".to_string()),
+            providers: Some(HashMap::new()),
+            reasoning_effort: Some("re".to_string()),
+            thinking_budget: Some(42),
+            search_provider: Some("sp".to_string()),
+            search_api_key: Some("sak".to_string()),
+            search_cse_id: Some("sci".to_string()),
+        };
+        config.apply_partial(partial);
+        assert_eq!(config.model, "m1");
+        assert_eq!(config.ollama_url, "u1");
+        assert_eq!(config.timeout_s, 1);
+        assert_eq!(config.max_context_bytes, 2);
+        assert_eq!(config.model_ctx, 3);
+        assert_eq!(config.prompts_dir, Some("pd".to_string()));
+        assert_eq!(config.workspace_dir, Some("wd".to_string()));
+        assert_eq!(config.provider, "p1");
+        assert_eq!(config.api_url, Some("au".to_string()));
+        assert_eq!(config.api_key, Some("ak".to_string()));
+        assert_eq!(config.theme, "t1");
+        assert_eq!(config.mode, "m1");
+        assert!(config.providers.is_empty());
+        assert_eq!(config.reasoning_effort, Some("re".to_string()));
+        assert_eq!(config.thinking_budget, Some(42));
+        assert_eq!(config.search_provider, "sp");
+        assert_eq!(config.search_api_key, Some("sak".to_string()));
+        assert_eq!(config.search_cse_id, Some("sci".to_string()));
+    }
+
+    #[test]
+    fn test_apply_partial_none_overrides_nothing() {
+        let mut config = AppConfig::default();
+        let original = config.clone();
+        let partial = PartialConfig::default();
+        config.apply_partial(partial);
+        assert_eq!(config.model, original.model);
+        assert_eq!(config.ollama_url, original.ollama_url);
+        assert_eq!(config.timeout_s, original.timeout_s);
+        assert_eq!(config.max_context_bytes, original.max_context_bytes);
+        assert_eq!(config.model_ctx, original.model_ctx);
+        assert_eq!(config.prompts_dir, original.prompts_dir);
+        assert_eq!(config.workspace_dir, original.workspace_dir);
+        assert_eq!(config.provider, original.provider);
+        assert_eq!(config.api_url, original.api_url);
+        assert_eq!(config.api_key, original.api_key);
+        assert_eq!(config.theme, original.theme);
+        assert_eq!(config.mode, original.mode);
+        assert_eq!(config.reasoning_effort, original.reasoning_effort);
+        assert_eq!(config.thinking_budget, original.thinking_budget);
+        assert_eq!(config.search_provider, original.search_provider);
+        assert_eq!(config.search_api_key, original.search_api_key);
+        assert_eq!(config.search_cse_id, original.search_cse_id);
+    }
+
+    #[test]
+    fn test_apply_partial_partial_overrides() {
+        let mut config = AppConfig::default();
+        let partial = PartialConfig {
+            model: Some("partial-model".to_string()),
+            timeout_s: Some(99),
+            ..Default::default()
+        };
+        config.apply_partial(partial);
+        assert_eq!(config.model, "partial-model");
+        assert_eq!(config.timeout_s, 99);
+        // All other fields remain at default
+        assert_eq!(config.ollama_url, "http://localhost:11434");
+        assert_eq!(config.max_context_bytes, 16_000);
+        assert_eq!(config.model_ctx, 4096);
+        assert_eq!(config.provider, "ollama");
+        assert_eq!(config.theme, "GHOST");
+        assert_eq!(config.mode, "CHAT");
+        assert_eq!(config.search_provider, "ddg");
+    }
+
+    #[test]
+    fn test_apply_partial_clears_optionals() {
+        let mut config = AppConfig::default();
+        assert_eq!(config.api_url, None);
+        let partial = PartialConfig {
+            api_url: Some("http://override.com".to_string()),
+            ..Default::default()
+        };
+        config.apply_partial(partial);
+        assert_eq!(config.api_url, Some("http://override.com".to_string()));
+    }
+
+    #[test]
+    fn test_default_theme_name() {
+        assert_eq!(default_theme_name(), "GHOST");
+    }
+
+    #[test]
+    fn test_default_mode_name() {
+        assert_eq!(default_mode_name(), "CHAT");
+    }
+
+    #[test]
+    fn test_default_provider() {
+        assert_eq!(default_provider(), "ollama");
+    }
+
+    #[test]
+    fn test_default_search_provider() {
+        assert_eq!(default_search_provider(), "ddg");
+    }
+}

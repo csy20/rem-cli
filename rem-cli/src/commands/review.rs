@@ -4,8 +4,9 @@
 
 use crate::chat::ChatSession;
 use crate::provider::Provider;
+use crate::text_util::truncate_bytes;
+use crate::types::{file_icon, BackupEntry};
 use crate::ui;
-use crate::{file_icon, truncate_bytes, BackupEntry};
 use similar::{ChangeTag, TextDiff};
 use std::fs;
 use std::path::PathBuf;
@@ -221,7 +222,7 @@ pub(crate) fn handle_apply(session: &mut ChatSession) {
     }
 
     if !backup_entries.is_empty() {
-        session.code_out.undo_stack.push(backup_entries);
+        session.code_out.push_undo(backup_entries);
     }
 
     println!("{}", ui::theme::paint_rail_empty(&t));

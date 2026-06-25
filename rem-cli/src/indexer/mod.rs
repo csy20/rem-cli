@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
@@ -28,8 +28,16 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::find;
-use futures_util::future::join_all;
 use std::io::Write;
+
+mod bm25;
+mod chunking;
+mod embedding;
+
+pub use bm25::retrieve_relevant_chunks;
+pub(crate) use bm25::{build_inverted_index, tokenize};
+pub(crate) use chunking::{guess_chunk_type, split_content_into_chunks};
+pub use embedding::compute_embeddings;
 
 const INDEX_VERSION: u32 = 2;
 
@@ -132,166 +140,6 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
     None
 }
 
-/// Builds the inverted index and computes document frequencies from chunks.
-fn build_inverted_index(chunks: &[IndexChunk], doc_freqs: &mut HashMap<String, u32>) -> HashMap<String, Vec<usize>> {
-    let mut inverted: HashMap<String, Vec<usize>> = HashMap::new();
-    for (i, chunk) in chunks.iter().enumerate() {
-        let mut seen_in_chunk: HashSet<String> = HashSet::new();
-        for w in tokenize(&chunk.content_lower) {
-            if seen_in_chunk.insert(w.clone()) {
-                *doc_freqs.entry(w.clone()).or_insert(0) += 1;
-            }
-            inverted.entry(w).or_default().push(i);
-        }
-    }
-    inverted
-}
-
-/// Tokenizes text into lowercase alphanumeric tokens (min 3 chars).
-pub(crate) fn tokenize(text: &str) -> Vec<String> {
-    let estimated = text.len() / 20;
-    let mut tokens = Vec::with_capacity(estimated.max(16));
-    tokens.extend(
-        text.split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() > 2)
-            .map(|w| w.to_lowercase()),
-    );
-    tokens
-}
-
-/// BM25 retrieval using the pre-built inverted index for O(log n) candidate lookup
-/// instead of scanning all chunks. Name/path/type bonuses are still checked on all
-/// chunks for completeness.
-pub fn retrieve_relevant_chunks<'a>(
-    index: &'a CodebaseIndex,
-    query: &str,
-    top_k: usize,
-    max_chars: usize,
-) -> Vec<&'a IndexChunk> {
-    if index.chunks.is_empty() || query.trim().is_empty() {
-        return vec![];
-    }
-    let q_words = tokenize(query);
-    if q_words.is_empty() {
-        return vec![];
-    }
-
-    // Use inverted index to find candidate chunks (ones containing at least one query term)
-    let mut candidate_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for w in &q_words {
-        if let Some(ids) = index.inverted_index.get(w) {
-            for &id in ids {
-                candidate_indices.insert(id);
-            }
-        }
-    }
-
-    const K1: f64 = 1.5;
-    const B: f64 = 0.75;
-    let n = index.chunks.len() as f64;
-    let avg_dl: f64 = if n > 0.0 {
-        index.chunks.iter().map(|c| c.content.len() as f64).sum::<f64>() / n
-    } else {
-        1.0
-    };
-
-    let mut scored: Vec<(f64, &IndexChunk)> = Vec::with_capacity(candidate_indices.len() + 16);
-
-    // BM25 scoring only on candidate chunks (those containing query terms in content)
-    for &idx in &candidate_indices {
-        let c = &index.chunks[idx];
-        let mut score = 0.0f64;
-        let dl = c.content.len() as f64;
-
-        for w in &q_words {
-            let tf_val = count_occurrences(&c.content_lower, w);
-            if tf_val == 0 {
-                continue;
-            }
-            let tf = tf_val as f64;
-            let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg_dl)));
-            let df = index.doc_freqs.get(w).copied().unwrap_or(1) as f64;
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-            score += tf_norm * idf;
-        }
-
-        // Name/path bonus for candidates
-        for w in &q_words {
-            if c.name_lower.contains(w) || c.path_lower.contains(w) {
-                score += 2.0;
-            }
-        }
-
-        // Chunk type bonus
-        if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
-            score += 0.5;
-        }
-
-        // Semantic score from embeddings
-        if let Some(ref emb) = c.embedding {
-            let query_emb: Vec<f32> = q_words
-                .iter()
-                .map(|w| if c.content_lower.contains(w) { 1.0 } else { 0.0 })
-                .collect();
-            if !query_emb.is_empty() && query_emb.len() == emb.len() {
-                score += cosine_similarity(emb, &query_emb) * 3.0;
-            }
-        }
-
-        if score > 0.0 {
-            scored.push((score, c));
-        }
-    }
-
-    // Also scan all chunks for name/path matches that weren't content candidates
-    for (idx, c) in index.chunks.iter().enumerate() {
-        if candidate_indices.contains(&idx) {
-            continue; // already scored
-        }
-        let mut bonus = 0.0f64;
-        for w in &q_words {
-            if c.name_lower.contains(w) || c.path_lower.contains(w) {
-                bonus += 2.0;
-            }
-        }
-        if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
-            bonus += 0.5;
-        }
-        if bonus > 0.0 {
-            scored.push((bonus, c));
-        }
-    }
-
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-    let mut chosen = Vec::new();
-    let mut used = 0usize;
-    for (_, c) in scored.into_iter().take(top_k.max(1)) {
-        let block_len = c.content.len() + c.path.len() + 64;
-        if used + block_len > max_chars {
-            break;
-        }
-        used += block_len;
-        chosen.push(c);
-    }
-    chosen
-}
-
-/// Counts occurrences of `word` in lowercased `text`.
-/// Both `text` and `word` are expected to be pre-lowercased.
-fn count_occurrences(text: &str, word: &str) -> usize {
-    if word.is_empty() || text.is_empty() {
-        return 0;
-    }
-    let mut count = 0;
-    let mut start = 0;
-    while let Some(pos) = text[start..].find(word) {
-        count += 1;
-        start += pos + 1;
-    }
-    count
-}
-
 /// Build a compact "Relevant code from project (via index):" section for injection.
 /// Called from the main prompt assembly when an index is present for the project.
 pub fn build_retrieved_context(chunks: &[&IndexChunk], max_chars: usize) -> String {
@@ -334,8 +182,8 @@ struct FileEntryToProcess {
 }
 
 pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<String, u64>)> {
-    let max_file_bytes: u64 = 120 * 1024;
-    let target_chunk = 2800usize;
+    let max_file_bytes: u64 = crate::constants::INDEX_MAX_FILE_BYTES;
+    let target_chunk = crate::constants::INDEX_TARGET_CHUNK_BYTES;
     let existing_mtimes = load_existing_mtimes(root);
 
     let mut file_entries: Vec<FileEntryToProcess> = Vec::new();
@@ -343,8 +191,17 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     let mut changed_files = 0u32;
     let mut scanned_count = 0u32;
 
+    // Phase 1: Walk directory tree (sequential) — collect paths and metadata
+    struct WalkEntry {
+        rel_str: String,
+        name: String,
+        path: PathBuf,
+    }
+
+    let mut walk_entries: Vec<WalkEntry> = Vec::new();
+
     for entry in WalkBuilder::new(root)
-        .max_depth(Some(8))
+        .max_depth(Some(crate::constants::INDEX_MAX_DEPTH))
         .follow_links(false)
         .git_ignore(true)
         .git_global(true)
@@ -386,7 +243,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
         }
 
         scanned_count += 1;
-        if scanned_count % 100 == 0 {
+        if scanned_count.is_multiple_of(100) {
             eprint!("\r  scanning... {} files", scanned_count);
             let _ = std::io::stderr().flush();
         }
@@ -414,19 +271,12 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
             }
         }
 
-        let text = match fs::read_to_string(p) {
-            Ok(t) if !t.trim().is_empty() => t,
-            _ => continue,
-        };
-
-        let line_count = text.lines().count().max(1);
-        file_entries.push(FileEntryToProcess {
+        changed_files += 1;
+        walk_entries.push(WalkEntry {
             rel_str,
             name: name.to_string(),
-            content: text,
-            line_count,
+            path: p.to_path_buf(),
         });
-        changed_files += 1;
     }
 
     // Clear progress line
@@ -440,6 +290,28 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
         if let Some(existing) = load_codebase_index(root) {
             return Ok((existing.chunks, file_mtimes));
         }
+    }
+
+    // Phase 2: Read files in parallel
+    let results: Vec<Option<FileEntryToProcess>> = walk_entries
+        .par_iter()
+        .map(|we| {
+            let text = match std::fs::read_to_string(&we.path) {
+                Ok(t) if !t.trim().is_empty() => t,
+                _ => return None,
+            };
+            let line_count = text.lines().count().max(1);
+            Some(FileEntryToProcess {
+                rel_str: we.rel_str.clone(),
+                name: we.name.clone(),
+                content: text,
+                line_count,
+            })
+        })
+        .collect();
+
+    for fe in results.into_iter().flatten() {
+        file_entries.push(fe);
     }
 
     let mut chunks: Vec<IndexChunk> = file_entries
@@ -495,137 +367,6 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     Ok((chunks, file_mtimes))
 }
 
-pub(crate) fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize, usize, String)> {
-    let mut out = Vec::new();
-    let mut buf = String::with_capacity(target + 256);
-    let mut cur_start_line = 1usize;
-    let mut cur_line = 1usize;
-
-    for line in text.lines() {
-        let line_len = line.len() + 1;
-        if buf.len() + line_len > target && !buf.trim().is_empty() {
-            let end_l = cur_line.saturating_sub(1).max(cur_start_line);
-            out.push((cur_start_line, end_l, std::mem::take(&mut buf)));
-            cur_start_line = cur_line;
-        }
-        buf.push_str(line);
-        buf.push('\n');
-        cur_line += 1;
-    }
-    if !buf.trim().is_empty() {
-        let end_l = (cur_line - 1).max(cur_start_line);
-        out.push((cur_start_line, end_l, buf));
-    }
-
-    if out.len() == 1 && out[0].2.len() > target * 2 {
-        let big = out.remove(0).2;
-        let mut start = 0usize;
-        let mut lnum = 1usize;
-        while start < big.len() {
-            let end = (start + target).min(big.len());
-            let end = big.floor_char_boundary(end);
-            let piece = big[start..end].to_string();
-            let piece_lines = piece.lines().count().max(1);
-            out.push((lnum, lnum + piece_lines - 1, piece));
-            lnum += piece_lines;
-            start = end;
-            if start < big.len() && big.as_bytes().get(start) == Some(&b'\n') {
-                start += 1;
-            }
-        }
-    }
-    out
-}
-
-/// Best-effort classification of a chunk for scoring bonuses in retrieval.
-/// The retriever already gives +1 to "function" | "class" | "method".
-fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
-    let ext = Path::new(rel_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    // Look at the first several lines for signature-like things
-    let head: String = content.lines().take(12).collect::<Vec<_>>().join("\n").to_lowercase();
-
-    match ext.as_str() {
-        "rs" => {
-            if head.contains("fn ") || head.contains("pub fn ") || head.contains("pub async fn ") {
-                "function"
-            } else if head.contains("struct ")
-                || head.contains("enum ")
-                || head.contains("trait ")
-                || head.contains("type ")
-            {
-                "type"
-            } else if head.contains("mod ") || head.contains("pub mod ") {
-                "module"
-            } else if head.contains("impl ") {
-                "impl"
-            } else {
-                "file"
-            }
-        }
-        "py" | "pyi" => {
-            if head.contains("class ") {
-                "class"
-            } else if head.contains("def ") || head.contains("async def ") {
-                "function"
-            } else {
-                "file"
-            }
-        }
-        "js" | "jsx" | "mjs" | "cjs" => {
-            if head.contains("class ") {
-                "class"
-            } else if head.contains("function ")
-                || head.contains("=>")
-                || head.contains("const ")
-                || head.contains("let ")
-            {
-                "function"
-            } else {
-                "file"
-            }
-        }
-        "ts" | "tsx" => {
-            if head.contains("class ") || head.contains("interface ") {
-                "class"
-            } else if head.contains("function ") || head.contains("=>") || head.contains("const ") {
-                "function"
-            } else {
-                "file"
-            }
-        }
-        "go" => {
-            if head.contains("func ") {
-                "function"
-            } else {
-                "file"
-            }
-        }
-        "java" | "kt" | "scala" => {
-            if head.contains("class ") || head.contains("interface ") || head.contains("object ") {
-                "class"
-            } else if head.contains("fun ")
-                || head.contains("public ")
-                || head.contains("private ")
-                || head.contains("def ")
-            {
-                "function"
-            } else {
-                "file"
-            }
-        }
-        "html" | "htm" => "html",
-        "css" | "scss" | "less" => "css",
-        "md" | "markdown" => "docs",
-        "toml" | "yaml" | "yml" | "json" => "config",
-        _ => "file",
-    }
-}
-
 /// Writes the codebase index to `.rem/codebase_index.json` with inverted index and mtimes.
 pub fn write_codebase_index(root: &Path, chunks: Vec<IndexChunk>, file_mtimes: HashMap<String, u64>) -> Result<()> {
     let rem_dir = root.join(".rem");
@@ -672,77 +413,6 @@ fn file_mtime(path: &Path) -> u64 {
             })
         })
         .unwrap_or(0)
-}
-
-/// Computes embeddings for chunks using Ollama's /api/embed endpoint.
-/// Uses async reqwest with batched concurrent requests for large chunk sets.
-/// Falls back silently if Ollama is unavailable.
-pub async fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .ok();
-    let client = match client {
-        Some(c) => c,
-        None => return,
-    };
-
-    let url = format!("{}/api/embed", ollama_url.trim_end_matches('/'));
-    let batch_size = 10;
-    for batch in chunks.chunks_mut(batch_size) {
-        let mut futures = Vec::with_capacity(batch.len());
-        for chunk in batch.iter() {
-            let text = if chunk.content.len() > 8000 {
-                &chunk.content[..8000]
-            } else {
-                &chunk.content
-            };
-            if text.trim().is_empty() {
-                continue;
-            }
-            let payload = serde_json::json!({
-                "model": "nomic-embed-text",
-                "input": text
-            });
-            let req = client.post(&url).json(&payload).send();
-            futures.push(async move {
-                let resp = req.await.ok()?;
-                let body: serde_json::Value = resp.json().await.ok()?;
-                let embeddings = body.get("embeddings")?.as_array()?;
-                let embedding = embeddings.first()?;
-                let vec: Vec<f32> = embedding
-                    .as_array()?
-                    .iter()
-                    .filter_map(|v| v.as_f64().map(|f| f as f32))
-                    .collect();
-                if vec.is_empty() {
-                    None
-                } else {
-                    Some(vec)
-                }
-            });
-        }
-        let results: Vec<Option<Vec<f32>>> = join_all(futures).await;
-        for (chunk, result) in batch.iter_mut().zip(results) {
-            if let Some(emb) = result {
-                chunk.embedding = Some(emb);
-            }
-        }
-    }
-}
-
-/// Computes cosine similarity between two embedding vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 {
-        return 0.0;
-    }
-    (dot / (na * nb)) as f64
 }
 
 /// Loads existing file mtimes from a previous index, if available.

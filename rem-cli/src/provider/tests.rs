@@ -29,6 +29,8 @@ async fn test_provider_kind_from_str() {
     assert_eq!(ProviderKind::from_str("google"), ProviderKind::Gemini);
     assert_eq!(ProviderKind::from_str("anthropic"), ProviderKind::Anthropic);
     assert_eq!(ProviderKind::from_str("claude"), ProviderKind::Anthropic);
+    assert_eq!(ProviderKind::from_str("azure"), ProviderKind::Azure);
+    assert_eq!(ProviderKind::from_str("openrouter"), ProviderKind::OpenRouter);
     assert_eq!(ProviderKind::from_str("unknown"), ProviderKind::Ollama);
 }
 
@@ -38,6 +40,8 @@ async fn test_provider_kind_as_str() {
     assert_eq!(ProviderKind::OpenAI.as_str(), "openai");
     assert_eq!(ProviderKind::Gemini.as_str(), "gemini");
     assert_eq!(ProviderKind::Anthropic.as_str(), "anthropic");
+    assert_eq!(ProviderKind::Azure.as_str(), "azure");
+    assert_eq!(ProviderKind::OpenRouter.as_str(), "openrouter");
 }
 
 // ── Ollama ────────────────────────────────────────────────────────────
@@ -496,6 +500,192 @@ async fn test_gemini_api_error() {
     let err = provider.complete_json("hello").await.unwrap_err();
     let msg = format!("{}", err);
     assert!(msg.contains("Gemini"));
+}
+
+// ── Azure ────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_azure_list_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "gpt-4"}, {"id": "gpt-35-turbo"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::Azure,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let models = provider.list_models().await.unwrap();
+    assert_eq!(models, vec!["gpt-4"]);
+}
+
+#[tokio::test]
+async fn test_azure_complete_json() {
+    let mock_server = MockServer::start().await;
+    let response_str =
+        r#"{"explanation":"azure test","code":"print('azure')","files":[],"commands":[],"checks":[],"caution":""}"#;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": response_str}}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::Azure,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        "Be helpful.".to_string(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let reply = provider.complete_json("write code").await.unwrap();
+    assert_eq!(reply.explanation, "azure test");
+    assert_eq!(reply.code, "print('azure')");
+}
+
+#[tokio::test]
+async fn test_azure_chat_stream() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" from Azure\"}}]}\ndata: [DONE]\n"
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::Azure,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
+    assert_eq!(result, "Hello from Azure");
+}
+
+#[tokio::test]
+async fn test_azure_api_error() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": "invalid_api_key"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::Azure,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        String::new(),
+        Some("bad-key".to_string()),
+        4096,
+    );
+
+    let err = provider.complete_json("hello").await.unwrap_err();
+    let msg = format!("{}", err);
+    assert!(msg.contains("Azure"));
+}
+
+// ── OpenRouter ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_openrouter_list_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "gpt-4"}, {"id": "claude-sonnet-4"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::OpenRouter,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let models = provider.list_models().await.unwrap();
+    assert_eq!(models, vec!["gpt-4", "claude-sonnet-4"]);
+}
+
+#[tokio::test]
+async fn test_openrouter_complete_json() {
+    let mock_server = MockServer::start().await;
+    let response_str =
+        r#"{"explanation":"or test","code":"print('or')","files":[],"commands":[],"checks":[],"caution":""}"#;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": response_str}}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::OpenRouter,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        "Be helpful.".to_string(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let reply = provider.complete_json("write code").await.unwrap();
+    assert_eq!(reply.explanation, "or test");
+    assert_eq!(reply.code, "print('or')");
+}
+
+#[tokio::test]
+async fn test_openrouter_chat_stream() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" from OpenRouter\"}}]}\ndata: [DONE]\n"
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::OpenRouter,
+        mock_server.uri(),
+        "gpt-4".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
+    assert_eq!(result, "Hello from OpenRouter");
 }
 
 #[test]

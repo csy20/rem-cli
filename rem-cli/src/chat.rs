@@ -8,7 +8,7 @@ use crate::intent::TaskIntent;
 use crate::memory::ProjectMemory;
 use crate::search::SearchResult;
 use crate::session_io::build_project_context;
-use crate::{FileEntry, RE_AT_REF};
+use crate::types::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
 use rustyline::config::Configurer;
 use rustyline::DefaultEditor;
@@ -51,7 +51,7 @@ impl HistoryManager {
         let mut rl = DefaultEditor::new().context("failed to start line editor")?;
         let history_path = Self::history_path();
         let _ = rl.load_history(&history_path);
-        rl.set_max_history_size(1000).ok();
+        rl.set_max_history_size(crate::constants::MAX_HISTORY_ENTRIES).ok();
         Ok(Self {
             rl,
             history: Vec::new(),
@@ -88,6 +88,9 @@ impl HistoryManager {
     }
 }
 
+/// Maximum undo stack depth to prevent unbounded memory growth.
+const MAX_UNDO_DEPTH: usize = 50;
+
 /// Tracks last generated code, files, writes, and undo stack.
 pub(crate) struct CodeOutput {
     pub(crate) last_code: String,
@@ -103,6 +106,13 @@ impl CodeOutput {
             last_files: Vec::new(),
             last_files_written: Vec::new(),
             undo_stack: Vec::new(),
+        }
+    }
+
+    pub(crate) fn push_undo(&mut self, entries: Vec<crate::BackupEntry>) {
+        self.undo_stack.push(entries);
+        while self.undo_stack.len() > MAX_UNDO_DEPTH {
+            self.undo_stack.remove(0);
         }
     }
 }
@@ -318,27 +328,23 @@ impl ChatSession {
         let mut extra_context = String::new();
         let mut cleaned_input = input.to_string();
 
-        for cap in RE_AT_REF.captures_iter(input) {
-            let ref_path = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-            if ref_path.starts_with("http") {
-                continue;
-            }
-            let path = if ref_path.starts_with('/') || ref_path.starts_with("~/") {
-                if ref_path.starts_with("~/") {
-                    if let Some(home) = dirs::home_dir() {
-                        home.join(ref_path.trim_start_matches("~/"))
-                    } else {
-                        PathBuf::from(ref_path)
-                    }
-                } else {
-                    PathBuf::from(ref_path)
-                }
-            } else {
-                let base = self.ctx.project_dir.as_deref().unwrap_or_else(|| Path::new("."));
-                match crate::resolve_safe_path(base, ref_path) {
-                    Some(p) => p,
-                    None => continue,
-                }
+        // Collect all unique non-http refs and sort by length descending
+        // to handle overlapping references correctly (e.g. @foo vs @foobar)
+        let mut refs: Vec<&str> = RE_AT_REF
+            .captures_iter(input)
+            .filter_map(|cap| cap.get(1))
+            .map(|m| m.as_str())
+            .filter(|ref_path| !ref_path.starts_with("http"))
+            .collect();
+        refs.sort_unstable();
+        refs.dedup();
+        refs.sort_unstable_by(|a, b| b.len().cmp(&a.len()));
+
+        for ref_path in &refs {
+            let base = self.ctx.project_dir.as_deref().unwrap_or_else(|| Path::new("."));
+            let path = match crate::resolve_safe_path(base, ref_path) {
+                Some(p) => p,
+                None => continue,
             };
 
             if path.is_file() {

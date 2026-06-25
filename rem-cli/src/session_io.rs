@@ -108,7 +108,9 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
             entries.push(format!("{}  ({} bytes)", rel_str, size));
         }
         count += 1;
-        if out.len() > max_bytes {
+        // Check accumulated entries size against limit (entries are joined later)
+        let entries_size: usize = entries.iter().map(|e| e.len() + 1).sum();
+        if out.len() + entries_size > max_bytes {
             break;
         }
     }
@@ -213,8 +215,11 @@ pub(crate) fn validate_chat_response(response: &str, intent: &TaskIntent, mode: 
     if *intent != TaskIntent::CodeAction && *mode != RunMode::Code {
         let has_code_fences = response.contains("```");
         let has_multi_file = response.contains("### ") && has_code_fences;
-        let has_json =
-            response.trim().starts_with('{') && (response.contains("\"code\"") || response.contains("\"files\""));
+        let trimmed_response = response.trim();
+        let has_json = trimmed_response.starts_with('{')
+            && trimmed_response.ends_with('}')
+            && (response.contains("\"code\"") || response.contains("\"files\""))
+            && serde_json::from_str::<serde_json::Value>(trimmed_response).is_ok();
 
         if has_multi_file || has_json {
             let code_stripped = strip_code_blocks(response);

@@ -1,15 +1,16 @@
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::agentic::{run_lint, run_test};
+use crate::blocklist::is_command_blocked;
 use crate::find::{find_matches, FindOptions};
 use crate::provider::tools::{builtin_tools, ToolCall, ToolResponse, ToolResult as ToolCallResult};
 use crate::provider::Provider;
 use crate::search::perform_web_search;
 use crate::ui;
 
-/// Maximum tool call rounds before forcing a text response.
-const MAX_TOOL_ROUNDS: usize = 10;
+const MAX_TOOL_ROUNDS: usize = crate::constants::MAX_TOOL_ROUNDS;
 
 /// Executes a single tool call and returns the result.
 pub(crate) async fn execute_tool_call(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
@@ -114,6 +115,9 @@ fn execute_tool_lint(tool_call: &ToolCall) -> ToolCallResult {
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
     };
+    if path.contains("..") {
+        return err_result(tool_call, "path traversal detected");
+    }
     let result = run_lint(&path);
     ToolCallResult {
         call_id: tool_call.id.clone(),
@@ -128,6 +132,9 @@ fn execute_tool_test(tool_call: &ToolCall) -> ToolCallResult {
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
     };
+    if path.contains("..") {
+        return err_result(tool_call, "path traversal detected");
+    }
     let result = run_test(&path);
     ToolCallResult {
         call_id: tool_call.id.clone(),
@@ -205,6 +212,34 @@ fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> T
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
 
+    // Blocklist check (always runs, even when stdin is not a terminal)
+    if is_command_blocked(&command) || args.iter().any(|a| is_command_blocked(a)) {
+        return err_result(tool_call, "shell command blocked by security policy");
+    }
+
+    // Interactive approval prompt for shell commands
+    if std::io::stdin().is_terminal() {
+        let full_cmd = if args.is_empty() {
+            command.clone()
+        } else {
+            format!("{} {}", command, args.join(" "))
+        };
+        eprint!("  ! Allow shell command? [y/N] {} ", full_cmd);
+        let _ = io::stderr().flush();
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(_) => {
+                let trimmed = input.trim().to_lowercase();
+                if trimmed != "y" && trimmed != "yes" {
+                    return err_result(tool_call, "shell command execution denied by user");
+                }
+            }
+            Err(_) => {
+                return err_result(tool_call, "failed to read user input for approval");
+            }
+        }
+    }
+
     match Command::new(&command).args(&args).current_dir(project_dir).output() {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -213,13 +248,19 @@ fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> T
             if !stdout.is_empty() {
                 content.push_str(&format!(
                     "stdout:\n{}\n",
-                    &stdout.chars().take(2000).collect::<String>()
+                    &stdout
+                        .chars()
+                        .take(crate::constants::TOOL_COMMAND_STDOUT_MAX)
+                        .collect::<String>()
                 ));
             }
             if !stderr.is_empty() {
                 content.push_str(&format!(
                     "stderr:\n{}\n",
-                    &stderr.chars().take(1000).collect::<String>()
+                    &stderr
+                        .chars()
+                        .take(crate::constants::TOOL_COMMAND_STDERR_MAX)
+                        .collect::<String>()
                 ));
             }
             ToolCallResult {
@@ -259,7 +300,7 @@ pub(crate) async fn run_tool_loop(
     let t = ui::theme::active();
 
     let mut current_prompt = prompt.to_string();
-    let mut current_system = system_prompt.to_string();
+    let current_system = system_prompt.to_string();
     let mut current_history = history.to_string();
     let mut round = 0usize;
 
@@ -306,7 +347,10 @@ pub(crate) async fn run_tool_loop(
                     follow_up.push_str(&format!(
                         "[Tool: {}]\n{}\n---\n",
                         r.name,
-                        r.content.chars().take(1500).collect::<String>()
+                        r.content
+                            .chars()
+                            .take(crate::constants::TOOL_RESULT_MAX_CHARS)
+                            .collect::<String>()
                     ));
                 }
                 follow_up.push_str("\nContinue with the task based on these results.");
@@ -314,8 +358,6 @@ pub(crate) async fn run_tool_loop(
                 // For the next round, the tool results become the user prompt
                 // and system/history are passed through
                 current_prompt = follow_up;
-                // Don't repeat the system prompt in subsequent rounds
-                current_system = "Continue working on the task. Use tool results above.".to_string();
                 current_history.clear();
             }
             Err(e) => {
@@ -328,6 +370,7 @@ pub(crate) async fn run_tool_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn make_tool_call(name: &str, args: serde_json::Value) -> ToolCall {
         ToolCall {

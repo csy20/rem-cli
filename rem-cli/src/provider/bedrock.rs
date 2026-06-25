@@ -40,8 +40,8 @@ impl ProviderBackend for BedrockBackend {
             .messages(msg)
             .inference_config(
                 aws_sdk_bedrockruntime::types::InferenceConfiguration::builder()
-                    .max_tokens(512)
-                    .temperature(0.3)
+                    .max_tokens(crate::constants::JSON_MAX_TOKENS as i32)
+                    .temperature(crate::constants::JSON_TEMPERATURE as f32)
                     .build(),
             )
             .send()
@@ -102,15 +102,14 @@ impl ProviderBackend for BedrockBackend {
             .messages(msg)
             .inference_config(
                 aws_sdk_bedrockruntime::types::InferenceConfiguration::builder()
-                    .max_tokens(4096)
-                    .temperature(0.7)
+                    .max_tokens(crate::constants::DEFAULT_MAX_TOKENS as i32)
+                    .temperature(crate::constants::DEFAULT_TEMPERATURE as f32)
                     .build(),
             )
             .send()
             .await
             .context("failed to call Bedrock ConverseStream API")?;
-
-        let mut full_text = String::with_capacity(4096);
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
         let mut event_stream = output.stream;
 
         use aws_sdk_bedrockruntime::types::ConverseStreamOutput;

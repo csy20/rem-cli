@@ -43,6 +43,7 @@ bedrock = ["aws-sdk-bedrockruntime", "aws-config"]
 [dev-dependencies]
 wiremock = "0.6"
 criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
 
 [[bench]]
 name = "indexer"

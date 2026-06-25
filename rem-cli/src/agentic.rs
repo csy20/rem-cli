@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::ui;
 
-/// Result of running an external tool (linter, test runner, etc.).
+/// Output of running an external tool (linter, test runner, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
+pub struct ToolOutput {
     pub tool_name: String,
     pub success: bool,
     pub stdout: String,
@@ -57,7 +57,7 @@ impl LintTarget {
 }
 
 /// Runs the appropriate linter for a file path.
-pub fn run_lint(path: &str) -> ToolResult {
+pub fn run_lint(path: &str) -> ToolOutput {
     let target = LintTarget::detect(path);
     let start = Instant::now();
 
@@ -71,7 +71,7 @@ pub fn run_lint(path: &str) -> ToolResult {
         LintTarget::Css => ("stylelint", "npx", vec!["stylelint", path]),
         LintTarget::Html => ("htmlhint", "npx", vec!["--no-install", "htmlhint", path]),
         LintTarget::Unknown => {
-            return ToolResult {
+            return ToolOutput {
                 tool_name: "unknown".into(),
                 success: false,
                 stdout: String::new(),
@@ -86,7 +86,7 @@ pub fn run_lint(path: &str) -> ToolResult {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            ToolResult {
+            ToolOutput {
                 tool_name: name.into(),
                 success: output.status.success(),
                 stdout,
@@ -95,7 +95,7 @@ pub fn run_lint(path: &str) -> ToolResult {
                 action: "lint".into(),
             }
         }
-        Err(e) => ToolResult {
+        Err(e) => ToolOutput {
             tool_name: name.into(),
             success: false,
             stdout: String::new(),
@@ -107,7 +107,7 @@ pub fn run_lint(path: &str) -> ToolResult {
 }
 
 /// Runs the appropriate test runner for a file path (cargo test, pytest, etc.).
-pub fn run_test(path: &str) -> ToolResult {
+pub fn run_test(path: &str) -> ToolOutput {
     let target = LintTarget::detect(path);
     let start = Instant::now();
 
@@ -119,7 +119,7 @@ pub fn run_test(path: &str) -> ToolResult {
             Command::new("npx").args(["jest", path, "--no-coverage"]).output()
         }
         LintTarget::Css | LintTarget::Html | LintTarget::Unknown => {
-            return ToolResult {
+            return ToolOutput {
                 tool_name: "test".into(),
                 success: false,
                 stdout: String::new(),
@@ -135,11 +135,12 @@ pub fn run_test(path: &str) -> ToolResult {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let combined = if stdout.len() > 2000 {
-                format!("{}...\n[truncated to 2000 chars]", &stdout[..2000])
+                let truncated: String = stdout.chars().take(2000).collect();
+                format!("{}...\n[truncated to 2000 chars]", truncated)
             } else {
                 stdout.clone()
             };
-            ToolResult {
+            ToolOutput {
                 tool_name: "test".into(),
                 success: output.status.success(),
                 stdout: combined,
@@ -148,7 +149,7 @@ pub fn run_test(path: &str) -> ToolResult {
                 action: "test".into(),
             }
         }
-        Err(e) => ToolResult {
+        Err(e) => ToolOutput {
             tool_name: "test".into(),
             success: false,
             stdout: String::new(),
@@ -160,7 +161,7 @@ pub fn run_test(path: &str) -> ToolResult {
 }
 
 /// Formats tool execution output with styled status and truncated stdout/stderr.
-pub fn format_tool_output(result: &ToolResult) -> String {
+pub fn format_tool_output(result: &ToolOutput) -> String {
     let t = ui::theme::active();
     let status = if result.success {
         ui::theme::paint_success_label(&t, "PASS")
@@ -198,9 +199,9 @@ pub fn format_tool_output(result: &ToolResult) -> String {
 
 /// Builds a combined tool output context string from optional lint/test/build results.
 pub fn build_tool_context(
-    lint_result: Option<&ToolResult>,
-    test_result: Option<&ToolResult>,
-    build_result: Option<&ToolResult>,
+    lint_result: Option<&ToolOutput>,
+    test_result: Option<&ToolOutput>,
+    build_result: Option<&ToolOutput>,
 ) -> String {
     let mut ctx = String::new();
 
@@ -333,7 +334,7 @@ mod tests {
 
     #[test]
     fn format_tool_output_includes_status() {
-        let result = ToolResult {
+        let result = ToolOutput {
             tool_name: "rustfmt".into(),
             success: true,
             stdout: "formatted OK".into(),
@@ -348,7 +349,7 @@ mod tests {
 
     #[test]
     fn format_tool_output_shows_stderr() {
-        let result = ToolResult {
+        let result = ToolOutput {
             tool_name: "ruff".into(),
             success: false,
             stdout: String::new(),

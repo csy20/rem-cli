@@ -19,17 +19,16 @@ use crate::commands::{
     handle_write, print_chat_help, print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
+use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
 use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskIntent};
 use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
 use crate::session_io::{build_prompt, language_specific_guidance, print_welcome, validate_chat_response};
 use crate::token_count::estimate_tokens;
+use crate::types::{extract_code_blocks_with_names, file_icon};
 use crate::ui;
-use crate::{
-    exit_requested, extract_code_blocks_with_names, file_icon, reset_ctrlc_count, CHAT_SYSTEM_PROMPT_CODE,
-    CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN,
-};
+use crate::{exit_requested, reset_ctrlc_count};
 
 /// Initializes a chat session from configuration, setting up workspace,
 /// theme, and mode.
@@ -361,11 +360,9 @@ fn build_llm_prompt(session: &mut ChatSession, trimmed: &str, intent: &TaskInten
 
     let needs_path = (session.mode == RunMode::Code || *intent == TaskIntent::CodeAction) && !has_file_path(trimmed);
     let final_prompt = if needs_path {
-        session.add_history(trimmed);
         let path = prompt_for_path(session).unwrap_or_else(|_| trimmed.to_string());
         format!("User request: {}\n\nSave file at: {}", trimmed, path)
     } else {
-        session.add_history(trimmed);
         if let Some(ref dir) = session.ctx.project_dir {
             format!("User request: {}\n\nWorking directory: {}", trimmed, dir.display())
         } else {
@@ -501,11 +498,11 @@ fn handle_llm_response(
 
     if !cleaned.is_empty() {
         session.history_mgr.history.push((trimmed.to_string(), cleaned));
-        if session.history_mgr.history.len() > 12 {
+        if session.history_mgr.history.len() > crate::constants::MAX_HISTORY_TURNS {
             session.history_mgr.history.remove(0);
         }
         session.history_mgr.messages_since_save += 1;
-        if session.history_mgr.messages_since_save >= 5 {
+        if session.history_mgr.messages_since_save >= crate::constants::AUTO_SAVE_INTERVAL {
             session.auto_save_session();
             session.history_mgr.messages_since_save = 0;
         }
@@ -548,8 +545,16 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             // "exit" or "quit" triggered a break
             break;
         }
-        // A slash command was dispatched and handled; skip LLM call
+        // Skip LLM call for slash commands
         if trimmed.starts_with('/') {
+            // Check if it was actually a recognized command (not an unknown one)
+            if !crate::commands::registry().is_command(trimmed) {
+                println!(
+                    "  {} unknown command: {}",
+                    ui::theme::paint_warning(&t, "!"),
+                    ui::theme::paint_dim(&t, trimmed)
+                );
+            }
             continue;
         }
 
@@ -755,4 +760,58 @@ fn display_performance_stats(
     println!("{rail}");
     println!("{rail} {provider_tag} {dot} {dur} {dot} {speed}");
     println!("{rail}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn needs_continuation_trailing_backslash() {
+        assert!(needs_continuation("hello \\"));
+    }
+
+    #[test]
+    fn needs_continuation_unclosed_brace() {
+        assert!(needs_continuation("fn foo() {"));
+    }
+
+    #[test]
+    fn needs_continuation_unclosed_paren() {
+        assert!(needs_continuation("if (x > 0"));
+    }
+
+    #[test]
+    fn needs_continuation_unclosed_bracket() {
+        assert!(needs_continuation("let xs = [1, 2, 3"));
+    }
+
+    #[test]
+    fn needs_continuation_closed_brackets_returns_false() {
+        assert!(!needs_continuation("fn foo() { return 1; }"));
+        assert!(!needs_continuation("if (x > 0) { }"));
+        assert!(!needs_continuation("let xs = [1, 2, 3];"));
+    }
+
+    #[test]
+    fn needs_continuation_empty_line() {
+        assert!(!needs_continuation(""));
+    }
+
+    #[test]
+    fn needs_continuation_mismatched_close_does_not_count() {
+        // A close without open should not trigger continuation
+        assert!(!needs_continuation("some ) text"));
+    }
+
+    #[test]
+    fn needs_continuation_plain_text() {
+        assert!(!needs_continuation("hello world"));
+    }
+
+    #[test]
+    fn needs_continuation_nested_brackets() {
+        assert!(needs_continuation("fn outer() { fn inner(x: &[u8"));
+        assert!(!needs_continuation("fn outer() { fn inner(x: &[u8]); }"));
+    }
 }

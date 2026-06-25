@@ -10,11 +10,11 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use tracing::warn;
 
 /// Cached config to avoid repeated TOML parsing from disk.
-static CONFIG_CACHE: LazyLock<Mutex<Option<AppConfig>>> = LazyLock::new(|| Mutex::new(None));
+static CONFIG_CACHE: LazyLock<RwLock<Option<AppConfig>>> = LazyLock::new(|| RwLock::new(None));
 
 /// Returns the config directory path, checking XDG_CONFIG_HOME first.
 fn config_dir() -> Option<std::path::PathBuf> {
@@ -116,7 +116,7 @@ pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
 /// Results are cached in a global [`CONFIG_CACHE`] to avoid repeated TOML parsing.
 pub(crate) fn load_config() -> Result<AppConfig> {
     {
-        let cache = CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = CONFIG_CACHE.read().unwrap_or_else(|e| e.into_inner());
         if let Some(ref cached) = *cache {
             return Ok(cached.clone());
         }
@@ -136,14 +136,14 @@ pub(crate) fn load_config() -> Result<AppConfig> {
         let partial: PartialConfig = toml::from_str(&text).context("invalid local config")?;
         cfg.apply_partial(partial);
     }
-    let mut cache = CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
     *cache = Some(cfg.clone());
     Ok(cfg)
 }
 
 /// Invalidates the in-memory config cache so the next [`load_config`] re-reads from disk.
 pub(crate) fn invalidate_config_cache() {
-    let mut cache = CONFIG_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
     *cache = None;
 }
 
@@ -231,7 +231,7 @@ pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
             }
         }
     }
-    crate::DEFAULT_SYSTEM_PROMPT.to_string()
+    crate::constants::DEFAULT_SYSTEM_PROMPT.to_string()
 }
 
 fn warn_missing_api_key(cfg: &AppConfig) {
@@ -282,6 +282,39 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
             "model_ctx={} is very low (< 512). Responses may be truncated.",
             cfg.model_ctx
         );
+    }
+
+    let url = cfg.ollama_url.trim();
+    if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
+        warn!(
+            "ollama_url '{}' does not look like a valid URL (expected http:// or https://)",
+            url
+        );
+    }
+
+    if let Some(ref effort) = cfg.reasoning_effort {
+        let valid = ["low", "medium", "high"];
+        if !valid.contains(&effort.to_lowercase().as_str()) {
+            warn!("unknown reasoning_effort '{}'. Expected low, medium, or high", effort);
+        }
+    }
+
+    if cfg.thinking_budget == Some(0) {
+        warn!("thinking_budget is 0 — it should be > 0 to have any effect");
+    }
+
+    let theme_name = cfg.theme.to_uppercase();
+    let known_themes = ui::theme::list_names();
+    if !known_themes.iter().any(|t| t.eq_ignore_ascii_case(&theme_name)) {
+        warn!(
+            "unknown theme '{}'. Known themes: {}",
+            cfg.theme,
+            known_themes.join(", ")
+        );
+    }
+
+    if cfg.provider.to_lowercase() == "ollama" && cfg.api_key.as_ref().is_some_and(|k| !k.is_empty()) {
+        warn!("api_key is set but provider is 'ollama' — Ollama does not need an API key");
     }
 }
 
@@ -387,5 +420,51 @@ mod tests {
             };
             validate_config(&cfg);
         }
+    }
+
+    #[test]
+    fn validate_config_warns_on_bad_ollama_url() {
+        let cfg = AppConfig {
+            ollama_url: "not-a-url".into(),
+            ..Default::default()
+        };
+        validate_config(&cfg);
+    }
+
+    #[test]
+    fn validate_config_warns_on_invalid_reasoning_effort() {
+        let cfg = AppConfig {
+            reasoning_effort: Some("extreme".into()),
+            ..Default::default()
+        };
+        validate_config(&cfg);
+    }
+
+    #[test]
+    fn validate_config_warns_on_zero_thinking_budget() {
+        let cfg = AppConfig {
+            thinking_budget: Some(0),
+            ..Default::default()
+        };
+        validate_config(&cfg);
+    }
+
+    #[test]
+    fn validate_config_warns_on_unknown_theme() {
+        let cfg = AppConfig {
+            theme: "NONEXISTENT_THEME_123".into(),
+            ..Default::default()
+        };
+        validate_config(&cfg);
+    }
+
+    #[test]
+    fn validate_config_warns_on_api_key_with_ollama() {
+        let cfg = AppConfig {
+            provider: "ollama".into(),
+            api_key: Some("my-secret".into()),
+            ..Default::default()
+        };
+        validate_config(&cfg);
     }
 }

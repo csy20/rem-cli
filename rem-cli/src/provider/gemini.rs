@@ -62,6 +62,105 @@ pub struct GeminiModelEntry {
 
 pub(super) struct GeminiBackend;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_url_basic() {
+        let backend = GeminiBackend;
+        let provider = Provider::new(
+            super::super::ProviderKind::Gemini,
+            "https://generativelanguage.googleapis.com".into(),
+            "gemini-2.0-flash".into(),
+            30,
+            "system".into(),
+            Some("key".into()),
+            4096,
+        );
+        let url = backend.gemini_url(&provider, "/models");
+        assert_eq!(url, "https://generativelanguage.googleapis.com/v1beta/models");
+    }
+
+    #[test]
+    fn gemini_url_stream() {
+        let backend = GeminiBackend;
+        let provider = Provider::new(
+            super::super::ProviderKind::Gemini,
+            "https://generativelanguage.googleapis.com/".into(),
+            "gemini-2.0-flash".into(),
+            30,
+            "".into(),
+            None,
+            4096,
+        );
+        let url = backend.gemini_url(&provider, "/models/gemini-pro:streamGenerateContent?alt=sse");
+        assert!(url.contains("v1beta/models/gemini-pro:streamGenerateContent"));
+    }
+
+    #[test]
+    fn gemini_response_deserialize() {
+        let json = r#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
+        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
+        let text = resp
+            .candidates
+            .and_then(|c| c.into_iter().next())
+            .and_then(|c| c.content)
+            .and_then(|c| c.parts)
+            .and_then(|p| p.into_iter().next())
+            .and_then(|p| p.text);
+        assert_eq!(text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn gemini_response_empty_candidates() {
+        let json = r#"{}"#;
+        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.candidates.is_none());
+    }
+
+    #[test]
+    fn gemini_stream_chunk_deserialize() {
+        let json = r#"{"candidates":[{"content":{"parts":[{"text":"world"}]}}]}"#;
+        let chunk: GeminiStreamChunk = serde_json::from_str(json).unwrap();
+        let text = chunk
+            .candidates
+            .and_then(|c| c.into_iter().next())
+            .and_then(|c| c.content)
+            .and_then(|c| c.parts)
+            .and_then(|p| p.into_iter().next())
+            .and_then(|p| p.text);
+        assert_eq!(text.as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn gemini_models_response_deserialize() {
+        let json = r#"{"models":[{"name":"models/gemini-2.0-flash"},{"name":"models/gemini-pro"}]}"#;
+        let resp: GeminiModelsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.models.as_ref().map(|m| m.len()), Some(2));
+    }
+
+    #[test]
+    fn gemini_part_with_function_call() {
+        let json = r#"{"text":null,"function_call":{"name":"read_file","args":{"path":"test.txt"}}}"#;
+        let part: GeminiPart = serde_json::from_str(json).unwrap();
+        assert!(part.function_call.is_some());
+        let fc = part.function_call.unwrap();
+        assert_eq!(fc.name.as_deref(), Some("read_file"));
+        assert_eq!(
+            fc.args.as_ref().and_then(|a| a.get("path")).and_then(|v| v.as_str()),
+            Some("test.txt")
+        );
+    }
+
+    #[test]
+    fn gemini_candidate_no_content() {
+        let json = r#"{"candidates":[{}]}"#;
+        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.candidates.unwrap()[0].content.is_none());
+    }
+}
+
 impl GeminiBackend {
     fn gemini_url(&self, provider: &Provider, path: &str) -> String {
         format!("{}/v1beta{}", provider.base_url.trim_end_matches('/'), path)
@@ -96,8 +195,8 @@ impl ProviderBackend for GeminiBackend {
         let payload = json!({
             "contents": [{"parts": [{"text": format!("{}\n\nUser request:\n{}\n\nReturn JSON only.", provider.system_prompt, user_prompt)}]}],
             "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": 512
+                "temperature": crate::constants::JSON_TEMPERATURE,
+                "maxOutputTokens": crate::constants::JSON_MAX_TOKENS
             }
         });
 
@@ -146,8 +245,8 @@ impl ProviderBackend for GeminiBackend {
         let mut payload = json!({
             "contents": contents,
             "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 4096
+                "temperature": crate::constants::DEFAULT_TEMPERATURE,
+                "maxOutputTokens": crate::constants::DEFAULT_MAX_TOKENS
             }
         });
 
@@ -200,8 +299,8 @@ impl ProviderBackend for GeminiBackend {
         let mut payload = json!({
             "contents": [{"parts": parts}],
             "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 4096
+                "temperature": crate::constants::DEFAULT_TEMPERATURE,
+                "maxOutputTokens": crate::constants::DEFAULT_MAX_TOKENS
             }
         });
 
@@ -247,8 +346,8 @@ impl ProviderBackend for GeminiBackend {
         let mut payload = json!({
             "contents": contents,
             "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 4096
+                "temperature": crate::constants::DEFAULT_TEMPERATURE,
+                "maxOutputTokens": crate::constants::DEFAULT_MAX_TOKENS
             }
         });
 
@@ -275,7 +374,7 @@ impl ProviderBackend for GeminiBackend {
             return Err(provider.parse_api_error("Gemini", resp).await);
         }
 
-        let mut full_text = String::with_capacity(4096);
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
         let mut early_tool_response: Option<ToolResponse> = None;
 
         Provider::stream_buf(resp, |trimmed| {

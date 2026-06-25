@@ -344,3 +344,257 @@ pub(crate) fn handle_why(session: &ChatSession) {
     println!("{rail} {debug_fix}");
     println!("{rail}");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::RunMode;
+    use crate::provider::ProviderKind;
+    use crate::search::SearchResult;
+
+    fn make_session() -> ChatSession {
+        ChatSession::new("test", None).unwrap()
+    }
+
+    fn make_cfg() -> AppConfig {
+        AppConfig::default()
+    }
+
+    #[test]
+    fn test_handle_clear_clears_history() {
+        let mut session = make_session();
+        session.history_mgr.history.push(("hi".into(), "hello".into()));
+        session.last_search.push(SearchResult {
+            title: "test".into(),
+            snippet: "snippet".into(),
+            url: "http://example.com".into(),
+        });
+        session.last_tokens = 42;
+
+        handle_clear(&mut session);
+
+        assert!(session.history_mgr.history.is_empty());
+        assert!(session.last_search.is_empty());
+        assert_eq!(session.last_tokens, 0);
+    }
+
+    #[test]
+    fn test_handle_reset_clears_all() {
+        let mut session = make_session();
+        session.history_mgr.history.push(("hi".into(), "hello".into()));
+        session.code_out.last_code = "fn main() {}".into();
+        session.last_tokens = 42;
+
+        handle_reset(&mut session);
+
+        assert!(session.history_mgr.history.is_empty());
+        assert!(session.last_search.is_empty());
+        assert!(session.code_out.last_code.is_empty());
+        assert!(session.code_out.last_files.is_empty());
+        assert!(session.code_out.last_files_written.is_empty());
+        assert_eq!(session.last_tokens, 0);
+    }
+
+    #[test]
+    fn test_handle_mode_switches_from_chat_to_code() {
+        let mut session = make_session();
+        let mut cfg = make_cfg();
+        assert_eq!(session.mode, RunMode::Chat);
+
+        handle_mode(&mut session, &mut cfg);
+
+        assert_eq!(session.mode, RunMode::Code);
+        assert_eq!(cfg.mode, "CODE");
+    }
+
+    #[test]
+    fn test_handle_mode_switches_from_code_to_plan() {
+        let mut session = make_session();
+        session.mode = RunMode::Code;
+        let mut cfg = make_cfg();
+
+        handle_mode(&mut session, &mut cfg);
+
+        assert_eq!(session.mode, RunMode::Plan);
+        assert_eq!(cfg.mode, "PLAN");
+    }
+
+    #[test]
+    fn test_handle_mode_switches_from_plan_to_chat() {
+        let mut session = make_session();
+        session.mode = RunMode::Plan;
+        let mut cfg = make_cfg();
+
+        handle_mode(&mut session, &mut cfg);
+
+        assert_eq!(session.mode, RunMode::Chat);
+        assert_eq!(cfg.mode, "CHAT");
+    }
+
+    #[test]
+    fn test_handle_plan_sets_plan_mode() {
+        let mut session = make_session();
+        let mut cfg = make_cfg();
+        session.mode = RunMode::Code;
+
+        handle_plan(&mut session, &mut cfg);
+
+        assert_eq!(session.mode, RunMode::Plan);
+        assert_eq!(cfg.mode, "PLAN");
+    }
+
+    #[test]
+    fn test_handle_reasoning_enable() {
+        let mut client = Provider::new(
+            ProviderKind::Ollama,
+            "http://localhost:11434".into(),
+            "test".into(),
+            30,
+            String::new(),
+            None,
+            4096,
+        );
+        let mut cfg = make_cfg();
+        client.reasoning_config.enabled = false;
+
+        handle_reasoning(&mut client, &mut cfg, Some("on"));
+
+        assert!(client.reasoning_config.enabled);
+        assert_eq!(cfg.reasoning_effort, Some("medium".to_string()));
+    }
+
+    #[test]
+    fn test_handle_reasoning_disable() {
+        let mut client = Provider::new(
+            ProviderKind::Ollama,
+            "http://localhost:11434".into(),
+            "test".into(),
+            30,
+            String::new(),
+            None,
+            4096,
+        );
+        let mut cfg = make_cfg();
+        client.reasoning_config.enabled = true;
+
+        handle_reasoning(&mut client, &mut cfg, Some("off"));
+
+        assert!(!client.reasoning_config.enabled);
+        assert_eq!(cfg.reasoning_effort, None);
+    }
+
+    #[test]
+    fn test_handle_reasoning_show() {
+        let mut client = Provider::new(
+            ProviderKind::Ollama,
+            "http://localhost:11434".into(),
+            "test".into(),
+            30,
+            String::new(),
+            None,
+            4096,
+        );
+        let mut cfg = make_cfg();
+        client.reasoning_config.show_reasoning = false;
+
+        handle_reasoning(&mut client, &mut cfg, Some("show"));
+
+        assert!(client.reasoning_config.show_reasoning);
+    }
+
+    #[test]
+    fn test_handle_reasoning_hide() {
+        let mut client = Provider::new(
+            ProviderKind::Ollama,
+            "http://localhost:11434".into(),
+            "test".into(),
+            30,
+            String::new(),
+            None,
+            4096,
+        );
+        let mut cfg = make_cfg();
+        client.reasoning_config.show_reasoning = true;
+
+        handle_reasoning(&mut client, &mut cfg, Some("hide"));
+
+        assert!(!client.reasoning_config.show_reasoning);
+    }
+
+    #[test]
+    fn test_handle_reasoning_budget() {
+        let mut client = Provider::new(
+            ProviderKind::Ollama,
+            "http://localhost:11434".into(),
+            "test".into(),
+            30,
+            String::new(),
+            None,
+            4096,
+        );
+        let mut cfg = make_cfg();
+
+        handle_reasoning(&mut client, &mut cfg, Some("budget 16384"));
+
+        assert_eq!(client.reasoning_config.thinking_budget, 16384);
+        assert_eq!(cfg.thinking_budget, Some(16384));
+    }
+
+    #[test]
+    fn test_handle_reasoning_toggle_on() {
+        let mut client = Provider::new(
+            ProviderKind::Ollama,
+            "http://localhost:11434".into(),
+            "test".into(),
+            30,
+            String::new(),
+            None,
+            4096,
+        );
+        let mut cfg = make_cfg();
+        client.reasoning_config.enabled = false;
+
+        handle_reasoning(&mut client, &mut cfg, None);
+
+        assert!(client.reasoning_config.enabled);
+        assert_eq!(cfg.reasoning_effort, Some("medium".to_string()));
+    }
+
+    #[test]
+    fn test_handle_reasoning_toggle_off() {
+        let mut client = Provider::new(
+            ProviderKind::Ollama,
+            "http://localhost:11434".into(),
+            "test".into(),
+            30,
+            String::new(),
+            None,
+            4096,
+        );
+        let mut cfg = make_cfg();
+        client.reasoning_config.enabled = true;
+
+        handle_reasoning(&mut client, &mut cfg, None);
+
+        assert!(!client.reasoning_config.enabled);
+        assert_eq!(cfg.reasoning_effort, None);
+    }
+
+    #[test]
+    fn test_handle_why_does_not_panic() {
+        let session = make_session();
+        handle_why(&session);
+    }
+
+    #[test]
+    fn test_handle_theme_without_tail_does_not_panic() {
+        let mut cfg = make_cfg();
+        handle_theme(&mut cfg, None);
+    }
+
+    #[test]
+    fn test_handle_theme_unknown_does_not_panic() {
+        let mut cfg = make_cfg();
+        handle_theme(&mut cfg, Some("nonexistent_theme"));
+    }
+}

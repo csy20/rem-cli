@@ -10,14 +10,15 @@ use crate::agentic::{
     build_agentic_prompt, build_tool_context, extract_goal_signal, format_tool_output, run_lint, run_test,
 };
 use crate::chat::ChatSession;
+use crate::constants::CHAT_SYSTEM_PROMPT_CODE;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
 use crate::tool_executor;
+use crate::types::extract_code_blocks_with_names;
 use crate::ui;
-use crate::{extract_code_blocks_with_names, CHAT_SYSTEM_PROMPT_CODE};
 
-const MAX_TOOL_OUTPUT_LEN: usize = 2000;
-const ITERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_TOOL_OUTPUT_LEN: usize = crate::constants::GOAL_TOOL_OUTPUT_MAX_CHARS;
+const ITERATION_TIMEOUT: Duration = crate::constants::GOAL_ITERATION_TIMEOUT;
 
 fn circuit_breaker_hash(output: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -95,7 +96,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         condition
     );
 
-    let max_iter = 10;
+    let max_iter = crate::constants::GOAL_MAX_ITERATIONS;
     let mut last_tool_output = String::new();
     let mut last_tool_hash: u64 = 0;
     let mut last_written_files: Vec<String> = Vec::new();

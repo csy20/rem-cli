@@ -6,10 +6,13 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
-use super::{Provider, ProviderBackend};
+use super::{ProviderBackend, ProviderContext};
 
-static NUM_THREADS: LazyLock<usize> =
-    LazyLock::new(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+static NUM_THREADS: LazyLock<usize> = LazyLock::new(|| {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(crate::constants::OLLAMA_NUM_THREADS_FALLBACK)
+});
 
 #[derive(Debug, Deserialize)]
 pub struct OllamaTagsResponse {
@@ -58,29 +61,116 @@ pub struct OllamaToolCallFunction {
 
 pub(super) struct OllamaBackend;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ollama_tags_response_deserialize() {
+        let json = r#"{"models":[{"name":"rem-coder:latest"},{"name":"llama3:8b"}]}"#;
+        let resp: OllamaTagsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.models.len(), 2);
+        assert_eq!(resp.models[0].name, "rem-coder:latest");
+    }
+
+    #[test]
+    fn ollama_json_response_deserialize() {
+        let json = r#"{"response":"{\"explanation\":\"test\"}"}"#;
+        let resp: OllamaJsonResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.response, "{\"explanation\":\"test\"}");
+    }
+
+    #[test]
+    fn ollama_stream_line_deserialize_with_response() {
+        let json = r#"{"response":"hello","done":false}"#;
+        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
+        assert_eq!(line.response.as_deref(), Some("hello"));
+        assert_eq!(line.done, Some(false));
+    }
+
+    #[test]
+    fn ollama_stream_line_done() {
+        let json = r#"{"response":"","done":true}"#;
+        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
+        assert_eq!(line.done, Some(true));
+    }
+
+    #[test]
+    fn ollama_stream_line_partial() {
+        let json = r#"{"response":"world"}"#;
+        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
+        assert_eq!(line.response.as_deref(), Some("world"));
+        assert!(line.done.is_none());
+    }
+
+    #[test]
+    fn ollama_chat_stream_line_deserialize() {
+        let json = r#"{"message":{"content":"hi"},"done":false}"#;
+        let line: OllamaChatStreamLine = serde_json::from_str(json).unwrap();
+        assert_eq!(line.message.as_ref().and_then(|m| m.content.as_deref()), Some("hi"));
+        assert_eq!(line.done, Some(false));
+    }
+
+    #[test]
+    fn ollama_chat_stream_line_with_tool_calls() {
+        let json = r#"{"message":{"content":"","tool_calls":[{"function":{"name":"read_file","arguments":{"path":"x"}}}]},"done":false}"#;
+        let line: OllamaChatStreamLine = serde_json::from_str(json).unwrap();
+        let calls = line.message.as_ref().and_then(|m| m.tool_calls.as_ref());
+        assert!(calls.is_some());
+        let calls = calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].function.as_ref().and_then(|f| f.name.as_deref()),
+            Some("read_file")
+        );
+    }
+
+    #[test]
+    fn ollama_chat_stream_line_done() {
+        let json = r#"{"message":{"content":"bye"},"done":true}"#;
+        let line: OllamaChatStreamLine = serde_json::from_str(json).unwrap();
+        assert_eq!(line.done, Some(true));
+    }
+
+    #[test]
+    fn ollama_tool_call_function_arguments() {
+        let json = r#"{"function":{"name":"search_files","arguments":{"query":"TODO"}}}"#;
+        let tc: OllamaToolCall = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            tc.function.as_ref().and_then(|f| f.name.as_deref()),
+            Some("search_files")
+        );
+        let args = tc.function.as_ref().and_then(|f| f.arguments.as_ref());
+        assert!(args.is_some());
+        assert_eq!(args.unwrap().get("query").and_then(|v| v.as_str()), Some("TODO"));
+    }
+}
+
 #[async_trait]
 impl ProviderBackend for OllamaBackend {
-    async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
-        let url = super::api_url(&provider.base_url, "tags");
-        let resp = provider.client.get(url).send().await?;
+    async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
+        let url = super::api_url(&ctx.base_url, "tags");
+        let resp = ctx.client.get(url).send().await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("Ollama unreachable at {}", provider.base_url));
+            return Err(anyhow!("Ollama unreachable at {}", ctx.base_url));
         }
         let parsed: OllamaTagsResponse = resp.json().await.context("invalid tags response")?;
         Ok(parsed.models.into_iter().map(|m| m.name).collect())
     }
 
-    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
-        let url = super::api_url(&provider.base_url, "generate");
-        let final_prompt = format!(
-            "{}\n\nUser request:\n{}\n\nReturn JSON only.",
-            provider.system_prompt, user_prompt
-        );
+    async fn complete_json(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
+        let url = super::api_url(&ctx.base_url, "generate");
+        let final_prompt = format!("{system_prompt}\n\nUser request:\n{user_prompt}\n\nReturn JSON only.");
         let payload = json!({
-            "model": provider.model,
+            "model": ctx.model,
             "prompt": final_prompt,
             "stream": false,
-            "options": { "num_predict": 4096, "num_ctx": provider.model_ctx, "num_thread": *NUM_THREADS },
+            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS },
             "format": {
                 "type": "object",
                 "properties": {
@@ -102,7 +192,7 @@ impl ProviderBackend for OllamaBackend {
             }
         });
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(&url)
             .json(&payload)
@@ -110,36 +200,34 @@ impl ProviderBackend for OllamaBackend {
             .await
             .context("failed to call Ollama")?;
         if !resp.status().is_success() {
-            return match provider.handle_ollama_error(resp, &url).await {
-                Err(e) => Err(e),
-                Ok(_) => unreachable!(),
-            };
+            let err = super::handle_ollama_error(resp, &url, &ctx.model).await;
+            return Err(err.unwrap_err());
         }
 
         let raw: OllamaJsonResponse = resp.json().await.context("invalid Ollama response")?;
-        Provider::parse_json_fallback(&raw.response)
+        super::parse_json_fallback(&raw.response)
     }
 
     async fn complete_chat_stream(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = super::api_url(&provider.base_url, "generate");
+        let url = super::api_url(&ctx.base_url, "generate");
         let final_prompt = if history.is_empty() {
-            format!("{}\n\nUser: {}\n\nREM:", system_prompt, user_prompt)
+            format!("{system_prompt}\n\nUser: {user_prompt}\n\nREM:")
         } else {
-            format!("{}\n\n{}User: {}\n\nREM:", system_prompt, history, user_prompt)
+            format!("{system_prompt}\n\n{history}User: {user_prompt}\n\nREM:")
         };
         let payload = json!({
-            "model": provider.model,
+            "model": ctx.model,
             "prompt": final_prompt,
             "stream": true,
-            "options": { "num_predict": 4096, "num_ctx": provider.model_ctx, "num_thread": *NUM_THREADS }
+            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
         });
-        let resp = provider
+        let resp = ctx
             .client
             .post(&url)
             .json(&payload)
@@ -147,35 +235,35 @@ impl ProviderBackend for OllamaBackend {
             .await
             .context("failed to call Ollama")?;
         if !resp.status().is_success() {
-            return provider.handle_ollama_error(resp, &url).await;
+            return super::handle_ollama_error(resp, &url, &ctx.model).await;
         }
 
-        provider.stream_ollama_response(resp).await
+        super::stream_ollama_response(resp).await
     }
 
     async fn complete_chat_stream_with_vision(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
         _mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        let url = super::api_url(&provider.base_url, "generate");
+        let url = super::api_url(&ctx.base_url, "generate");
         let final_prompt = if history.is_empty() {
-            format!("{}\n\nUser: {}\n\nREM:", system_prompt, user_prompt)
+            format!("{system_prompt}\n\nUser: {user_prompt}\n\nREM:")
         } else {
-            format!("{}\n\n{}User: {}\n\nREM:", system_prompt, history, user_prompt)
+            format!("{system_prompt}\n\n{history}User: {user_prompt}\n\nREM:")
         };
         let payload = json!({
-            "model": provider.model,
+            "model": ctx.model,
             "prompt": final_prompt,
             "stream": true,
             "images": [base64_data],
-            "options": { "num_predict": 4096, "num_ctx": provider.model_ctx, "num_thread": *NUM_THREADS }
+            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
         });
-        let resp = provider
+        let resp = ctx
             .client
             .post(&url)
             .json(&payload)
@@ -183,21 +271,21 @@ impl ProviderBackend for OllamaBackend {
             .await
             .context("failed to call Ollama vision API")?;
         if !resp.status().is_success() {
-            return provider.handle_ollama_error(resp, &url).await;
+            return super::handle_ollama_error(resp, &url, &ctx.model).await;
         }
 
-        provider.stream_ollama_response(resp).await
+        super::stream_ollama_response(resp).await
     }
 
     async fn complete_chat_stream_with_tools(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
         tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        let url = super::api_url(&provider.base_url, "chat");
+        let url = super::api_url(&ctx.base_url, "chat");
 
         let mut messages: Vec<serde_json::Value> = vec![];
         messages.push(json!({"role": "system", "content": system_prompt}));
@@ -206,19 +294,19 @@ impl ProviderBackend for OllamaBackend {
         }
         messages.push(json!({"role": "user", "content": user_prompt}));
 
-        let tools: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
+        let tools_json: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
 
         let mut payload = json!({
-            "model": provider.model,
+            "model": ctx.model,
             "messages": messages,
             "stream": true,
-            "options": { "num_predict": 4096, "num_ctx": provider.model_ctx, "num_thread": *NUM_THREADS }
+            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
         });
-        if !tools.is_empty() {
-            payload["tools"] = json!(tools);
+        if !tools_json.is_empty() {
+            payload["tools"] = json!(tools_json);
         }
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(&url)
             .json(&payload)
@@ -228,15 +316,15 @@ impl ProviderBackend for OllamaBackend {
 
         if !resp.status().is_success() {
             let text = self
-                .complete_chat_stream(provider, user_prompt, system_prompt, history)
+                .complete_chat_stream(ctx, system_prompt, user_prompt, history)
                 .await?;
             return Ok(ToolResponse::Text(text));
         }
 
-        let mut full_text = String::with_capacity(4096);
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
         let mut tool_calls: Vec<(i64, String, String, String)> = Vec::new();
 
-        Provider::stream_buf(resp, |trimmed| {
+        super::stream_buf(resp, |trimmed| {
             if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
                 if let Some(ref msg) = obj.message {
                     if let Some(ref content) = msg.content {
