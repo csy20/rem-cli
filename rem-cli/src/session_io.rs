@@ -180,7 +180,7 @@ pub(crate) fn language_specific_guidance(project_type: &str) -> &'static str {
 /// Builds the styled terminal prompt string (e.g., `[CODE] ollama/rem-coder>`).
 pub(crate) fn build_prompt(session: &ChatSession, client: &Provider) -> String {
     let t = ui::theme::active();
-    let model_short = client.model.split(':').next().unwrap_or(&client.model);
+    let model_short = client.ctx.model.split(':').next().unwrap_or(&client.ctx.model);
     let mode_key = ui::theme::accent_for_mode(session.mode.label());
     let provider_prefix = match client.kind {
         ProviderKind::Ollama => "",

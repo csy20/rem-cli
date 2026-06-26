@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
-use super::{Provider, ProviderBackend};
+use super::{ProviderBackend, ProviderContext};
 
 #[derive(Debug, Deserialize)]
 pub struct GeminiResponse {
@@ -69,7 +69,7 @@ mod tests {
     #[test]
     fn gemini_url_basic() {
         let backend = GeminiBackend;
-        let provider = Provider::new(
+        let provider = super::super::Provider::new(
             super::super::ProviderKind::Gemini,
             "https://generativelanguage.googleapis.com".into(),
             "gemini-2.0-flash".into(),
@@ -78,14 +78,14 @@ mod tests {
             Some("key".into()),
             4096,
         );
-        let url = backend.gemini_url(&provider, "/models");
+        let url = backend.gemini_url(&provider.ctx, "/models");
         assert_eq!(url, "https://generativelanguage.googleapis.com/v1beta/models");
     }
 
     #[test]
     fn gemini_url_stream() {
         let backend = GeminiBackend;
-        let provider = Provider::new(
+        let provider = super::super::Provider::new(
             super::super::ProviderKind::Gemini,
             "https://generativelanguage.googleapis.com/".into(),
             "gemini-2.0-flash".into(),
@@ -94,7 +94,7 @@ mod tests {
             None,
             4096,
         );
-        let url = backend.gemini_url(&provider, "/models/gemini-pro:streamGenerateContent?alt=sse");
+        let url = backend.gemini_url(&provider.ctx, "/models/gemini-pro:streamGenerateContent?alt=sse");
         assert!(url.contains("v1beta/models/gemini-pro:streamGenerateContent"));
     }
 
@@ -162,19 +162,19 @@ mod tests {
 }
 
 impl GeminiBackend {
-    fn gemini_url(&self, provider: &Provider, path: &str) -> String {
-        format!("{}/v1beta{}", provider.base_url.trim_end_matches('/'), path)
+    fn gemini_url(&self, ctx: &ProviderContext, path: &str) -> String {
+        format!("{}/v1beta{}", ctx.base_url.trim_end_matches('/'), path)
     }
 }
 
 #[async_trait]
 impl ProviderBackend for GeminiBackend {
-    async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
-        let url = self.gemini_url(provider, "/models");
-        let resp = provider
+    async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
+        let url = self.gemini_url(ctx, "/models");
+        let resp = ctx
             .client
             .get(&url)
-            .header("x-goog-api-key", provider.api_key_str())
+            .header("x-goog-api-key", ctx.api_key_str())
             .send()
             .await?;
         if !resp.status().is_success() {
@@ -190,25 +190,30 @@ impl ProviderBackend for GeminiBackend {
             .collect())
     }
 
-    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
-        let url = self.gemini_url(provider, &format!("/models/{}:generateContent", provider.model));
+    async fn complete_json(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
+        let url = self.gemini_url(ctx, &format!("/models/{}:generateContent", ctx.model));
         let payload = json!({
-            "contents": [{"parts": [{"text": format!("{}\n\nUser request:\n{}\n\nReturn JSON only.", provider.system_prompt, user_prompt)}]}],
+            "contents": [{"parts": [{"text": format!("{}\n\nUser request:\n{}\n\nReturn JSON only.", system_prompt, user_prompt)}]}],
             "generationConfig": {
                 "temperature": crate::constants::JSON_TEMPERATURE,
                 "maxOutputTokens": crate::constants::JSON_MAX_TOKENS
             }
         });
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(&url)
-            .header("x-goog-api-key", provider.api_key_str())
+            .header("x-goog-api-key", ctx.api_key_str())
             .json(&payload)
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Gemini", resp).await);
+            return Err(super::parse_api_error("Gemini", resp).await);
         }
 
         let parsed: GeminiResponse = resp.json().await.context("invalid Gemini response")?;
@@ -221,20 +226,17 @@ impl ProviderBackend for GeminiBackend {
             .and_then(|p| p.text)
             .unwrap_or_default();
 
-        Provider::parse_json_fallback(&text)
+        super::parse_json_fallback(&text)
     }
 
     async fn complete_chat_stream(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = self.gemini_url(
-            provider,
-            &format!("/models/{}:streamGenerateContent?alt=sse", provider.model),
-        );
+        let url = self.gemini_url(ctx, &format!("/models/{}:streamGenerateContent?alt=sse", ctx.model));
 
         let mut contents = vec![];
         if !history.is_empty() {
@@ -254,35 +256,32 @@ impl ProviderBackend for GeminiBackend {
             payload["systemInstruction"] = json!({"parts": [{"text": system_prompt}]});
         }
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(&url)
-            .header("x-goog-api-key", provider.api_key_str())
+            .header("x-goog-api-key", ctx.api_key_str())
             .json(&payload)
             .send()
             .await
             .context("failed to call Gemini API")?;
 
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Gemini", resp).await);
+            return Err(super::parse_api_error("Gemini", resp).await);
         }
 
-        provider.stream_gemini_sse(resp).await
+        super::stream_gemini_sse(resp).await
     }
 
     async fn complete_chat_stream_with_vision(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        let url = self.gemini_url(
-            provider,
-            &format!("/models/{}:streamGenerateContent?alt=sse", provider.model),
-        );
+        let url = self.gemini_url(ctx, &format!("/models/{}:streamGenerateContent?alt=sse", ctx.model));
 
         let mut parts: Vec<serde_json::Value> = vec![];
         if !history.is_empty() {
@@ -308,34 +307,31 @@ impl ProviderBackend for GeminiBackend {
             payload["systemInstruction"] = json!({"parts": [{"text": system_prompt}]});
         }
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(&url)
-            .header("x-goog-api-key", provider.api_key_str())
+            .header("x-goog-api-key", ctx.api_key_str())
             .json(&payload)
             .send()
             .await
             .context("failed to call Gemini vision API")?;
 
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Gemini", resp).await);
+            return Err(super::parse_api_error("Gemini", resp).await);
         }
 
-        provider.stream_gemini_sse(resp).await
+        super::stream_gemini_sse(resp).await
     }
 
     async fn complete_chat_stream_with_tools(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
         tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        let url = self.gemini_url(
-            provider,
-            &format!("/models/{}:streamGenerateContent?alt=sse", provider.model),
-        );
+        let url = self.gemini_url(ctx, &format!("/models/{}:streamGenerateContent?alt=sse", ctx.model));
 
         let mut contents = vec![];
         if !history.is_empty() {
@@ -361,23 +357,23 @@ impl ProviderBackend for GeminiBackend {
             payload["tools"] = json!([{"function_declarations": declarations}]);
         }
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(&url)
-            .header("x-goog-api-key", provider.api_key_str())
+            .header("x-goog-api-key", ctx.api_key_str())
             .json(&payload)
             .send()
             .await
             .context("failed to call Gemini API")?;
 
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Gemini", resp).await);
+            return Err(super::parse_api_error("Gemini", resp).await);
         }
 
         let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
         let mut early_tool_response: Option<ToolResponse> = None;
 
-        Provider::stream_buf(resp, |trimmed| {
+        super::stream_buf(resp, |trimmed| {
             if trimmed.is_empty() || trimmed.starts_with(':') {
                 return Ok(true);
             }

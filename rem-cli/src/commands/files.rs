@@ -153,9 +153,8 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
             session.code_out.last_code.len()
         );
         if session.code_out.last_files_written.len() >= 5 {
-            session
-                .code_out
-                .push_undo(std::mem::take(&mut session.code_out.last_files_written));
+            let batch = std::mem::take(&mut session.code_out.last_files_written);
+            session.code_out.push_undo(batch);
         }
         session.code_out.last_files_written.push(BackupEntry {
             path: abs_path,
@@ -299,9 +298,8 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
 
     if !written.is_empty() {
         if !session.code_out.last_files_written.is_empty() {
-            session
-                .code_out
-                .push_undo(std::mem::take(&mut session.code_out.last_files_written));
+            let batch = std::mem::take(&mut session.code_out.last_files_written);
+            session.code_out.push_undo(batch);
         }
         session.code_out.last_files_written = written;
         println!(

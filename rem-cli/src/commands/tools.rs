@@ -26,7 +26,7 @@ pub(crate) async fn handle_search(client: &Provider, session: &mut ChatSession, 
         cfg.search_api_key.as_deref().unwrap_or(""),
         cfg.search_cse_id.as_deref().unwrap_or(""),
     );
-    match perform_web_search(&client.client, query, search_provider.as_ref()).await {
+    match perform_web_search(&client.ctx.client, query, search_provider.as_ref()).await {
         Ok(results) => {
             if results.is_empty() {
                 println!("{} no results found for: {}", ui::theme::paint_warning(&t, "│"), query);

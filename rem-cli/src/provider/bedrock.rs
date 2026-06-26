@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 
 use super::tools::{ToolResponse, ToolSpec};
-use super::{Provider, ProviderBackend};
+use super::{ProviderBackend, ProviderContext};
 
 pub(super) struct BedrockBackend;
 
@@ -15,13 +15,18 @@ impl BedrockBackend {
 
 #[async_trait]
 impl ProviderBackend for BedrockBackend {
-    async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
-        Ok(vec![provider.model.clone()])
+    async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
+        Ok(vec![ctx.model.clone()])
     }
 
-    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
+    async fn complete_json(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
         let client = self.bedrock_client().await?;
-        let system_content = aws_sdk_bedrockruntime::types::SystemContentBlock::Text(provider.system_prompt.clone());
+        let system_content = aws_sdk_bedrockruntime::types::SystemContentBlock::Text(system_prompt.to_string());
         let content = aws_sdk_bedrockruntime::types::ContentBlock::Text(format!(
             "{}\n\nReturn JSON only. Respond with a valid JSON object.",
             user_prompt
@@ -35,7 +40,7 @@ impl ProviderBackend for BedrockBackend {
 
         let resp = client
             .converse()
-            .model_id(&provider.model)
+            .model_id(&ctx.model)
             .system(system_content)
             .messages(msg)
             .inference_config(
@@ -69,14 +74,14 @@ impl ProviderBackend for BedrockBackend {
             .unwrap_or("")
             .to_string();
 
-        Provider::parse_json_fallback(&text)
+        super::parse_json_fallback(&text)
     }
 
     async fn complete_chat_stream(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
     ) -> Result<String> {
         let client = self.bedrock_client().await?;
@@ -97,7 +102,7 @@ impl ProviderBackend for BedrockBackend {
 
         let output = client
             .converse_stream()
-            .model_id(&provider.model)
+            .model_id(&ctx.model)
             .system(system_content)
             .messages(msg)
             .inference_config(
@@ -136,9 +141,9 @@ impl ProviderBackend for BedrockBackend {
 
     async fn complete_chat_stream_with_vision(
         &self,
-        _provider: &Provider,
-        _user_prompt: &str,
+        _ctx: &ProviderContext,
         _system_prompt: &str,
+        _user_prompt: &str,
         _history: &str,
         _mime_type: &str,
         _base64_data: &str,
@@ -148,9 +153,9 @@ impl ProviderBackend for BedrockBackend {
 
     async fn complete_chat_stream_with_tools(
         &self,
-        _provider: &Provider,
-        _user_prompt: &str,
+        _ctx: &ProviderContext,
         _system_prompt: &str,
+        _user_prompt: &str,
         _history: &str,
         _tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {

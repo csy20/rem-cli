@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
-use super::{Provider, ProviderBackend};
+use super::{ProviderBackend, ProviderContext};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AnthropicUsage {
@@ -182,11 +182,11 @@ mod tests {
 
 #[async_trait]
 impl ProviderBackend for AnthropicBackend {
-    async fn list_models(&self, provider: &Provider) -> Result<Vec<String>> {
-        let key = provider.api_key.as_deref().unwrap_or("");
-        let base = provider.base_url.trim_end_matches('/');
+    async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
+        let key = ctx.api_key_str();
+        let base = ctx.base_url.trim_end_matches('/');
         let url = format!("{}/v1/models", base);
-        let resp = provider
+        let resp = ctx
             .client
             .get(url)
             .header("x-api-key", key)
@@ -207,15 +207,15 @@ impl ProviderBackend for AnthropicBackend {
 
     async fn complete_chat_stream_with_vision(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        let key = provider.api_key.as_deref().unwrap_or("");
-        let base = provider.base_url.trim_end_matches('/');
+        let key = ctx.api_key_str();
+        let base = ctx.base_url.trim_end_matches('/');
         let url = format!("{}/v1/messages", base);
 
         let mut content_blocks: Vec<serde_json::Value> = vec![];
@@ -237,7 +237,7 @@ impl ProviderBackend for AnthropicBackend {
         ]);
 
         let payload = json!({
-            "model": provider.model,
+            "model": ctx.model,
             "system": system_with_cache,
             "messages": [
                 {"role": "user", "content": content_blocks}
@@ -246,7 +246,7 @@ impl ProviderBackend for AnthropicBackend {
             "stream": true
         });
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(url)
             .header("x-api-key", key)
@@ -258,23 +258,29 @@ impl ProviderBackend for AnthropicBackend {
             .context("failed to call Anthropic vision API")?;
 
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Anthropic", resp).await);
+            return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
-        provider.stream_anthropic_sse(resp).await
+        let dummy_usage = std::sync::Mutex::new(AnthropicUsage::default());
+        super::stream_anthropic_sse(resp, &dummy_usage).await
     }
 
-    async fn complete_json(&self, provider: &Provider, user_prompt: &str) -> Result<crate::ModelReply> {
-        let key = provider.api_key.as_deref().unwrap_or("");
-        let base = provider.base_url.trim_end_matches('/');
+    async fn complete_json(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
+        let key = ctx.api_key_str();
+        let base = ctx.base_url.trim_end_matches('/');
         let url = format!("{}/v1/messages", base);
 
         let system_with_cache = json!([
-            {"type": "text", "text": provider.system_prompt.clone(), "cache_control": {"type": "ephemeral"}}
+            {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
         ]);
 
         let payload = json!({
-            "model": provider.model,
+            "model": ctx.model,
             "system": system_with_cache,
             "messages": [
                 {"role": "user", "content": format!("{}\n\nReturn JSON only. Respond with a valid JSON object.", user_prompt)}
@@ -282,7 +288,7 @@ impl ProviderBackend for AnthropicBackend {
             "max_tokens": crate::constants::JSON_MAX_TOKENS
         });
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(url)
             .header("x-api-key", key)
@@ -293,7 +299,7 @@ impl ProviderBackend for AnthropicBackend {
             .await?;
 
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Anthropic", resp).await);
+            return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
         let parsed: AnthropicResponse = resp.json().await.context("invalid Anthropic response")?;
@@ -303,18 +309,18 @@ impl ProviderBackend for AnthropicBackend {
             .and_then(|b| b.text)
             .unwrap_or_default();
 
-        Provider::parse_json_fallback(&text)
+        super::parse_json_fallback(&text)
     }
 
     async fn complete_chat_stream(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let key = provider.api_key.as_deref().unwrap_or("");
-        let base = provider.base_url.trim_end_matches('/');
+        let key = ctx.api_key_str();
+        let base = ctx.base_url.trim_end_matches('/');
         let url = format!("{}/v1/messages", base);
 
         let mut messages: Vec<serde_json::Value> = vec![];
@@ -332,21 +338,21 @@ impl ProviderBackend for AnthropicBackend {
         ]);
 
         let mut payload = json!({
-            "model": provider.model,
+            "model": ctx.model,
             "system": system_with_cache,
             "messages": messages,
             "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
             "stream": true
         });
 
-        if provider.reasoning_config.enabled && crate::reasoning::is_reasoning_model(&provider.model) {
+        if ctx.reasoning_config.enabled && crate::reasoning::is_reasoning_model(&ctx.model) {
             payload["thinking"] = json!({
                 "type": "enabled",
-                "budget_tokens": provider.reasoning_config.thinking_budget
+                "budget_tokens": ctx.reasoning_config.thinking_budget
             });
         }
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(url)
             .header("x-api-key", key)
@@ -358,22 +364,23 @@ impl ProviderBackend for AnthropicBackend {
             .context("failed to call Anthropic API")?;
 
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Anthropic", resp).await);
+            return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
-        provider.stream_anthropic_sse(resp).await
+        let dummy_usage = std::sync::Mutex::new(AnthropicUsage::default());
+        super::stream_anthropic_sse(resp, &dummy_usage).await
     }
 
     async fn complete_chat_stream_with_tools(
         &self,
-        provider: &Provider,
-        user_prompt: &str,
+        ctx: &ProviderContext,
         system_prompt: &str,
+        user_prompt: &str,
         history: &str,
         tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        let key = provider.api_key.as_deref().unwrap_or("");
-        let base = provider.base_url.trim_end_matches('/');
+        let key = ctx.api_key_str();
+        let base = ctx.base_url.trim_end_matches('/');
         let url = format!("{}/v1/messages", base);
 
         let mut messages: Vec<serde_json::Value> = vec![];
@@ -393,7 +400,7 @@ impl ProviderBackend for AnthropicBackend {
         ]);
 
         let mut payload = json!({
-            "model": provider.model,
+            "model": ctx.model,
             "system": system_with_cache,
             "messages": messages,
             "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
@@ -403,7 +410,7 @@ impl ProviderBackend for AnthropicBackend {
             payload["tools"] = json!(tools);
         }
 
-        let resp = provider
+        let resp = ctx
             .client
             .post(url)
             .header("x-api-key", key)
@@ -415,13 +422,13 @@ impl ProviderBackend for AnthropicBackend {
             .context("failed to call Anthropic API")?;
 
         if !resp.status().is_success() {
-            return Err(provider.parse_api_error("Anthropic", resp).await);
+            return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
         let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
         let mut tool_calls: Vec<(u32, String, String, String)> = Vec::new();
 
-        Provider::stream_buf(resp, |trimmed| {
+        super::stream_buf(resp, |trimmed| {
             if trimmed.starts_with("event: ") {
                 return Ok(true);
             }

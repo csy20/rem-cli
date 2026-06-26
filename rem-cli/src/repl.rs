@@ -44,7 +44,7 @@ fn initialize_session(client: &Provider, cfg: &mut AppConfig) -> Result<ChatSess
     };
 
     ui::theme::set_active(&cfg.theme);
-    let mut session = ChatSession::new(&client.model, workspace.clone())?;
+    let mut session = ChatSession::new(&client.ctx.model, workspace.clone())?;
     let saved_mode = cfg.mode.to_uppercase();
     session.mode = match saved_mode.as_str() {
         "CODE" => RunMode::Code,
@@ -579,7 +579,7 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         }
 
         let label = ui::theme::paint(&t, "accent", "\u{258C}", true);
-        let model_tag = ui::theme::paint(&t, "accent", &client.model, false);
+        let model_tag = ui::theme::paint(&t, "accent", &client.ctx.model, false);
         let mode_tag = ui::theme::paint_chip(&t, session.mode.label());
         let dot = ui::theme::paint_dim(&t, "\u{00B7}");
         println!("{label} {model_tag} {dot} {mode_tag}");

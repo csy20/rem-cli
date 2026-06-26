@@ -101,26 +101,6 @@ impl ProviderContext {
             reasoning_config,
         }
     }
-}
-
-impl ProviderContext {
-    pub fn new(
-        base_url: String,
-        model: String,
-        api_key: Option<String>,
-        model_ctx: usize,
-        reasoning_config: crate::reasoning::ReasoningConfig,
-        client: Client,
-    ) -> Self {
-        Self {
-            client,
-            base_url,
-            model,
-            api_key,
-            model_ctx,
-            reasoning_config,
-        }
-    }
 
     pub fn api_key_str(&self) -> &str {
         self.api_key.as_deref().unwrap_or("")
@@ -134,30 +114,6 @@ impl std::fmt::Debug for ProviderContext {
             .field("model", &self.model)
             .field("model_ctx", &self.model_ctx)
             .finish()
-    }
-}
-
-impl ProviderContext {
-    pub fn new(
-        base_url: String,
-        model: String,
-        api_key: Option<String>,
-        model_ctx: usize,
-        reasoning_config: crate::reasoning::ReasoningConfig,
-        client: Client,
-    ) -> Self {
-        Self {
-            client,
-            base_url,
-            model,
-            api_key,
-            model_ctx,
-            reasoning_config,
-        }
-    }
-
-    pub fn api_key_str(&self) -> &str {
-        self.api_key.as_deref().unwrap_or("")
     }
 }
 

@@ -192,13 +192,13 @@ pub(crate) fn handle_config(session: &ChatSession, client: &Provider) {
         "{}   {:<18} {}",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         ui::theme::paint_bright(&t, "model:"),
-        ui::theme::paint_dim(&t, &client.model)
+        ui::theme::paint_dim(&t, &client.ctx.model)
     );
     println!(
         "{}   {:<18} {}",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         ui::theme::paint_bright(&t, "base url:"),
-        ui::theme::paint_dim(&t, &client.base_url)
+        ui::theme::paint_dim(&t, &client.ctx.base_url)
     );
     println!(
         "{}   {:<18} {}",

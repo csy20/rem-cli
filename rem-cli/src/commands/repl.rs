@@ -71,13 +71,13 @@ pub(crate) fn handle_model(client: &mut Provider, cfg: &mut AppConfig, tail: Opt
     if let Some(new_model) = tail {
         let new_model = new_model.trim().to_string();
         if new_model.is_empty() {
-            println!("{} model: {}", ui::theme::paint_rail_empty(&t), client.model);
+            println!("{} model: {}", ui::theme::paint_rail_empty(&t), client.ctx.model);
         } else {
             client.set_model(new_model.clone());
             cfg.model = new_model;
             let _ = save_config(cfg);
             let rail = ui::theme::paint_rail_empty(&t);
-            let msg = ui::theme::paint_success_label(&t, &format!("model \u{2192} {}", client.model));
+            let msg = ui::theme::paint_success_label(&t, &format!("model \u{2192} {}", client.ctx.model));
             println!("{rail}");
             println!("{rail} {msg}");
             println!("{rail}");
@@ -108,7 +108,7 @@ pub(crate) fn handle_provider(client: &mut Provider, cfg: &mut AppConfig, tail: 
                 let msg = ui::theme::paint_success_label(&t, &format!("provider \u{2192} {}", client.kind.as_str()));
                 println!("{rail}");
                 println!("{rail} {msg}");
-                let model_msg = ui::theme::paint_dim(&t, &format!("model: {}", client.model));
+                let model_msg = ui::theme::paint_dim(&t, &format!("model: {}", client.ctx.model));
                 println!("{rail}  {model_msg}");
                 println!("{rail}");
             }
