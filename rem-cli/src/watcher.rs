@@ -50,9 +50,11 @@ where
         let mut pending = false;
 
         loop {
-            // Check for stop signal
-            if rx.try_recv().is_ok() {
-                break;
+            // Check for stop signal (message or sender dropped)
+            match rx.try_recv() {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(_) => {}
             }
 
             if event_rx.recv_timeout(debounce).is_ok() {
@@ -69,8 +71,10 @@ where
             }
 
             // Check stop signal again after debounce
-            if rx.try_recv().is_ok() {
-                break;
+            match rx.try_recv() {
+                Ok(()) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                Err(_) => {}
             }
         }
 

@@ -91,8 +91,9 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
     ];
     for p in &candidates {
         if let Ok(text) = fs::read_to_string(p) {
+            let parsed_v2 = serde_json::from_str::<CodebaseIndex>(&text);
             // Try v2 format first (CodebaseIndex with inverted_index)
-            if let Ok(mut index) = serde_json::from_str::<CodebaseIndex>(&text) {
+            if let Ok(mut index) = parsed_v2 {
                 if !index.chunks.is_empty() {
                     for chunk in &mut index.chunks {
                         chunk.content_lower = chunk.content.to_lowercase();
@@ -106,6 +107,12 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
                     }
                     return Some(index);
                 }
+            } else if fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 0 {
+                // File exists and has content but failed to parse — likely corrupted
+                tracing::warn!(
+                    "index file {} appears corrupted (failed to parse as v2 or v1), consider regenerating with `rem index`",
+                    p.display()
+                );
             }
             // Fallback: try v1 flat format
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -422,9 +429,11 @@ fn load_existing_mtimes(root: &Path) -> HashMap<String, u64> {
         root.join("models/codebase_index.json"),
     ];
     for p in &candidates {
-        if let Ok(text) = fs::read_to_string(p) {
-            if let Ok(index) = serde_json::from_str::<CodebaseIndex>(&text) {
-                return index.file_mtimes;
+        if p.exists() {
+            if let Ok(text) = fs::read_to_string(p) {
+                if let Ok(index) = serde_json::from_str::<CodebaseIndex>(&text) {
+                    return index.file_mtimes;
+                }
             }
         }
     }

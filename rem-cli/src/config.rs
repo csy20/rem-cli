@@ -184,6 +184,10 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
 
     let mut provider = Provider::new(kind, base_url, model, timeout_s, system_prompt, api_key, model_ctx);
 
+    // Per-provider reasoning override (user can mark any model as reasoning)
+    if let Some(true) = pcfg.and_then(|p| p.reasoning_model) {
+        provider.reasoning_config.enabled = true;
+    }
     if let Some(effort) = &cfg.reasoning_effort {
         provider.reasoning_config.effort = crate::reasoning::ReasoningEffort::from_str(effort);
         provider.reasoning_config.enabled = true;

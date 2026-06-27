@@ -289,7 +289,7 @@ pub(crate) async fn handle_review(client: &Provider, session: &mut ChatSession) 
         Ok(response) => {
             println!();
             println!("{}", response);
-            session.history_mgr.history.push(("/review".to_string(), response));
+            session.history_mgr.push_turn("/review".to_string(), response);
         }
         Err(e) => {
             println!("\n{} review failed: {}", ui::theme::paint_error_label(&t, "│"), e);

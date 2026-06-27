@@ -70,7 +70,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                     session.code_out.last_files = files.clone();
                     crate::commands::auto_write_files(session, &files);
                 }
-                session.history_mgr.history.push((format!("/goal {}", condition), text));
+                session.history_mgr.push_turn(format!("/goal {}", condition), text);
             }
             Err(e) => {
                 println!(

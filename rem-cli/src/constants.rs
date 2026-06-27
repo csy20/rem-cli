@@ -107,6 +107,12 @@ pub const TOOL_COMMAND_STDERR_MAX: usize = 1000;
 /// Max chars per tool result in the follow-up prompt.
 pub const TOOL_RESULT_MAX_CHARS: usize = 1500;
 
+/// Timeout for tool subprocess execution.
+pub const TOOL_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Timeout for web search tool calls.
+pub const TOOL_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
+
 // ── Agentic / Goal ──────────────────────────────────────────────────────────
 
 /// Max iterations for the /goal autonomous loop.

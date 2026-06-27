@@ -54,15 +54,17 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     }
     // Destructive device writes (dd targeting block devices)
     // Use contains to catch full paths like /usr/bin/dd
-    let is_dd = normalized.starts_with("dd ") || normalized.contains(" dd ");
+    let cmd_name = normalized.split_whitespace().next().unwrap_or("");
+    let is_dd = cmd_name.ends_with("dd");
     if is_dd && (normalized.contains("of=") || normalized.contains("if=")) {
         let device_targets = ["/dev/sda", "/dev/nvme", "/dev/mmcblk", "/dev/vda", "/dev/hda"];
         if device_targets.iter().any(|t| normalized.contains(t)) {
             return true;
         }
     }
-    // chmod 777 on system roots (use contains to catch flags between command and mode)
-    if normalized.contains("chmod 777")
+    // chmod 777 on system roots (handles flags between chmod and mode like "chmod -R 777 /")
+    if normalized.starts_with("chmod")
+        && normalized.split_whitespace().any(|w| w == "777")
         && normalized
             .split_whitespace()
             .any(|w| w == "/" || w.starts_with('/') && w.len() < 6)

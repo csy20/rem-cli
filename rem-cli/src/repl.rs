@@ -497,7 +497,7 @@ fn handle_llm_response(
     display_performance_stats(client, session, elapsed, t);
 
     if !cleaned.is_empty() {
-        session.history_mgr.history.push((trimmed.to_string(), cleaned));
+        session.history_mgr.push_turn(trimmed.to_string(), cleaned);
         if session.history_mgr.history.len() > crate::constants::MAX_HISTORY_TURNS {
             session.history_mgr.history.remove(0);
         }

@@ -1,6 +1,9 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
+
+use tokio::time::timeout;
 
 use crate::agentic::{run_lint, run_test};
 use crate::blocklist::is_command_blocked;
@@ -22,7 +25,7 @@ pub(crate) async fn execute_tool_call(tool_call: &ToolCall, project_dir: &std::p
         "run_test" => execute_tool_test(tool_call),
         "web_search" => execute_web_search(tool_call).await,
         "list_files" => execute_list_files(tool_call, project_dir),
-        "run_command" => execute_run_command(tool_call, project_dir),
+        "run_command" => execute_run_command(tool_call, project_dir).await,
         name => ToolCallResult {
             call_id: tool_call.id.clone(),
             name: name.to_string(),
@@ -149,7 +152,11 @@ async fn execute_web_search(tool_call: &ToolCall) -> ToolCallResult {
         Some(q) => q,
         None => return err_result(tool_call, "missing 'query' argument"),
     };
-    match perform_web_search(&reqwest::Client::new(), &query, None).await {
+    let client = reqwest::Client::builder()
+        .timeout(crate::constants::TOOL_SEARCH_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    match perform_web_search(&client, &query, None).await {
         Ok(results) => {
             let mut content = String::new();
             for (i, r) in results.iter().enumerate().take(5) {
@@ -200,7 +207,7 @@ fn execute_list_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> To
     }
 }
 
-fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let command = match extract_arg(tool_call, "command") {
         Some(c) => c,
         None => return err_result(tool_call, "missing 'command' argument"),
@@ -240,8 +247,17 @@ fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> T
         }
     }
 
-    match Command::new(&command).args(&args).current_dir(project_dir).output() {
-        Ok(output) => {
+    let cmd = command.clone();
+    let args_clone = args.clone();
+    let dir = project_dir.to_path_buf();
+    let result = timeout(
+        Duration::from_secs(crate::constants::TOOL_COMMAND_TIMEOUT.as_secs()),
+        tokio::task::spawn_blocking(move || Command::new(&cmd).args(&args_clone).current_dir(&dir).output()),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(output))) => {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let mut content = String::new();
@@ -270,7 +286,12 @@ fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> T
                 is_error: !output.status.success(),
             }
         }
-        Err(e) => err_result(tool_call, &format!("command failed: {}", e)),
+        Ok(Ok(Err(e))) => err_result(tool_call, &format!("command failed: {}", e)),
+        Ok(Err(_)) => err_result(tool_call, "command thread panicked"),
+        Err(_) => err_result(
+            tool_call,
+            &format!("command timed out after {:?}", crate::constants::TOOL_COMMAND_TIMEOUT),
+        ),
     }
 }
 

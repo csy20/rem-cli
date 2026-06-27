@@ -69,7 +69,7 @@ pub(crate) async fn handle_explain(client: &Provider, session: &mut ChatSession,
         Ok(response) => {
             println!("\n{}", response);
             session.add_history(&format!("/explain {}", text));
-            session.history_mgr.history.push((format!("/explain {}", text), response));
+            session.history_mgr.push_turn(format!("/explain {}", text), response);
         }
         Err(e) => {
             println!("\n{} explain failed: {}", ui::theme::paint_error_label(&t, "│"), e);
@@ -114,7 +114,7 @@ pub(crate) async fn handle_test(client: &Provider, session: &mut ChatSession, pa
             println!("{}", response);
             session.code_out.last_code = extract_code_block(&response);
             session.add_history(&format!("/test {}", path));
-            session.history_mgr.history.push((format!("/test {}", path), response));
+            session.history_mgr.push_turn(format!("/test {}", path), response);
             if !session.code_out.last_code.is_empty() {
                 println!("{} tests ready — use {} to save",
                     ui::theme::paint_success_label(&t, "│"),
@@ -163,7 +163,7 @@ pub(crate) async fn handle_refactor(client: &Provider, session: &mut ChatSession
             println!();
             println!("{}", response);
             session.add_history(&format!("/refactor {}", path));
-            session.history_mgr.history.push((format!("/refactor {}", path), response));
+            session.history_mgr.push_turn(format!("/refactor {}", path), response);
         }
         Err(e) => {
             println!("\n{} refactor analysis failed: {}", ui::theme::paint_error_label(&t, "│"), e);

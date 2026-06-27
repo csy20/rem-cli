@@ -164,9 +164,9 @@ async fn test_ollama_model_not_found() {
 async fn test_ollama_chat_stream() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/api/generate"))
+        .and(path("/api/chat"))
         .respond_with(ResponseTemplate::new(200).set_body_string(
-            "{\"response\":\"Hello\",\"done\":false}\n{\"response\":\" World\",\"done\":false}\n{\"response\":\"\",\"done\":true}\n"
+            "{\"message\":{\"content\":\"Hello\"},\"done\":false}\n{\"message\":{\"content\":\" World\"},\"done\":false}\n{\"message\":{\"content\":\"\"},\"done\":true}\n"
         ))
         .mount(&mock_server)
         .await;

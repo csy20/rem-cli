@@ -1,6 +1,6 @@
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -196,7 +196,7 @@ pub struct Provider {
     pub ctx: ProviderContext,
     pub reasoning_config: crate::reasoning::ReasoningConfig,
     pub system_prompt: String,
-    pub(crate) last_usage: Mutex<anthropic::AnthropicUsage>,
+    pub(crate) last_usage: Arc<Mutex<anthropic::AnthropicUsage>>,
     backend: Box<dyn ProviderBackend>,
 }
 
@@ -333,11 +333,12 @@ impl Provider {
             reasoning_config.clone(),
             client,
         );
+        let last_usage = Arc::new(Mutex::new(anthropic::AnthropicUsage::default()));
         let backend: Box<dyn ProviderBackend> = match kind {
             ProviderKind::Ollama => Box::new(ollama::OllamaBackend),
             ProviderKind::OpenAI => Box::new(openai::OpenAIBackend),
             ProviderKind::Gemini => Box::new(gemini::GeminiBackend),
-            ProviderKind::Anthropic => Box::new(anthropic::AnthropicBackend),
+            ProviderKind::Anthropic => Box::new(anthropic::AnthropicBackend::new(Arc::clone(&last_usage))),
             ProviderKind::Azure => Box::new(azure::AzureBackend),
             #[cfg(feature = "bedrock")]
             ProviderKind::Bedrock => Box::new(bedrock::BedrockBackend),
@@ -350,7 +351,7 @@ impl Provider {
             ctx,
             system_prompt,
             reasoning_config,
-            last_usage: Mutex::new(anthropic::AnthropicUsage::default()),
+            last_usage,
             backend,
         }
     }
@@ -661,6 +662,7 @@ pub(super) async fn handle_ollama_error(resp: reqwest::Response, url: &str, mode
     Err(anyhow!("Ollama failed: {status} — {err_msg}"))
 }
 
+#[allow(dead_code)]
 pub(super) async fn stream_ollama_response(resp: reqwest::Response) -> Result<String> {
     stream_lines(resp, |trimmed, full| {
         if let Ok(obj) = serde_json::from_str::<ollama::OllamaStreamLine>(trimmed) {

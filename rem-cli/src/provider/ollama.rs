@@ -30,6 +30,7 @@ pub struct OllamaJsonResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct OllamaStreamLine {
     pub response: Option<String>,
     pub done: Option<bool>,
@@ -215,15 +216,15 @@ impl ProviderBackend for OllamaBackend {
         user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = super::api_url(&ctx.base_url, "generate");
-        let final_prompt = if history.is_empty() {
-            format!("{system_prompt}\n\nUser: {user_prompt}\n\nREM:")
-        } else {
-            format!("{system_prompt}\n\n{history}User: {user_prompt}\n\nREM:")
-        };
+        let url = super::api_url(&ctx.base_url, "chat");
+        let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
+        if !history.is_empty() {
+            messages.push(json!({"role": "user", "content": history}));
+        }
+        messages.push(json!({"role": "user", "content": user_prompt}));
         let payload = json!({
             "model": ctx.model,
-            "prompt": final_prompt,
+            "messages": messages,
             "stream": true,
             "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
         });
@@ -238,7 +239,26 @@ impl ProviderBackend for OllamaBackend {
             return super::handle_ollama_error(resp, &url, &ctx.model).await;
         }
 
-        super::stream_ollama_response(resp).await
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
+        super::stream_buf(resp, |trimmed| {
+            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
+                if let Some(ref msg) = obj.message {
+                    if let Some(ref content) = msg.content {
+                        full_text.push_str(content);
+                        super::emit_token(content);
+                    }
+                }
+                if obj.done == Some(true) {
+                    return Ok(false);
+                }
+            }
+            if full_text.len() > super::MAX_RESPONSE_BYTES {
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+            }
+            Ok(true)
+        })
+        .await?;
+        Ok(full_text)
     }
 
     async fn complete_chat_stream_with_vision(
@@ -247,20 +267,26 @@ impl ProviderBackend for OllamaBackend {
         system_prompt: &str,
         user_prompt: &str,
         history: &str,
-        _mime_type: &str,
+        mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        let url = super::api_url(&ctx.base_url, "generate");
-        let final_prompt = if history.is_empty() {
-            format!("{system_prompt}\n\nUser: {user_prompt}\n\nREM:")
-        } else {
-            format!("{system_prompt}\n\n{history}User: {user_prompt}\n\nREM:")
-        };
+        let url = super::api_url(&ctx.base_url, "chat");
+        let mut messages: Vec<serde_json::Value> = vec![];
+        if !history.is_empty() {
+            messages.push(json!({"role": "user", "content": history}));
+        }
+        messages.push(json!({
+            "role": "user",
+            "content": [
+                json!({"type": "text", "text": user_prompt}),
+                json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime_type, base64_data)}})
+            ]
+        }));
         let payload = json!({
             "model": ctx.model,
-            "prompt": final_prompt,
+            "system": system_prompt,
+            "messages": messages,
             "stream": true,
-            "images": [base64_data],
             "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
         });
         let resp = ctx
@@ -274,7 +300,26 @@ impl ProviderBackend for OllamaBackend {
             return super::handle_ollama_error(resp, &url, &ctx.model).await;
         }
 
-        super::stream_ollama_response(resp).await
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
+        super::stream_buf(resp, |trimmed| {
+            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
+                if let Some(ref msg) = obj.message {
+                    if let Some(ref content) = msg.content {
+                        full_text.push_str(content);
+                        super::emit_token(content);
+                    }
+                }
+                if obj.done == Some(true) {
+                    return Ok(false);
+                }
+            }
+            if full_text.len() > super::MAX_RESPONSE_BYTES {
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+            }
+            Ok(true)
+        })
+        .await?;
+        Ok(full_text)
     }
 
     async fn complete_chat_stream_with_tools(

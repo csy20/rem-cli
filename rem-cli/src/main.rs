@@ -63,7 +63,10 @@ fn setup_global_ctrlc_handler() {
                 }
                 Err(e) => {
                     tracing::error!("ctrl-c handler error: {}", e);
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    // Exponential backoff on repeated errors
+                    for delay_ms in [100u64, 200, 400, 1000] {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    }
                 }
             }
         }
@@ -129,17 +132,24 @@ async fn main() -> Result<()> {
 
     let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
     let mut client = build_provider(&cfg, system_prompt)?;
-    let models = client.list_models().await?;
-    if !models.iter().any(|m| m == &cfg.model) {
-        let fallback = models.first().cloned().unwrap_or_else(|| cfg.model.clone());
-        let t = theme::active();
-        eprintln!(
-            "{} model '{}' not found; using '{}'",
-            theme::paint_warning(&t, "warning:"),
-            cfg.model,
-            fallback
-        );
-        client.set_model(fallback);
+    match client.list_models().await {
+        Ok(models) => {
+            if !models.iter().any(|m| m == &cfg.model) {
+                let fallback = models.first().cloned().unwrap_or_else(|| cfg.model.clone());
+                let t = theme::active();
+                eprintln!(
+                    "{} model '{}' not found; using '{}'",
+                    theme::paint_warning(&t, "warning:"),
+                    cfg.model,
+                    fallback
+                );
+                client.set_model(fallback);
+            }
+        }
+        Err(e) => {
+            let t = theme::active();
+            eprintln!("{} could not list models: {}", theme::paint_warning(&t, "warning:"), e);
+        }
     }
 
     check_system_resources();

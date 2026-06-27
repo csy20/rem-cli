@@ -269,7 +269,7 @@ pub(crate) fn handle_tokens(session: &ChatSession, client: &Provider) {
         .iter()
         .map(|(u, a)| estimate_tokens_batch(&[u, a]))
         .sum();
-    let model_ctx = client.model_ctx;
+    let model_ctx = client.ctx.model_ctx;
     let pct = context_usage_percent(history_tokens, model_ctx);
     let t = ui::theme::active();
 
@@ -605,7 +605,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                     let mut restored = 0;
                     for entry in history {
                         if let (Some(u), Some(a)) = (entry["user"].as_str(), entry["assistant"].as_str()) {
-                            session.history_mgr.history.push((u.to_string(), a.to_string()));
+                            session.history_mgr.push_turn(u.to_string(), a.to_string());
                             restored += 1;
                         }
                     }

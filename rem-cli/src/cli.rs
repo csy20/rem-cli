@@ -126,6 +126,7 @@ pub struct ProviderSettings {
     pub api_key: Option<String>,
     pub timeout_s: Option<u64>,
     pub model_ctx: Option<usize>,
+    pub reasoning_model: Option<bool>,
 }
 
 /// Global and local merged configuration.
@@ -265,7 +266,7 @@ impl AppConfig {
             self.mode = v;
         }
         if let Some(v) = part.providers {
-            self.providers = v;
+            self.providers.extend(v);
         }
         if let Some(v) = part.reasoning_effort {
             self.reasoning_effort = Some(v);

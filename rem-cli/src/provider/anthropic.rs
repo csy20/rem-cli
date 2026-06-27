@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -79,7 +81,15 @@ pub struct AnthropicModelEntry {
     pub id: Option<String>,
 }
 
-pub(super) struct AnthropicBackend;
+pub(super) struct AnthropicBackend {
+    last_usage: Arc<Mutex<AnthropicUsage>>,
+}
+
+impl AnthropicBackend {
+    pub fn new(last_usage: Arc<Mutex<AnthropicUsage>>) -> Self {
+        Self { last_usage }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -261,8 +271,7 @@ impl ProviderBackend for AnthropicBackend {
             return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
-        let dummy_usage = std::sync::Mutex::new(AnthropicUsage::default());
-        super::stream_anthropic_sse(resp, &dummy_usage).await
+        super::stream_anthropic_sse(resp, &self.last_usage).await
     }
 
     async fn complete_json(
@@ -367,8 +376,7 @@ impl ProviderBackend for AnthropicBackend {
             return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
-        let dummy_usage = std::sync::Mutex::new(AnthropicUsage::default());
-        super::stream_anthropic_sse(resp, &dummy_usage).await
+        super::stream_anthropic_sse(resp, &self.last_usage).await
     }
 
     async fn complete_chat_stream_with_tools(

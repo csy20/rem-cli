@@ -38,6 +38,7 @@ pub(crate) struct HistoryManager {
     pub(crate) rl: DefaultEditor,
     pub(crate) history: Vec<(String, String)>,
     pub(crate) messages_since_save: usize,
+    max_history_turns: usize,
 }
 
 impl HistoryManager {
@@ -56,7 +57,17 @@ impl HistoryManager {
             rl,
             history: Vec::new(),
             messages_since_save: 0,
+            max_history_turns: 200,
         })
+    }
+
+    /// Appends a turn to history and trims to max_history_turns to bound memory.
+    pub(crate) fn push_turn(&mut self, user: String, assistant: String) {
+        self.history.push((user, assistant));
+        if self.history.len() > self.max_history_turns {
+            let excess = self.history.len() - self.max_history_turns;
+            self.history.drain(..excess);
+        }
     }
 
     pub(crate) fn save_history(&mut self) {
