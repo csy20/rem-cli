@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
 use crate::agentic::{
-    build_agentic_prompt, build_tool_context, extract_goal_signal, format_tool_output, run_lint, run_test,
+    build_agentic_prompt, build_tool_context, extract_goal_signal, format_tool_output, run_lint, run_test, ToolOutput,
 };
 use crate::chat::ChatSession;
 use crate::constants::CHAT_SYSTEM_PROMPT_CODE;
@@ -99,7 +99,9 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
     let max_iter = crate::constants::GOAL_MAX_ITERATIONS;
     let mut last_tool_output = String::new();
     let mut last_tool_hash: u64 = 0;
+    let mut last_response_hash: u64 = 0;
     let mut last_written_files: Vec<String> = Vec::new();
+    let mut final_iteration_text: Option<String> = None;
 
     for i in 0..max_iter {
         if i > 0 {
@@ -147,10 +149,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         };
 
         let cleaned = text.trim().to_string();
-        session
-            .history_mgr
-            .history
-            .push((format!("/goal {}", condition), cleaned.clone()));
+        final_iteration_text = Some(cleaned.clone());
 
         let files = extract_code_blocks_with_names(&cleaned);
         let code = extract_code_block(&cleaned);
@@ -188,22 +187,56 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
             break;
         }
 
+        // Response-level circuit breaker: detect repeated LLM output (stalling)
+        let response_hash = circuit_breaker_hash(&cleaned);
+        if response_hash == last_response_hash && i > 0 {
+            println!(
+                "{} {} circuit breaker: same response as previous iteration, stopping",
+                ui::theme::paint_warning(&t, "\u{258C}"),
+                ui::theme::paint_warning(&t, "!")
+            );
+            break;
+        }
+        last_response_hash = response_hash;
+
+        let mut tool_results = String::new();
         if !last_written_files.is_empty() {
-            let mut tool_results = String::new();
             for file_path in &last_written_files {
                 let lint_result = run_lint(file_path);
                 println!("{}", format_tool_output(&lint_result));
 
-                let test_result = run_test(file_path);
-                if !test_result.stderr.is_empty() || !test_result.stdout.is_empty() {
-                    println!("{}", format_tool_output(&test_result));
-                }
+                let is_test_file = file_path.contains("test")
+                    || file_path.contains("spec")
+                    || file_path.ends_with("_test.rs")
+                    || file_path.ends_with("_test.py")
+                    || file_path.ends_with("_spec.js");
+                let test_result = if is_test_file {
+                    let r = run_test(file_path);
+                    if !r.stderr.is_empty() || !r.stdout.is_empty() {
+                        println!("{}", format_tool_output(&r));
+                    }
+                    r
+                } else {
+                    ToolOutput {
+                        tool_name: "test".into(),
+                        success: true,
+                        stdout: "[skipped — not a test file]".into(),
+                        stderr: String::new(),
+                        duration_ms: 0,
+                        action: "test".into(),
+                    }
+                };
 
                 tool_results.push_str(&build_tool_context(Some(&lint_result), Some(&test_result), None));
             }
+        } else {
+            tool_results.push_str(&format!("[No files written in this iteration]\n{}", cleaned));
+        }
 
+        // Tool-level circuit breaker: detect repeated tool output
+        if !tool_results.is_empty() {
             let new_hash = circuit_breaker_hash(&tool_results);
-            if new_hash == last_tool_hash && !tool_results.is_empty() {
+            if new_hash == last_tool_hash && !tool_results.is_empty() && i > 0 {
                 println!(
                     "{} {} circuit breaker: same results as previous iteration, stopping",
                     ui::theme::paint_warning(&t, "\u{258C}"),
@@ -212,13 +245,18 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                 break;
             }
             last_tool_hash = new_hash;
-
-            if tool_results.len() > MAX_TOOL_OUTPUT_LEN {
-                tool_results.truncate(MAX_TOOL_OUTPUT_LEN);
-                tool_results.push_str("\n... [truncated]");
-            }
-            last_tool_output = tool_results;
         }
+
+        if tool_results.len() > MAX_TOOL_OUTPUT_LEN {
+            tool_results.truncate(MAX_TOOL_OUTPUT_LEN);
+            tool_results.push_str("\n... [truncated]");
+        }
+        last_tool_output = tool_results;
+    }
+    if let Some(final_text) = final_iteration_text {
+        session
+            .history_mgr
+            .push_turn(format!("/goal {}", condition), final_text);
     }
     println!("{}", ui::theme::paint_rail_empty(&t));
 }

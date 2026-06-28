@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
 
 use crate::agentic::{run_lint, run_test};
@@ -21,8 +22,8 @@ pub(crate) async fn execute_tool_call(tool_call: &ToolCall, project_dir: &std::p
         "read_file" => execute_read_file(tool_call, project_dir),
         "write_file" => execute_write_file(tool_call, project_dir),
         "search_files" => execute_search_files(tool_call, project_dir),
-        "run_lint" => execute_tool_lint(tool_call),
-        "run_test" => execute_tool_test(tool_call),
+        "run_lint" => execute_tool_lint(tool_call, project_dir),
+        "run_test" => execute_tool_test(tool_call, project_dir),
         "web_search" => execute_web_search(tool_call).await,
         "list_files" => execute_list_files(tool_call, project_dir),
         "run_command" => execute_run_command(tool_call, project_dir).await,
@@ -113,36 +114,48 @@ fn execute_search_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> 
     }
 }
 
-fn execute_tool_lint(tool_call: &ToolCall) -> ToolCallResult {
-    let path = match extract_arg(tool_call, "path") {
+fn execute_tool_lint(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+    let path_str = match extract_arg(tool_call, "path") {
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
     };
-    if path.contains("..") {
-        return err_result(tool_call, "path traversal detected");
-    }
-    let result = run_lint(&path);
+    let path = match resolve_path(project_dir, &path_str) {
+        Some(p) => p,
+        None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
+    };
+    let result = run_lint(&path.to_string_lossy());
     ToolCallResult {
         call_id: tool_call.id.clone(),
         name: "run_lint".into(),
-        content: format!("Lint result for {}:\n{}\n{}", path, result.stdout, result.stderr),
+        content: format!(
+            "Lint result for {}:\n{}\n{}",
+            path.display(),
+            result.stdout,
+            result.stderr
+        ),
         is_error: !result.success,
     }
 }
 
-fn execute_tool_test(tool_call: &ToolCall) -> ToolCallResult {
-    let path = match extract_arg(tool_call, "path") {
+fn execute_tool_test(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+    let path_str = match extract_arg(tool_call, "path") {
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
     };
-    if path.contains("..") {
-        return err_result(tool_call, "path traversal detected");
-    }
-    let result = run_test(&path);
+    let path = match resolve_path(project_dir, &path_str) {
+        Some(p) => p,
+        None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
+    };
+    let result = run_test(&path.to_string_lossy());
     ToolCallResult {
         call_id: tool_call.id.clone(),
         name: "run_test".into(),
-        content: format!("Test result for {}:\n{}\n{}", path, result.stdout, result.stderr),
+        content: format!(
+            "Test result for {}:\n{}\n{}",
+            path.display(),
+            result.stdout,
+            result.stderr
+        ),
         is_error: !result.success,
     }
 }
@@ -152,10 +165,7 @@ async fn execute_web_search(tool_call: &ToolCall) -> ToolCallResult {
         Some(q) => q,
         None => return err_result(tool_call, "missing 'query' argument"),
     };
-    let client = reqwest::Client::builder()
-        .timeout(crate::constants::TOOL_SEARCH_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+    let client = crate::provider::HTTP_CLIENT.clone();
     match perform_web_search(&client, &query, None).await {
         Ok(results) => {
             let mut content = String::new();
@@ -219,8 +229,13 @@ async fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
 
-    // Blocklist check (always runs, even when stdin is not a terminal)
-    if is_command_blocked(&command) || args.iter().any(|a| is_command_blocked(a)) {
+    // Blocklist check against FULL reconstructed command (prevents bypass via split args)
+    let full_cmd_str = if args.is_empty() {
+        command.clone()
+    } else {
+        format!("{} {}", command, args.join(" "))
+    };
+    if is_command_blocked(&full_cmd_str) || is_command_blocked(&command) || args.iter().any(|a| is_command_blocked(a)) {
         return err_result(tool_call, "shell command blocked by security policy");
     }
 
@@ -234,7 +249,8 @@ async fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path
         eprint!("  ! Allow shell command? [y/N] {} ", full_cmd);
         let _ = io::stderr().flush();
         let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
+        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+        match reader.read_line(&mut input).await {
             Ok(_) => {
                 let trimmed = input.trim().to_lowercase();
                 if trimmed != "y" && trimmed != "yes" {

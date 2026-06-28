@@ -44,9 +44,20 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
             if let Some(parent) = dir.parent() {
                 if let Ok(canon_parent) = parent.canonicalize() {
                     if let Some(name) = dir.file_name() {
+                        let name_str = name.to_string_lossy();
+                        if name_str.contains("..") {
+                            eprintln!(
+                                "  {} path traversal blocked",
+                                ui::theme::paint_error_label(&t, "\u{2717}")
+                            );
+                            return;
+                        }
                         let safe = canon_parent.join(name);
-                        // Prevent traversal via parent dir
-                        if safe.starts_with(&canon_parent) {
+                        if safe
+                            .canonicalize()
+                            .map(|c| c.starts_with(&canon_parent))
+                            .unwrap_or(false)
+                        {
                             safe
                         } else {
                             eprintln!(
@@ -552,7 +563,7 @@ fn read_maybe_gzip(path: &std::path::Path) -> std::io::Result<String> {
     }
 }
 
-/// Saves the current session to `.rem/session.json` (`/save`).
+/// Saves the current session to `.rem/session.json.gz` (`/save`).
 pub(crate) fn handle_save_session(session: &ChatSession) {
     let t = ui::theme::active();
     let dir = session
@@ -560,7 +571,7 @@ pub(crate) fn handle_save_session(session: &ChatSession) {
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let session_file = dir.join(".rem/session.json");
+    let session_file = dir.join(".rem/session.json.gz");
     let _ = fs::create_dir_all(dir.join(".rem"));
     let json = serde_json::to_string_pretty(&session.to_session_json()).unwrap_or_default();
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -581,7 +592,7 @@ pub(crate) fn handle_save_session(session: &ChatSession) {
     }
 }
 
-/// Restores a saved session from `.rem/session.json` (`/resume`).
+/// Restores a saved session from `.rem/session.json.gz` (`/resume`).
 pub(crate) fn handle_resume_session(session: &mut ChatSession) {
     let t = ui::theme::active();
     let dir = session
@@ -589,7 +600,7 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
         .project_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let session_file = dir.join(".rem/session.json");
+    let session_file = dir.join(".rem/session.json.gz");
     if !session_file.exists() {
         println!(
             "{} no saved session found at {}",

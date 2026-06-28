@@ -212,10 +212,9 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
         };
         report.files_scanned += 1;
 
-        for (idx, raw_line) in contents.lines().enumerate() {
-            let line_no = idx + 1;
-
-            if let Some(ref re) = regex_pattern {
+        if let Some(ref re) = regex_pattern {
+            for (idx, raw_line) in contents.lines().enumerate() {
+                let line_no = idx + 1;
                 if re.is_match(raw_line) {
                     for cap in re.find_iter(raw_line) {
                         let column = byte_to_column(&raw_line.as_bytes()[..cap.start()]);
@@ -232,38 +231,56 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
                         }
                     }
                 }
-            } else {
+            }
+        } else if opts.case_sensitive {
+            for (idx, raw_line) in contents.lines().enumerate() {
+                let line_no = idx + 1;
                 let mut search_from = 0usize;
-                macro_rules! search_in {
-                    ($haystack:expr) => {{
-                        while let Some(pos) = find_subslice(&$haystack[search_from..], &needle) {
-                            let column = byte_to_column(&$haystack[..search_from + pos]);
-                            let line = raw_line.to_string();
-                            report.matches.push(Match {
-                                path: path.to_path_buf(),
-                                line_no,
-                                column: column + 1,
-                                line,
-                            });
-                            if report.matches.len() >= opts.max_results {
-                                report.truncated = true;
-                                report.elapsed_ms = start.elapsed().as_millis();
-                                return report;
-                            }
-                            search_from += pos + needle.len();
-                            if search_from > $haystack.len() {
-                                break;
-                            }
-                        }
-                    }};
+                let haystack = raw_line.as_bytes();
+                while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
+                    let column = byte_to_column(&haystack[..search_from + pos]);
+                    let line = raw_line.to_string();
+                    report.matches.push(Match {
+                        path: path.to_path_buf(),
+                        line_no,
+                        column: column + 1,
+                        line,
+                    });
+                    if report.matches.len() >= opts.max_results {
+                        report.truncated = true;
+                        report.elapsed_ms = start.elapsed().as_millis();
+                        return report;
+                    }
+                    search_from += pos + needle.len();
+                    if search_from > haystack.len() {
+                        break;
+                    }
                 }
-                if opts.case_sensitive {
-                    let haystack = raw_line.as_bytes();
-                    search_in!(haystack);
-                } else {
-                    let lowered = raw_line.to_lowercase();
-                    let haystack = lowered.as_bytes();
-                    search_in!(haystack);
+            }
+        } else {
+            let lowered_contents = contents.to_lowercase();
+            for (idx, (raw_line, lowered_line)) in contents.lines().zip(lowered_contents.lines()).enumerate() {
+                let line_no = idx + 1;
+                let mut search_from = 0usize;
+                let haystack = lowered_line.as_bytes();
+                while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
+                    let column = byte_to_column(&haystack[..search_from + pos]);
+                    let line = raw_line.to_string();
+                    report.matches.push(Match {
+                        path: path.to_path_buf(),
+                        line_no,
+                        column: column + 1,
+                        line,
+                    });
+                    if report.matches.len() >= opts.max_results {
+                        report.truncated = true;
+                        report.elapsed_ms = start.elapsed().as_millis();
+                        return report;
+                    }
+                    search_from += pos + needle.len();
+                    if search_from > haystack.len() {
+                        break;
+                    }
                 }
             }
         }

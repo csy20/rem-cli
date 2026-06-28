@@ -239,11 +239,8 @@ fn classify_intent_heuristic(input: &str) -> TaskIntent {
 
     let has_create = has_creation_intent_lower(&lower);
 
-    if is_question && has_create {
-        return TaskIntent::FastAnswer;
-    }
-
     if has_create {
+        // Even question-form creation intents ("how do I create X") should produce code
         return TaskIntent::CodeAction;
     }
 

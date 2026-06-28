@@ -166,9 +166,14 @@ async fn main() -> Result<()> {
             let is_pipe = !std::io::stdin().is_terminal();
             if is_pipe {
                 let mut stdin_data = String::new();
-                if std::io::stdin().read_to_string(&mut stdin_data).is_ok() && !stdin_data.trim().is_empty() {
-                    return run_pipe(&client, &cfg, stdin_data.trim(), verbose).await;
+                if std::io::stdin().read_to_string(&mut stdin_data).is_ok() {
+                    let trimmed = stdin_data.trim();
+                    if !trimmed.is_empty() {
+                        return run_pipe(&client, &cfg, trimmed, verbose).await;
+                    }
                 }
+                // Pipe was empty — exit cleanly instead of starting REPL with no stdin
+                return Ok(());
             }
             repl::run_chat(&mut client, &mut cfg, verbose).await
         }

@@ -218,8 +218,26 @@ fn resolve_api_key_from_env(kind: ProviderKind) -> Option<String> {
     }
 }
 
+/// Cached system prompt to avoid repeated disk reads.
+static SYSTEM_PROMPT: LazyLock<RwLock<Option<(Option<String>, String)>>> = LazyLock::new(|| RwLock::new(None));
+
 /// Loads the system prompt from file, falling back to the built-in default.
 pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
+    {
+        let cache = SYSTEM_PROMPT.read().unwrap_or_else(|e| e.into_inner());
+        if let Some((ref cached_dir, ref content)) = *cache {
+            if *cached_dir == custom_prompts_dir.map(|s| s.to_string()) {
+                return content.clone();
+            }
+        }
+    }
+    let content = load_system_prompt_uncached(custom_prompts_dir);
+    let mut cache = SYSTEM_PROMPT.write().unwrap_or_else(|e| e.into_inner());
+    *cache = Some((custom_prompts_dir.map(|s| s.to_string()), content.clone()));
+    content
+}
+
+fn load_system_prompt_uncached(custom_prompts_dir: Option<&str>) -> String {
     let mut candidates = Vec::new();
     if let Some(dir) = custom_prompts_dir {
         candidates.push(PathBuf::from(dir).join("system_prompt.txt"));

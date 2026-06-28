@@ -66,6 +66,15 @@ impl std::fmt::Display for LlmErrorBody {
 pub(crate) static STREAM_CANCELLED: AtomicBool = AtomicBool::new(false);
 pub(crate) static STREAM_TOKENS: AtomicBool = AtomicBool::new(false);
 
+/// Reusable HTTP client with connection pooling.
+pub(crate) static HTTP_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .pool_max_idle_per_host(4)
+        .build()
+        .unwrap_or_else(|_| Client::new())
+});
+
 pub(crate) use crate::constants::{MAX_RESPONSE_BYTES, STREAM_CHUNK_TIMEOUT};
 
 // ── ProviderContext: immutable shared state extracted from Provider ──────
@@ -305,11 +314,8 @@ impl ProviderBackend for UnsupportedBackend {
 
 // ─── Provider implementation ─────────────────────────────────────────────
 
-fn build_client(timeout_s: u64) -> Client {
-    Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_s))
-        .build()
-        .unwrap_or_else(|_| Client::new())
+fn build_client(_timeout_s: u64) -> Client {
+    HTTP_CLIENT.clone()
 }
 
 impl Provider {

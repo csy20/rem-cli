@@ -15,8 +15,8 @@ pub(crate) fn human_size(bytes: u64) -> String {
 
 /// Truncates a string to at most `max` bytes, preserving char boundaries.
 pub(crate) fn truncate_bytes(s: &str, max: usize) -> String {
-    if max == 0 || s.is_empty() {
-        return "[truncated]".to_string();
+    if s.is_empty() || max == 0 {
+        return String::new();
     }
     if s.len() <= max {
         return s.to_string();
@@ -40,6 +40,36 @@ pub(crate) fn truncate_to_lines(s: &str, max_lines: usize) -> String {
         result.push_str("\n...[truncated]");
     }
     result
+}
+
+/// Returns the current year.
+pub(crate) fn current_year() -> i64 {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let total_secs = dur.as_secs();
+    let days = total_secs / 86400;
+    let mut y = 1970i64;
+    let mut d = days as i64;
+    const DAYS_IN_400_YEARS: i64 = 146097;
+    if d >= DAYS_IN_400_YEARS {
+        let blocks = d / DAYS_IN_400_YEARS;
+        y += blocks * 400;
+        d -= blocks * DAYS_IN_400_YEARS;
+    }
+    loop {
+        let year_days = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if d < year_days {
+            break;
+        }
+        d -= year_days;
+        y += 1;
+    }
+    y
 }
 
 /// Returns the current UTC timestamp as `YYYY-MM-DD HH:MM:SS`.
@@ -177,7 +207,7 @@ mod tests {
         proptest::proptest!(|(s: String, limit in 10usize..500usize)| {
             let result = truncate_bytes(&s, limit);
             if s.is_empty() {
-                assert!(result.contains("[truncated]"), "empty string should return truncated");
+                assert_eq!(result, "", "empty string should return empty");
             } else if s.len() > limit {
                 assert!(result.contains("[truncated]"), "result should indicate truncation");
                 if result != "[truncated]" {

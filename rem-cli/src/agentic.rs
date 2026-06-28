@@ -3,7 +3,7 @@
 //! construction for iterative code generation, and goal signal extraction.
 
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,10 +56,54 @@ impl LintTarget {
     }
 }
 
+/// Maximum time (seconds) to wait for a linter or test subprocess.
+const TOOL_TIMEOUT_SECS: u64 = 60;
+
+/// Spawns a subprocess with a timeout, returning the output.
+fn run_command_with_timeout(cmd: &str, args: &[&str]) -> ToolOutput {
+    let start = Instant::now();
+    let cmd_name = cmd.to_string();
+    let cmd_name_for_thread = cmd_name.clone();
+    let args_owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(Command::new(&cmd_name_for_thread).args(&args_owned).output());
+    });
+    match rx.recv_timeout(Duration::from_secs(TOOL_TIMEOUT_SECS)) {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            ToolOutput {
+                tool_name: cmd_name,
+                success: output.status.success(),
+                stdout,
+                stderr,
+                duration_ms: start.elapsed().as_millis() as u64,
+                action: "tool".into(),
+            }
+        }
+        Ok(Err(e)) => ToolOutput {
+            tool_name: cmd_name.clone(),
+            success: false,
+            stdout: String::new(),
+            stderr: format!("Failed to run {}: {}", cmd_name, e),
+            duration_ms: start.elapsed().as_millis() as u64,
+            action: "tool".into(),
+        },
+        Err(_) => ToolOutput {
+            tool_name: cmd_name.clone(),
+            success: false,
+            stdout: String::new(),
+            stderr: format!("{} timed out after {}s", cmd_name, TOOL_TIMEOUT_SECS),
+            duration_ms: TOOL_TIMEOUT_SECS * 1000,
+            action: "tool".into(),
+        },
+    }
+}
+
 /// Runs the appropriate linter for a file path.
 pub fn run_lint(path: &str) -> ToolOutput {
     let target = LintTarget::detect(path);
-    let start = Instant::now();
 
     let (name, cmd, args): (&str, &str, Vec<&str>) = match target {
         LintTarget::Rust => ("rustfmt", "rustfmt", vec!["--check", path]),
@@ -71,6 +115,7 @@ pub fn run_lint(path: &str) -> ToolOutput {
         LintTarget::Css => ("stylelint", "npx", vec!["stylelint", path]),
         LintTarget::Html => ("htmlhint", "npx", vec!["--no-install", "htmlhint", path]),
         LintTarget::Unknown => {
+            let start = Instant::now();
             return ToolOutput {
                 tool_name: "unknown".into(),
                 success: false,
@@ -82,43 +127,23 @@ pub fn run_lint(path: &str) -> ToolOutput {
         }
     };
 
-    match Command::new(cmd).args(&args).output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            ToolOutput {
-                tool_name: name.into(),
-                success: output.status.success(),
-                stdout,
-                stderr,
-                duration_ms: start.elapsed().as_millis() as u64,
-                action: "lint".into(),
-            }
-        }
-        Err(e) => ToolOutput {
-            tool_name: name.into(),
-            success: false,
-            stdout: String::new(),
-            stderr: format!("Failed to run {}: {}", name, e),
-            duration_ms: start.elapsed().as_millis() as u64,
-            action: "lint".into(),
-        },
-    }
+    let mut result = run_command_with_timeout(cmd, &args);
+    result.tool_name = name.to_string();
+    result.action = "lint".to_string();
+    result
 }
 
 /// Runs the appropriate test runner for a file path (cargo test, pytest, etc.).
 pub fn run_test(path: &str) -> ToolOutput {
     let target = LintTarget::detect(path);
-    let start = Instant::now();
 
-    let result = match target {
-        LintTarget::Rust => Command::new("cargo").args(["test", "--quiet"]).output(),
-        LintTarget::Python => Command::new("python3").args(["-m", "pytest", path, "-q"]).output(),
-        LintTarget::Go => Command::new("go").args(["test", "./..."]).output(),
-        LintTarget::JavaScript | LintTarget::TypeScript => {
-            Command::new("npx").args(["jest", path, "--no-coverage"]).output()
-        }
+    let (cmd, args): (&str, Vec<&str>) = match target {
+        LintTarget::Rust => ("cargo", vec!["test", "--quiet"]),
+        LintTarget::Python => ("python3", vec!["-m", "pytest", path, "-q"]),
+        LintTarget::Go => ("go", vec!["test", "./..."]),
+        LintTarget::JavaScript | LintTarget::TypeScript => ("npx", vec!["jest", path, "--no-coverage"]),
         LintTarget::Css | LintTarget::Html | LintTarget::Unknown => {
+            let start = Instant::now();
             return ToolOutput {
                 tool_name: "test".into(),
                 success: false,
@@ -130,34 +155,15 @@ pub fn run_test(path: &str) -> ToolOutput {
         }
     };
 
-    match result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            let combined = if stdout.len() > 2000 {
-                let truncated: String = stdout.chars().take(2000).collect();
-                format!("{}...\n[truncated to 2000 chars]", truncated)
-            } else {
-                stdout.clone()
-            };
-            ToolOutput {
-                tool_name: "test".into(),
-                success: output.status.success(),
-                stdout: combined,
-                stderr,
-                duration_ms: start.elapsed().as_millis() as u64,
-                action: "test".into(),
-            }
-        }
-        Err(e) => ToolOutput {
-            tool_name: "test".into(),
-            success: false,
-            stdout: String::new(),
-            stderr: format!("Failed to run tests: {}", e),
-            duration_ms: start.elapsed().as_millis() as u64,
-            action: "test".into(),
-        },
+    let mut result = run_command_with_timeout(cmd, &args);
+    result.tool_name = "test".to_string();
+    result.action = "test".to_string();
+    // Truncate stdout if too large
+    if result.stdout.len() > 2000 {
+        let truncated: String = result.stdout.chars().take(2000).collect();
+        result.stdout = format!("{}...\n[truncated to 2000 chars]", truncated);
     }
+    result
 }
 
 /// Formats tool execution output with styled status and truncated stdout/stderr.

@@ -82,9 +82,10 @@ pub(crate) fn handle_diff(session: &ChatSession) {
                 }
                 let diff = TextDiff::from_lines(&existing, &f.content);
                 let mut diff_printed = 0;
+                let max_diff = crate::constants::REVIEW_DIFF_MAX_LINES;
                 let total = diff.iter_all_changes().count();
                 for change in diff.iter_all_changes() {
-                    if diff_printed >= 8 {
+                    if diff_printed >= max_diff {
                         break;
                     }
                     match change.tag() {

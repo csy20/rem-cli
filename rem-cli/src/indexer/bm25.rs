@@ -100,17 +100,6 @@ pub fn retrieve_relevant_chunks<'a>(
             score += 0.5;
         }
 
-        // Semantic score from embeddings
-        if let Some(ref emb) = c.embedding {
-            let query_emb: Vec<f32> = q_words
-                .iter()
-                .map(|w| if c.content_lower.contains(w) { 1.0 } else { 0.0 })
-                .collect();
-            if !query_emb.is_empty() && query_emb.len() == emb.len() {
-                score += cosine_similarity(emb, &query_emb) * 3.0;
-            }
-        }
-
         if score > 0.0 {
             scored.push((score, c));
         }
@@ -163,18 +152,4 @@ fn count_occurrences(text: &str, word: &str) -> usize {
         start += pos + 1;
     }
     count
-}
-
-/// Computes cosine similarity between two embedding vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 {
-        return 0.0;
-    }
-    (dot / (na * nb)) as f64
 }

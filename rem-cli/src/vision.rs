@@ -28,7 +28,18 @@ pub(crate) async fn handle_vision(client: &Provider, session: &mut ChatSession, 
             .project_dir
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        base.join(image_path)
+        match crate::types::resolve_safe_path(&base, image_path) {
+            Some(p) => p,
+            None => {
+                println!(
+                    "{} {} path traversal blocked: {}",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_warning(&t, "\u{2717}"),
+                    image_path
+                );
+                return;
+            }
+        }
     };
 
     if !path.exists() {

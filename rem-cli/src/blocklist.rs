@@ -63,11 +63,11 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
         }
     }
     // chmod 777 on system roots (handles flags between chmod and mode like "chmod -R 777 /")
-    if normalized.starts_with("chmod")
+    if normalized.split_whitespace().any(|w| w.ends_with("chmod"))
         && normalized.split_whitespace().any(|w| w == "777")
         && normalized
             .split_whitespace()
-            .any(|w| w == "/" || w.starts_with('/') && w.len() < 6)
+            .any(|w| matches!(w, "/" | "/." | "/*" | "/etc" | "/boot" | "/dev"))
     {
         return true;
     }

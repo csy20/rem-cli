@@ -99,9 +99,11 @@ pub(crate) fn handle_provider(client: &mut Provider, cfg: &mut AppConfig, tail: 
             return;
         }
         let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
-        cfg.provider = new_provider;
-        match build_provider(cfg, system_prompt) {
+        let mut temp_cfg = cfg.clone();
+        temp_cfg.provider = new_provider.clone();
+        match build_provider(&temp_cfg, system_prompt) {
             Ok(new_client) => {
+                cfg.provider = new_provider;
                 let _ = save_config(cfg);
                 *client = new_client;
                 let rail = ui::theme::paint_rail_empty(&t);

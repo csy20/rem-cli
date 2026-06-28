@@ -56,6 +56,10 @@ static PAGER_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
 });
 
 fn print_direct(text: &str) {
-    print!("{}", text);
+    if text.ends_with('\n') {
+        print!("{text}");
+    } else {
+        println!("{text}");
+    }
     let _ = std::io::stdout().flush();
 }

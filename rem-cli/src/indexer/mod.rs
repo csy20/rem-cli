@@ -68,13 +68,10 @@ pub struct IndexChunk {
     #[serde(default)]
     pub embedding: Option<Vec<f32>>,
     /// Pre-computed lowercased content for faster retrieval.
-    #[serde(skip)]
     pub(crate) content_lower: String,
     /// Pre-computed lowercased name for faster retrieval.
-    #[serde(skip)]
     pub(crate) name_lower: String,
     /// Pre-computed lowercased path for faster retrieval.
-    #[serde(skip)]
     pub(crate) path_lower: String,
 }
 
@@ -95,11 +92,6 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
             // Try v2 format first (CodebaseIndex with inverted_index)
             if let Ok(mut index) = parsed_v2 {
                 if !index.chunks.is_empty() {
-                    for chunk in &mut index.chunks {
-                        chunk.content_lower = chunk.content.to_lowercase();
-                        chunk.name_lower = chunk.name.to_lowercase();
-                        chunk.path_lower = chunk.path.to_lowercase();
-                    }
                     // Rebuild inverted index if missing (e.g. migrated from v1)
                     if index.inverted_index.is_empty() {
                         index.inverted_index = build_inverted_index(&index.chunks, &mut index.doc_freqs);
@@ -120,9 +112,12 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
                     let mut chunks = Vec::new();
                     for item in arr {
                         if let Ok(mut chunk) = serde_json::from_value::<IndexChunk>(item.clone()) {
-                            chunk.content_lower = chunk.content.to_lowercase();
-                            chunk.name_lower = chunk.name.to_lowercase();
-                            chunk.path_lower = chunk.path.to_lowercase();
+                            // v1 format lacked pre-lowered fields, compute them now
+                            if chunk.content_lower.is_empty() {
+                                chunk.content_lower = chunk.content.to_lowercase();
+                                chunk.name_lower = chunk.name.to_lowercase();
+                                chunk.path_lower = chunk.path.to_lowercase();
+                            }
                             chunks.push(chunk);
                         }
                     }
@@ -322,7 +317,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     }
 
     let mut chunks: Vec<IndexChunk> = file_entries
-        .par_iter()
+        .into_par_iter()
         .flat_map(|fe| {
             let mut local_chunks = Vec::new();
             let ctype = guess_chunk_type(&fe.rel_str, &fe.content);

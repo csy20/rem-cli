@@ -2,6 +2,8 @@
 //! Handlers for writing generated code to disk, undoing writes, copying
 //! responses, and prompting for file paths.
 
+use std::io::IsTerminal;
+
 use crate::chat::ChatSession;
 use crate::highlight;
 use crate::intent::TaskIntent;
@@ -115,18 +117,26 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
     }
 
     if abs_path.exists() {
-        let existing_size = fs::metadata(&abs_path).map(|m| m.len()).unwrap_or(0);
-        println!(
-            "  {} {} exists ({} bytes) — {} [y/N]",
-            ui::theme::paint_warning(&t, "\u{26a0}"),
-            ui::theme::paint_bright(&t, trimmed),
-            existing_size,
-            ui::theme::paint_dim(&t, "overwrite?")
-        );
-        let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
-        if !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
-            println!("  {} skipped", ui::theme::paint_rail_empty(&t));
-            return;
+        if std::io::stdin().is_terminal() {
+            let existing_size = fs::metadata(&abs_path).map(|m| m.len()).unwrap_or(0);
+            println!(
+                "  {} {} exists ({} bytes) — {} [y/N]",
+                ui::theme::paint_warning(&t, "\u{26a0}"),
+                ui::theme::paint_bright(&t, trimmed),
+                existing_size,
+                ui::theme::paint_dim(&t, "overwrite?")
+            );
+            let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
+            if !input.trim().eq_ignore_ascii_case("y") && !input.trim().eq_ignore_ascii_case("yes") {
+                println!("  {} skipped", ui::theme::paint_rail_empty(&t));
+                return;
+            }
+        } else {
+            println!(
+                "  {} {} exists — overwriting (non-interactive mode)",
+                ui::theme::paint_warning(&t, "\u{26a0}"),
+                ui::theme::paint_bright(&t, trimmed),
+            );
         }
     }
 
@@ -241,15 +251,23 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     );
     println!("{}", ui::theme::paint_rail_empty(&t));
 
-    let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
-    let input = input.trim();
-    if !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
+    if std::io::stdin().is_terminal() {
+        let input = session.readline("rem> ").unwrap_or_else(|_| String::new());
+        let input = input.trim();
+        if !input.eq_ignore_ascii_case("y") && !input.eq_ignore_ascii_case("yes") {
+            println!(
+                "{} skipped. Use /write <path> to save individually.",
+                ui::theme::paint_warning(&t, "\u{2502}  !")
+            );
+            println!("{}", ui::theme::paint_rail_empty(&t));
+            return;
+        }
+    } else {
         println!(
-            "{} skipped. Use /write <path> to save individually.",
-            ui::theme::paint_warning(&t, "\u{2502}  !")
+            "{} {} auto-confirming write (non-interactive mode)",
+            ui::theme::paint(&t, "accent_info", "\u{2502}", true),
+            ui::theme::paint_dim(&t, "non-interactive mode"),
         );
-        println!("{}", ui::theme::paint_rail_empty(&t));
-        return;
     }
 
     let mut written: Vec<BackupEntry> = Vec::new();

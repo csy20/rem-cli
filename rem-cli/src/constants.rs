@@ -135,6 +135,9 @@ pub const FIND_MAX_RESULTS: usize = 500;
 /// Default max depth for `/find`.
 pub const FIND_MAX_DEPTH: usize = 8;
 
+/// Max diff lines to display in `/review`.
+pub const REVIEW_DIFF_MAX_LINES: usize = 30;
+
 // ── Embeddings ──────────────────────────────────────────────────────────────
 
 /// Max chars of chunk content to send for embedding.

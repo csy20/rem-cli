@@ -24,9 +24,10 @@ use crate::ui::theme;
 pub(crate) async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, verbose: bool) -> Result<()> {
     let t = theme::active();
     let prompt = if input.len() > 12000 {
+        let truncated: String = input.chars().take(12000).collect();
         format!(
             "Analyze the following piped input. Be concise.\n\n{}...\n[truncated]",
-            &input[..12000]
+            truncated
         )
     } else {
         format!("Analyze the following piped input. Be concise.\n\n{}", input)

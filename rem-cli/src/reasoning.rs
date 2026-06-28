@@ -56,7 +56,7 @@ pub fn is_reasoning_model(model: &str) -> bool {
     lower.starts_with("o1-")
         || lower.starts_with("o3-")
         || lower.contains("deepseek-r1")
-        || lower.contains("claude-sonnet-4-20") && lower.contains("thinking")
+        || (lower.contains("claude-sonnet-4-20") && lower.contains("thinking"))
         || lower.contains("thinking")
 }
 

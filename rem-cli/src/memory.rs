@@ -94,16 +94,36 @@ impl ProjectMemory {
             .filter_map(|e| e.ok())
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                e.file_type().is_file() && !name.starts_with('.')
+                if e.file_type().is_dir() {
+                    !name.starts_with('.') && !crate::find::should_skip_dir(&name)
+                } else {
+                    e.depth() > 0 && !name.starts_with('.')
+                }
             })
+            .filter(|e| e.file_type().is_file())
             .count();
-        let dirs_count = WalkDir::new(project_dir)
+        // Collect + filter approach (walkdir's filter_entry changes iterator types)
+        let all_entries: Vec<_> = WalkDir::new(project_dir)
             .max_depth(2)
             .into_iter()
             .filter_map(|e| e.ok())
+            .collect();
+        let dirs_count = all_entries
+            .iter()
             .filter(|e| {
                 let name = e.file_name().to_string_lossy();
-                e.file_type().is_dir() && !name.starts_with('.') && !crate::find::should_skip_dir(&name)
+                if e.file_type().is_dir() {
+                    if e.depth() == 0 {
+                        return true;
+                    }
+                    !name.starts_with('.') && !crate::find::should_skip_dir(&name)
+                } else {
+                    true
+                }
+            })
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy();
+                e.file_type().is_dir() && !name.starts_with('.')
             })
             .count();
 

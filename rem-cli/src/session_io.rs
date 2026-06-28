@@ -64,10 +64,10 @@ pub(crate) fn print_welcome(client: &Provider) {
 /// Builds a file tree listing of the project directory (depth-limited, size-capped).
 pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
     let mut out = String::from("Project files:\n");
-    let mut count = 0u32;
     let max_depth = 4;
 
     let mut entries: Vec<String> = Vec::new();
+    let mut entries_size: usize = 0;
     for entry in WalkBuilder::new(dir)
         .max_depth(Some(max_depth as usize))
         .sort_by_file_name(|a, b| a.cmp(b))
@@ -98,24 +98,24 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
             continue;
         }
 
-        if p.is_dir() {
+        let entry_str = if p.is_dir() {
             if rel.components().count() >= 3 {
                 continue;
             }
-            entries.push(format!("{}/", rel_str));
+            format!("{}/", rel_str)
         } else {
             let size = p.metadata().map(|m| m.len()).unwrap_or(0);
-            entries.push(format!("{}  ({} bytes)", rel_str, size));
-        }
-        count += 1;
-        // Check accumulated entries size against limit (entries are joined later)
-        let entries_size: usize = entries.iter().map(|e| e.len() + 1).sum();
-        if out.len() + entries_size > max_bytes {
+            format!("{}  ({} bytes)", rel_str, size)
+        };
+        let entry_len = entry_str.len() + 1;
+        if out.len() + entries_size + entry_len > max_bytes {
             break;
         }
+        entries.push(entry_str);
+        entries_size += entry_len;
     }
 
-    if count > 0 {
+    if !entries.is_empty() {
         out.push_str(&entries.join("\n"));
         out.push_str("\n\n");
         out

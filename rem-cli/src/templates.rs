@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::text_util::current_year;
 use crate::FileEntry;
 
 fn templates_dir() -> Option<PathBuf> {
@@ -53,6 +54,7 @@ pub fn template_bare(name: &str) -> Vec<FileEntry> {
         return resolve_template(files, name);
     }
     let title = name.rsplit('/').next().unwrap_or(name);
+    let year = current_year();
     vec![
         FileEntry {
             path: "index.html".into(),
@@ -83,13 +85,14 @@ pub fn template_bare(name: &str) -> Vec<FileEntry> {
     </main>
 
     <footer>
-        <p>&copy; 2026 {title}</p>
+        <p>&copy; {year} {title}</p>
     </footer>
 
     <script src="script.js"></script>
 </body>
 </html>"##,
-                title = title
+                title = title,
+                year = year
             ),
         },
         FileEntry {
@@ -271,6 +274,7 @@ pub fn template_portfolio(name: &str) -> Vec<FileEntry> {
         return resolve_template(files, name);
     }
     let title = name.rsplit('/').next().unwrap_or(name);
+    let year = current_year();
     let mut files = template_bare(name);
     files.push(FileEntry {
         path: "about.html".into(),
@@ -297,10 +301,11 @@ pub fn template_portfolio(name: &str) -> Vec<FileEntry> {
         <section class="hero"><h2>About Me</h2><p>I'm a web developer passionate about building clean, accessible websites.</p></section>
         <section class="content"><h3>Skills</h3><ul><li>HTML, CSS, JavaScript</li><li>React & Node.js</li><li>Git & GitHub</li></ul></section>
     </main>
-    <footer><p>&copy; 2026 {title}</p></footer>
+    <footer><p>&copy; {year} {title}</p></footer>
 </body>
 </html>"##,
-            title = title
+            title = title,
+            year = year
         ),
     });
     files.push(FileEntry {
@@ -327,10 +332,11 @@ pub fn template_portfolio(name: &str) -> Vec<FileEntry> {
             <article class="project-card"><h3>Project Three</h3><p>A CLI tool written in Rust.</p><a href="#">View on GitHub &rarr;</a></article>
         </section>
     </main>
-    <footer><p>&copy; 2026 {title}</p></footer>
+    <footer><p>&copy; {year} {title}</p></footer>
 </body>
 </html>"##,
-            title = title
+            title = title,
+            year = year
         ),
     });
     files.push(FileEntry {
@@ -360,7 +366,7 @@ pub fn template_portfolio(name: &str) -> Vec<FileEntry> {
             </form>
         </section>
     </main>
-    <footer><p>&copy; 2026 {title}</p></footer>
+    <footer><p>&copy; {year} {title}</p></footer>
 </body>
 </html>"##,
             title = title
@@ -411,6 +417,7 @@ pub fn template_landing(name: &str) -> Vec<FileEntry> {
         return resolve_template(files, name);
     }
     let title = name.rsplit('/').next().unwrap_or(name);
+    let year = current_year();
     vec![
         FileEntry {
             path: "index.html".into(),
@@ -449,11 +456,12 @@ pub fn template_landing(name: &str) -> Vec<FileEntry> {
     <section id="cta" class="cta">
         <div class="container"><h3>Ready to start?</h3><p>Join thousands of developers.</p><a href="#" class="btn btn-primary">Get Started Free</a></div>
     </section>
-    <footer><div class="container"><p>&copy; 2026 {title}.</p></div></footer>
+    <footer><div class="container"><p>&copy; {year} {title}.</p></div></footer>
     <script src="script.js"></script>
 </body>
 </html>"##,
-                title = title
+                title = title,
+                year = year
             ),
         },
         FileEntry {
@@ -519,6 +527,7 @@ pub fn template_blog(name: &str) -> Vec<FileEntry> {
         return resolve_template(files, name);
     }
     let title = name.rsplit('/').next().unwrap_or(name);
+    let year = current_year();
     vec![
         FileEntry {
             path: "index.html".into(),
@@ -560,11 +569,12 @@ pub fn template_blog(name: &str) -> Vec<FileEntry> {
             </article>
         </section>
     </main>
-    <footer><div class="container"><p>&copy; 2026 {title}</p></div></footer>
+    <footer><div class="container"><p>&copy; {year} {title}</p></div></footer>
     <script src="script.js"></script>
 </body>
 </html>"##,
-                title = title
+                title = title,
+                year = year
             ),
         },
         FileEntry {
