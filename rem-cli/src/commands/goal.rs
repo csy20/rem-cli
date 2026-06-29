@@ -102,6 +102,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
     let mut last_response_hash: u64 = 0;
     let mut last_written_files: Vec<String> = Vec::new();
     let mut final_iteration_text: Option<String> = None;
+    let mut consecutive_empty_plans: u32 = 0;
 
     for i in 0..max_iter {
         if i > 0 {
@@ -153,6 +154,19 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
 
         let files = extract_code_blocks_with_names(&cleaned);
         let code = extract_code_block(&cleaned);
+        if files.is_empty() && code.is_empty() {
+            consecutive_empty_plans += 1;
+            if consecutive_empty_plans >= 3 {
+                println!(
+                    "{} {} no code generated for 3 iterations — goal appears stuck, stopping",
+                    ui::theme::paint_warning(&t, "\u{258C}"),
+                    ui::theme::paint_warning(&t, "!")
+                );
+                break;
+            }
+        } else {
+            consecutive_empty_plans = 0;
+        }
         if !files.is_empty() {
             session.code_out.last_files = files.clone();
             session.code_out.last_code = if code.is_empty() { String::new() } else { code };
@@ -202,7 +216,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         let mut tool_results = String::new();
         if !last_written_files.is_empty() {
             for file_path in &last_written_files {
-                let lint_result = run_lint(file_path);
+                let lint_result = run_lint(file_path).await;
                 println!("{}", format_tool_output(&lint_result));
 
                 let is_test_file = file_path.contains("test")
@@ -211,7 +225,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                     || file_path.ends_with("_test.py")
                     || file_path.ends_with("_spec.js");
                 let test_result = if is_test_file {
-                    let r = run_test(file_path);
+                    let r = run_test(file_path).await;
                     if !r.stderr.is_empty() || !r.stdout.is_empty() {
                         println!("{}", format_tool_output(&r));
                     }

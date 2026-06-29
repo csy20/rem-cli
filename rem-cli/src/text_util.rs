@@ -42,15 +42,10 @@ pub(crate) fn truncate_to_lines(s: &str, max_lines: usize) -> String {
     result
 }
 
-/// Returns the current year.
-pub(crate) fn current_year() -> i64 {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_secs = dur.as_secs();
-    let days = total_secs / 86400;
+/// Converts a Unix day count to a year, returning the year and remaining days.
+fn days_to_year(days: i64) -> (i64, i64) {
     let mut y = 1970i64;
-    let mut d = days as i64;
+    let mut d = days;
     const DAYS_IN_400_YEARS: i64 = 146097;
     if d >= DAYS_IN_400_YEARS {
         let blocks = d / DAYS_IN_400_YEARS;
@@ -69,7 +64,16 @@ pub(crate) fn current_year() -> i64 {
         d -= year_days;
         y += 1;
     }
-    y
+    (y, d)
+}
+
+/// Returns the current year.
+pub(crate) fn current_year() -> i64 {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let days = (dur.as_secs() / 86400) as i64;
+    days_to_year(days).0
 }
 
 /// Returns the current UTC timestamp as `YYYY-MM-DD HH:MM:SS`.
@@ -85,28 +89,7 @@ pub(crate) fn format_timestamp() -> String {
     let minutes = (time_secs % 3600) / 60;
     let seconds = time_secs % 60;
 
-    let mut y = 1970i64;
-    let mut d = days as i64;
-    // Fast-forward by 400-year blocks (146097 days) to avoid iterating
-    // year-by-year for large day offsets.
-    const DAYS_IN_400_YEARS: i64 = 146097;
-    if d >= DAYS_IN_400_YEARS {
-        let blocks = d / DAYS_IN_400_YEARS;
-        y += blocks * 400;
-        d -= blocks * DAYS_IN_400_YEARS;
-    }
-    loop {
-        let year_days = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
-            366
-        } else {
-            365
-        };
-        if d < year_days {
-            break;
-        }
-        d -= year_days;
-        y += 1;
-    }
+    let (y, d) = days_to_year(days as i64);
     let is_leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
     let month_days = [
         31u64,
@@ -123,7 +106,7 @@ pub(crate) fn format_timestamp() -> String {
         31,
     ];
     let mut month = 1usize;
-    let mut day = d as u64;
+    let mut day = d as u64; // remaining days within year
     for &md in &month_days {
         if day < md {
             break;

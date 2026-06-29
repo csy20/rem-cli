@@ -2,6 +2,7 @@
 //! Defines top-level types ([`FileEntry`], [`ModelReply`]), prompt constants,
 //! utility functions, and dispatches to subcommands or the REPL loop.
 
+use std::collections::HashSet;
 use std::io::{IsTerminal, Read};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -51,10 +52,12 @@ pub(crate) static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
 /// and signals graceful exit on second press.
 /// Prints nothing — UI messages come from the REPL readline handler.
 fn setup_global_ctrlc_handler() {
-    let _handle = tokio::spawn(async {
+    tokio::spawn(async {
+        let mut consecutive_errors: u32 = 0;
         loop {
             match tokio::signal::ctrl_c().await {
                 Ok(()) => {
+                    consecutive_errors = 0;
                     let count = CTRL_C_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
                     if count >= 2 {
                         SHOULD_EXIT.store(true, Ordering::SeqCst);
@@ -62,11 +65,14 @@ fn setup_global_ctrlc_handler() {
                     provider::STREAM_CANCELLED.store(true, Ordering::SeqCst);
                 }
                 Err(e) => {
-                    tracing::error!("ctrl-c handler error: {}", e);
-                    // Exponential backoff on repeated errors
-                    for delay_ms in [100u64, 200, 400, 1000] {
-                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    consecutive_errors += 1;
+                    tracing::error!("ctrl-c handler error (count={}): {}", consecutive_errors, e);
+                    if consecutive_errors >= 5 {
+                        tracing::error!("too many ctrl-c handler errors, stopping");
+                        break;
                     }
+                    let delay_ms = [100u64, 200, 400, 1000][(consecutive_errors as usize).saturating_sub(1).min(3)];
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
             }
         }
@@ -134,7 +140,8 @@ async fn main() -> Result<()> {
     let mut client = build_provider(&cfg, system_prompt)?;
     match client.list_models().await {
         Ok(models) => {
-            if !models.iter().any(|m| m == &cfg.model) {
+            let model_set: HashSet<&str> = models.iter().map(|s| s.as_str()).collect();
+            if !model_set.contains(cfg.model.as_str()) {
                 let fallback = models.first().cloned().unwrap_or_else(|| cfg.model.clone());
                 let t = theme::active();
                 eprintln!(

@@ -172,7 +172,7 @@ pub(crate) async fn handle_refactor(client: &Provider, session: &mut ChatSession
 }
 
 /// Runs a linter on the specified file (`/lint` command).
-pub(crate) fn handle_lint(_session: &mut ChatSession, path: &str) {
+pub(crate) async fn handle_lint(_session: &mut ChatSession, path: &str) {
     let t = ui::theme::active();
     let file_path = Path::new(path);
     if !file_path.exists() {
@@ -184,12 +184,12 @@ pub(crate) fn handle_lint(_session: &mut ChatSession, path: &str) {
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         path
     );
-    let result = run_lint(path);
+    let result = run_lint(path).await;
     println!("{}", format_tool_output(&result));
 }
 
 /// Handles `/lint` with automatic fallback to the last written files when no arg is given.
-pub(crate) fn handle_lint_with_fallback(session: &mut ChatSession, args: &str) {
+pub(crate) async fn handle_lint_with_fallback(session: &mut ChatSession, args: &str) {
     let t = ui::theme::active();
     if args.is_empty() {
         if session.code_out.last_files.is_empty() && session.code_out.last_files_written.is_empty() {
@@ -215,11 +215,11 @@ pub(crate) fn handle_lint_with_fallback(session: &mut ChatSession, args: &str) {
                     .collect()
             };
             for p in paths {
-                handle_lint(session, &p);
+                handle_lint(session, &p).await;
             }
         }
     } else {
-        handle_lint(session, args);
+        handle_lint(session, args).await;
     }
 }
 

@@ -213,7 +213,7 @@ impl Provider {
     /// Builds a ProviderContext with the current reasoning_config synced.
     fn build_ctx(&self) -> ProviderContext {
         let mut ctx = self.ctx.clone();
-        ctx.reasoning_config = self.reasoning_config.clone();
+        ctx.reasoning_config = self.reasoning_config;
         ctx
     }
 }
@@ -330,15 +330,7 @@ impl Provider {
     ) -> Self {
         let client = build_client(timeout_s);
         let reasoning_config = crate::reasoning::ReasoningConfig::default();
-        let ctx = ProviderContext::new(
-            base_url,
-            model,
-            api_key,
-            model_ctx,
-            kind,
-            reasoning_config.clone(),
-            client,
-        );
+        let ctx = ProviderContext::new(base_url, model, api_key, model_ctx, kind, reasoning_config, client);
         let last_usage = Arc::new(Mutex::new(anthropic::AnthropicUsage::default()));
         let backend: Box<dyn ProviderBackend> = match kind {
             ProviderKind::Ollama => Box::new(ollama::OllamaBackend),
@@ -408,8 +400,16 @@ impl Provider {
         F: Fn() -> Fut,
         Fut: Future<Output = Result<T>>,
     {
+        // If stream was cancelled (e.g. Ctrl+C), don't retry
+        if STREAM_CANCELLED.load(Ordering::SeqCst) {
+            return Err(anyhow!("request cancelled by user"));
+        }
         let mut last_err = None;
         for attempt in 0..crate::constants::LLM_RETRY_MAX_ATTEMPTS as usize {
+            // Check cancellation before each retry attempt
+            if STREAM_CANCELLED.load(Ordering::SeqCst) {
+                return Err(anyhow!("request cancelled by user"));
+            }
             match f().await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
@@ -418,10 +418,16 @@ impl Provider {
                         return Err(e);
                     }
                     last_err = Some(e);
-                    sleep(Duration::from_millis(
-                        crate::constants::LLM_RETRY_BASE_DELAY_MS * 2u64.pow(attempt as u32),
-                    ))
-                    .await;
+                    let delay =
+                        Duration::from_millis(crate::constants::LLM_RETRY_BASE_DELAY_MS * 2u64.pow(attempt as u32));
+                    // Check for Ctrl+C during backoff sleep
+                    tokio::select! {
+                        _ = sleep(delay) => {},
+                        _ = tokio::signal::ctrl_c() => {
+                            STREAM_CANCELLED.store(true, Ordering::SeqCst);
+                            return Err(anyhow!("cancelled during retry backoff"));
+                        }
+                    }
                 }
             }
         }
@@ -491,11 +497,11 @@ impl Provider {
 
 // ─── Shared streaming / utility functions ────────────────────────────────
 
-pub fn openai_chat_url(base_url: &str, kind: ProviderKind) -> String {
+pub fn openai_chat_url(base_url: &str, kind: ProviderKind, model: &str) -> String {
     let base = base_url.trim_end_matches('/');
     match kind {
         ProviderKind::Azure => {
-            format!("{base}/chat/completions?api-version=2024-02-15-preview")
+            format!("{base}/openai/deployments/{model}/chat/completions?api-version=2024-02-15-preview")
         }
         _ => format!("{base}/chat/completions"),
     }
@@ -739,7 +745,7 @@ pub(super) async fn openai_compat_complete_json(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<crate::ModelReply> {
-    let url = openai_chat_url(&ctx.base_url, kind);
+    let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
     let resp = add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), kind)
         .json(&json!({
             "model": ctx.model,
@@ -765,15 +771,6 @@ pub(super) async fn openai_compat_complete_json(
     parse_json_fallback(content)
 }
 
-pub(super) fn openai_compat_messages(system_prompt: &str, history: &str, user_prompt: &str) -> Vec<serde_json::Value> {
-    let mut messages = vec![json!({"role": "system", "content": system_prompt})];
-    if !history.is_empty() {
-        messages.push(json!({"role": "user", "content": history}));
-    }
-    messages.push(json!({"role": "user", "content": user_prompt}));
-    messages
-}
-
 pub(super) async fn openai_compat_chat_stream(
     ctx: &ProviderContext,
     kind: ProviderKind,
@@ -782,8 +779,12 @@ pub(super) async fn openai_compat_chat_stream(
     system_prompt: &str,
     history: &str,
 ) -> Result<String> {
-    let url = openai_chat_url(&ctx.base_url, kind);
-    let messages = openai_compat_messages(system_prompt, history, user_prompt);
+    let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
+    let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
+    if !history.is_empty() {
+        messages.push(json!({"role": "user", "content": history}));
+    }
+    messages.push(json!({"role": "user", "content": user_prompt}));
     let resp = add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), kind)
         .json(&json!({
             "model": ctx.model,
@@ -811,7 +812,7 @@ pub(super) async fn openai_compat_chat_stream_with_vision(
     mime_type: &str,
     base64_data: &str,
 ) -> Result<String> {
-    let url = openai_chat_url(&ctx.base_url, kind);
+    let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
     let data_uri = format!("data:{mime_type};base64,{base64_data}");
     let mut messages: Vec<serde_json::Value> = vec![];
     messages.push(json!({"role": "system", "content": system_prompt}));
@@ -850,8 +851,12 @@ pub(super) async fn openai_compat_chat_stream_with_tools(
     history: &str,
     tool_specs: &[tools::ToolSpec],
 ) -> Result<tools::ToolResponse> {
-    let url = openai_chat_url(&ctx.base_url, kind);
-    let messages = openai_compat_messages(system_prompt, history, user_prompt);
+    let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
+    let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
+    if !history.is_empty() {
+        messages.push(json!({"role": "user", "content": history}));
+    }
+    messages.push(json!({"role": "user", "content": user_prompt}));
     let tools_json: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
     let mut payload = json!({
         "model": ctx.model,

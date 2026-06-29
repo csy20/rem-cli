@@ -2,8 +2,8 @@
 //! Provides lint/test tool execution, result formatting, agentic prompt
 //! construction for iterative code generation, and goal signal extraction.
 
-use std::process::Command;
 use std::time::{Duration, Instant};
+use tokio::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -60,16 +60,17 @@ impl LintTarget {
 const TOOL_TIMEOUT_SECS: u64 = 60;
 
 /// Spawns a subprocess with a timeout, returning the output.
-fn run_command_with_timeout(cmd: &str, args: &[&str]) -> ToolOutput {
+async fn run_command_with_timeout(cmd: &str, args: &[&str]) -> ToolOutput {
     let start = Instant::now();
     let cmd_name = cmd.to_string();
-    let cmd_name_for_thread = cmd_name.clone();
-    let args_owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(Command::new(&cmd_name_for_thread).args(&args_owned).output());
-    });
-    match rx.recv_timeout(Duration::from_secs(TOOL_TIMEOUT_SECS)) {
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(TOOL_TIMEOUT_SECS),
+        Command::new(cmd).args(args.iter().copied()).output(),
+    )
+    .await;
+
+    match result {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -102,7 +103,7 @@ fn run_command_with_timeout(cmd: &str, args: &[&str]) -> ToolOutput {
 }
 
 /// Runs the appropriate linter for a file path.
-pub fn run_lint(path: &str) -> ToolOutput {
+pub async fn run_lint(path: &str) -> ToolOutput {
     let target = LintTarget::detect(path);
 
     let (name, cmd, args): (&str, &str, Vec<&str>) = match target {
@@ -127,14 +128,14 @@ pub fn run_lint(path: &str) -> ToolOutput {
         }
     };
 
-    let mut result = run_command_with_timeout(cmd, &args);
+    let mut result = run_command_with_timeout(cmd, &args).await;
     result.tool_name = name.to_string();
     result.action = "lint".to_string();
     result
 }
 
 /// Runs the appropriate test runner for a file path (cargo test, pytest, etc.).
-pub fn run_test(path: &str) -> ToolOutput {
+pub async fn run_test(path: &str) -> ToolOutput {
     let target = LintTarget::detect(path);
 
     let (cmd, args): (&str, Vec<&str>) = match target {
@@ -155,7 +156,7 @@ pub fn run_test(path: &str) -> ToolOutput {
         }
     };
 
-    let mut result = run_command_with_timeout(cmd, &args);
+    let mut result = run_command_with_timeout(cmd, &args).await;
     result.tool_name = "test".to_string();
     result.action = "test".to_string();
     // Truncate stdout if too large

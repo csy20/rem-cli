@@ -26,7 +26,7 @@ fn config_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Saves config to XDG config dir or `~/.config/rem-cli/config.toml`.
-/// Invalidates the in-memory cache so subsequent [`load_config`] calls re-read from disk.
+/// Updates the in-memory cache directly to avoid unnecessary re-reads.
 pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
     if let Some(dir) = config_dir() {
         fs::create_dir_all(&dir)?;
@@ -34,7 +34,9 @@ pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
         let text = toml::to_string_pretty(cfg).context("failed to serialize config")?;
         fs::write(&path, text).context("failed to write config")?;
     }
-    invalidate_config_cache();
+    // Update cache directly instead of invalidating, to avoid re-reading from disk
+    let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    *cache = Some(cfg.clone());
     Ok(())
 }
 
@@ -75,7 +77,9 @@ pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
 
     let dir = if trimmed.is_empty() || trimmed == "." {
         std::env::current_dir().unwrap_or_default()
-    } else if trimmed.starts_with("~/") || trimmed == "~" {
+    } else if trimmed == "~" {
+        dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"))
+    } else if trimmed.starts_with("~/") {
         if let Some(home) = dirs::home_dir() {
             home.join(trimmed.trim_start_matches("~/"))
         } else {
@@ -142,6 +146,9 @@ pub(crate) fn load_config() -> Result<AppConfig> {
 }
 
 /// Invalidates the in-memory config cache so the next [`load_config`] re-reads from disk.
+/// Note: `save_config` now updates the cache directly, so this is only needed
+/// for forcing re-reads after external file modifications.
+#[allow(dead_code)]
 pub(crate) fn invalidate_config_cache() {
     let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
     *cache = None;

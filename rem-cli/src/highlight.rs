@@ -2,6 +2,7 @@
 //! Applies ANSI color highlighting to HTML, CSS, and JavaScript code
 //! for prettier display in the terminal during code reviews and diffs.
 
+use std::fmt::Write;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -65,12 +66,16 @@ fn highlight_css(code: &str) -> String {
         .to_string();
     out = RE_CSS_PROP
         .replace_all(&out, |caps: &regex::Captures| {
-            format!("{}{}{}", &caps[1], ui::theme::paint_warning(&t, &caps[2]), &caps[3])
+            let mut s = String::new();
+            let _ = write!(s, "{}{}{}", &caps[1], ui::theme::paint_warning(&t, &caps[2]), &caps[3]);
+            s
         })
         .to_string();
     out = RE_CSS_VAL
         .replace_all(&out, |caps: &regex::Captures| {
-            format!("{}{}", &caps[1], ui::theme::paint_success_label(&t, caps[2].trim()))
+            let mut s = String::new();
+            let _ = write!(s, "{}{}", &caps[1], ui::theme::paint_success_label(&t, caps[2].trim()));
+            s
         })
         .to_string();
     out

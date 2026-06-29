@@ -24,20 +24,22 @@ impl SpinnerGuard {
     pub fn new(msg: &'static str) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let r = running.clone();
+        let t = theme::active();
+        let glyph_cache: Vec<String> = [
+            "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}",
+            "\u{280F}",
+        ]
+        .iter()
+        .map(|c| theme::paint(&t, "accent_dim", c, true))
+        .collect();
+        let label = theme::paint(&t, "text_faint", msg, false);
         let handle = tokio::spawn(async move {
-            let chars = [
-                "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
-                "\u{2807}", "\u{280F}",
-            ];
             let mut i = 0usize;
             while r.load(Ordering::Relaxed) {
-                let t = theme::active();
-                let glyph = theme::paint(&t, "accent_dim", chars[i], true);
-                let label = theme::paint(&t, "text_faint", msg, false);
-                eprint!("\r  {glyph}  {label}");
+                eprint!("\r  {}  {}", glyph_cache[i], label);
                 let _ = io::stderr().flush();
                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-                i = (i + 1) % chars.len();
+                i = (i + 1) % glyph_cache.len();
             }
         });
         Self {

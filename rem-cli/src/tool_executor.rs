@@ -22,8 +22,8 @@ pub(crate) async fn execute_tool_call(tool_call: &ToolCall, project_dir: &std::p
         "read_file" => execute_read_file(tool_call, project_dir),
         "write_file" => execute_write_file(tool_call, project_dir),
         "search_files" => execute_search_files(tool_call, project_dir),
-        "run_lint" => execute_tool_lint(tool_call, project_dir),
-        "run_test" => execute_tool_test(tool_call, project_dir),
+        "run_lint" => execute_tool_lint(tool_call, project_dir).await,
+        "run_test" => execute_tool_test(tool_call, project_dir).await,
         "web_search" => execute_web_search(tool_call).await,
         "list_files" => execute_list_files(tool_call, project_dir),
         "run_command" => execute_run_command(tool_call, project_dir).await,
@@ -114,7 +114,7 @@ fn execute_search_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> 
     }
 }
 
-fn execute_tool_lint(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_tool_lint(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let path_str = match extract_arg(tool_call, "path") {
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
@@ -123,7 +123,7 @@ fn execute_tool_lint(tool_call: &ToolCall, project_dir: &std::path::Path) -> Too
         Some(p) => p,
         None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
     };
-    let result = run_lint(&path.to_string_lossy());
+    let result = run_lint(&path.to_string_lossy()).await;
     ToolCallResult {
         call_id: tool_call.id.clone(),
         name: "run_lint".into(),
@@ -137,7 +137,7 @@ fn execute_tool_lint(tool_call: &ToolCall, project_dir: &std::path::Path) -> Too
     }
 }
 
-fn execute_tool_test(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_tool_test(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let path_str = match extract_arg(tool_call, "path") {
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
@@ -146,7 +146,7 @@ fn execute_tool_test(tool_call: &ToolCall, project_dir: &std::path::Path) -> Too
         Some(p) => p,
         None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
     };
-    let result = run_test(&path.to_string_lossy());
+    let result = run_test(&path.to_string_lossy()).await;
     ToolCallResult {
         call_id: tool_call.id.clone(),
         name: "run_test".into(),

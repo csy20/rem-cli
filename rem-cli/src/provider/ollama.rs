@@ -360,10 +360,17 @@ impl ProviderBackend for OllamaBackend {
             .context("failed to call Ollama chat API")?;
 
         if !resp.status().is_success() {
-            let text = self
-                .complete_chat_stream(ctx, system_prompt, user_prompt, history)
-                .await?;
-            return Ok(ToolResponse::Text(text));
+            let status = resp.status();
+            // Only fall back to non-tool chat on 404 (tool calling not supported by model)
+            if status == reqwest::StatusCode::NOT_FOUND {
+                let text = self
+                    .complete_chat_stream(ctx, system_prompt, user_prompt, history)
+                    .await?;
+                return Ok(ToolResponse::Text(text));
+            }
+            // Propagate all other errors (auth, server errors, etc.)
+            let err = super::handle_ollama_error(resp, &url, &ctx.model).await;
+            return Err(err.unwrap_err());
         }
 
         let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);

@@ -27,7 +27,7 @@ impl ReasoningEffort {
 }
 
 /// Configuration for thinking/reasoning models.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ReasoningConfig {
     /// Whether to enable reasoning/thinking mode.
     pub enabled: bool,

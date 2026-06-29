@@ -44,14 +44,6 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
             if let Some(parent) = dir.parent() {
                 if let Ok(canon_parent) = parent.canonicalize() {
                     if let Some(name) = dir.file_name() {
-                        let name_str = name.to_string_lossy();
-                        if name_str.contains("..") {
-                            eprintln!(
-                                "  {} path traversal blocked",
-                                ui::theme::paint_error_label(&t, "\u{2717}")
-                            );
-                            return;
-                        }
                         let safe = canon_parent.join(name);
                         if safe
                             .canonicalize()

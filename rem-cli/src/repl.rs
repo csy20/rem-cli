@@ -297,10 +297,6 @@ async fn dispatch_slash_command(
             handle_copy(session, n);
             return false;
         }
-        "/lint" => {
-            handle_lint_with_fallback(session, args);
-            return false;
-        }
         "/find" => {
             handle_find(session, args);
             return false;
@@ -332,6 +328,10 @@ async fn dispatch_slash_command(
         }
         "/refactor" => {
             handle_refactor(client, session, args).await;
+            false
+        }
+        "/lint" => {
+            handle_lint_with_fallback(session, args).await;
             false
         }
         "/review" => {

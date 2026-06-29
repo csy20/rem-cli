@@ -535,7 +535,7 @@ async fn test_azure_complete_json() {
     let response_str =
         r#"{"explanation":"azure test","code":"print('azure')","files":[],"commands":[],"checks":[],"caution":""}"#;
     Mock::given(method("POST"))
-        .and(path("/chat/completions"))
+        .and(path("/openai/deployments/gpt-4/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "choices": [{"message": {"content": response_str}}]
         })))
@@ -561,7 +561,7 @@ async fn test_azure_complete_json() {
 async fn test_azure_chat_stream() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/chat/completions"))
+        .and(path("/openai/deployments/gpt-4/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_string(
             "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" from Azure\"}}]}\ndata: [DONE]\n"
         ))
@@ -586,7 +586,7 @@ async fn test_azure_chat_stream() {
 async fn test_azure_api_error() {
     let mock_server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/chat/completions"))
+        .and(path("/openai/deployments/gpt-4/chat/completions"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
             "error": "invalid_api_key"
         })))

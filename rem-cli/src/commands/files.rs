@@ -372,9 +372,20 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
     }
 
     for entry in &batch {
-        if entry.original.is_some() {
+        if let Some(ref original) = entry.original {
+            // Check if file was modified since we wrote it
+            if let Ok(current) = fs::read_to_string(&entry.path) {
+                if current != *original && !current.is_empty() {
+                    println!(
+                        "  {} {} has been modified since write — skipping restore (current differs from backup)",
+                        ui::theme::paint_warning(&t, "\u{258C}"),
+                        ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
+                    );
+                    continue;
+                }
+            }
             // Restore original content
-            if let Err(e) = fs::write(&entry.path, entry.original.as_deref().unwrap_or_default()) {
+            if let Err(e) = fs::write(&entry.path, original) {
                 println!(
                     "  {} failed to restore {}: {}",
                     ui::theme::paint_error_label(&t, "\u{258C}"),
@@ -499,7 +510,7 @@ pub(crate) fn print_last_files(session: &ChatSession) {
 /// Copies the last response to clipboard (`/copy` command).
 pub(crate) fn handle_copy(session: &ChatSession, n: usize) {
     let t = ui::theme::active();
-    let response = if n == 1 || session.history_mgr.history.is_empty() {
+    let response = if n == 1 {
         session
             .history_mgr
             .history

@@ -139,17 +139,14 @@ pub fn retrieve_relevant_chunks<'a>(
     chosen
 }
 
-/// Counts occurrences of `word` in lowercased `text`.
+/// Counts occurrences of `word` as a standalone token in lowercased `text`.
 /// Both `text` and `word` are expected to be pre-lowercased.
+/// Uses the same tokenization as the indexer for consistency.
 fn count_occurrences(text: &str, word: &str) -> usize {
     if word.is_empty() || text.is_empty() {
         return 0;
     }
-    let mut count = 0;
-    let mut start = 0;
-    while let Some(pos) = text[start..].find(word) {
-        count += 1;
-        start += pos + 1;
-    }
-    count
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() > 2 && *t == word)
+        .count()
 }

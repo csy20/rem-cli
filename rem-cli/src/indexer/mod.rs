@@ -188,7 +188,6 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     let target_chunk = crate::constants::INDEX_TARGET_CHUNK_BYTES;
     let existing_mtimes = load_existing_mtimes(root);
 
-    let mut file_entries: Vec<FileEntryToProcess> = Vec::new();
     let mut file_mtimes: HashMap<String, u64> = HashMap::new();
     let mut changed_files = 0u32;
     let mut scanned_count = 0u32;
@@ -294,14 +293,13 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
         }
     }
 
-    // Phase 2: Read files in parallel
-    let results: Vec<Option<FileEntryToProcess>> = walk_entries
+    // Phase 2: Read files in parallel and chain directly into chunking
+    let file_entries: Vec<FileEntryToProcess> = walk_entries
         .par_iter()
-        .map(|we| {
-            let text = match std::fs::read_to_string(&we.path) {
-                Ok(t) if !t.trim().is_empty() => t,
-                _ => return None,
-            };
+        .filter_map(|we| {
+            let text = std::fs::read_to_string(&we.path)
+                .ok()
+                .filter(|t| !t.trim().is_empty())?;
             let line_count = text.lines().count().max(1);
             Some(FileEntryToProcess {
                 rel_str: we.rel_str.clone(),
@@ -311,10 +309,6 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
             })
         })
         .collect();
-
-    for fe in results.into_iter().flatten() {
-        file_entries.push(fe);
-    }
 
     let mut chunks: Vec<IndexChunk> = file_entries
         .into_par_iter()

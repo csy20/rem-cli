@@ -152,7 +152,9 @@ pub(crate) fn resolve_safe_path(base: &Path, rel: &str) -> Option<PathBuf> {
     let t = ui::theme::active();
     let expanded = if rel.starts_with('~') {
         if let Some(home) = dirs::home_dir() {
-            if rel == "~" || rel.starts_with("~/") {
+            if rel == "~" {
+                home
+            } else if rel.starts_with("~/") {
                 home.join(rel.trim_start_matches("~/"))
             } else {
                 PathBuf::from(rel)

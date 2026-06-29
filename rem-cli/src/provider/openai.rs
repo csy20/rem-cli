@@ -276,7 +276,7 @@ impl ProviderBackend for OpenAIBackend {
         user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = super::openai_chat_url(&ctx.base_url, ctx.kind);
+        let url = super::openai_chat_url(&ctx.base_url, ctx.kind, &ctx.model);
 
         let is_reasoning = crate::reasoning::is_reasoning_model(&ctx.model);
         let no_system = crate::reasoning::system_prompt_not_supported(&ctx.model);

@@ -63,8 +63,14 @@ pub(crate) fn print_welcome(client: &Provider) {
 
 /// Builds a file tree listing of the project directory (depth-limited, size-capped).
 pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
-    let mut out = String::from("Project files:\n");
+    let header = "Project files:\n";
+    let header_len = header.len();
+    if max_bytes <= header_len {
+        return String::new();
+    }
+    let mut out = String::from(header);
     let max_depth = 4;
+    let entries_budget = max_bytes - header_len;
 
     let mut entries: Vec<String> = Vec::new();
     let mut entries_size: usize = 0;
@@ -108,7 +114,7 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
             format!("{}  ({} bytes)", rel_str, size)
         };
         let entry_len = entry_str.len() + 1;
-        if out.len() + entries_size + entry_len > max_bytes {
+        if entries_size + entry_len > entries_budget {
             break;
         }
         entries.push(entry_str);
@@ -216,10 +222,12 @@ pub(crate) fn validate_chat_response(response: &str, intent: &TaskIntent, mode: 
         let has_code_fences = response.contains("```");
         let has_multi_file = response.contains("### ") && has_code_fences;
         let trimmed_response = response.trim();
-        let has_json = trimmed_response.starts_with('{')
-            && trimmed_response.ends_with('}')
-            && (response.contains("\"code\"") || response.contains("\"files\""))
-            && serde_json::from_str::<serde_json::Value>(trimmed_response).is_ok();
+        let has_json = serde_json::from_str::<serde_json::Value>(trimmed_response)
+            .ok()
+            .is_some_and(|v| {
+                v.get("code").and_then(|c| c.as_str()).is_some_and(|c| !c.is_empty())
+                    || v.get("files").and_then(|f| f.as_array()).is_some_and(|f| !f.is_empty())
+            });
 
         if has_multi_file || has_json {
             let code_stripped = strip_code_blocks(response);
