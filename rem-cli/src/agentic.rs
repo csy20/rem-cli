@@ -161,8 +161,11 @@ pub async fn run_test(path: &str) -> ToolOutput {
     result.action = "test".to_string();
     // Truncate stdout if too large
     if result.stdout.len() > 2000 {
-        let truncated: String = result.stdout.chars().take(2000).collect();
-        result.stdout = format!("{}...\n[truncated to 2000 chars]", truncated);
+        let cutoff = (0..=2000)
+            .rev()
+            .find(|&i| result.stdout.is_char_boundary(i))
+            .unwrap_or(0);
+        result.stdout = format!("{}...\n[truncated to 2000 chars]", &result.stdout[..cutoff]);
     }
     result
 }

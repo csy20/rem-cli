@@ -73,8 +73,11 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     {
         return true;
     }
-    // Destructive wget/curl to pipe to shell
-    if (normalized.starts_with("wget ") || normalized.starts_with("curl ")) && normalized.contains("| sh") {
+    // Destructive wget/curl to pipe to shell (check anywhere, not just first word)
+    let has_wget_or_curl = normalized
+        .split_whitespace()
+        .any(|w| w.ends_with("wget") || w.ends_with("curl"));
+    if has_wget_or_curl && normalized.contains("| sh") {
         return true;
     }
     // rm -rf targeting root or common critical dirs

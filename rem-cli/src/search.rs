@@ -48,7 +48,12 @@ pub(crate) async fn perform_web_search(
 async fn search_google(client: &Client, query: &str, api_key: &str, cse_id: &str) -> Result<Vec<SearchResult>> {
     let resp = client
         .get("https://www.googleapis.com/customsearch/v1")
-        .query(&[("key", api_key), ("cx", cse_id), ("q", query), ("num", "8")])
+        .query(&[
+            ("key", api_key),
+            ("cx", cse_id),
+            ("q", query),
+            ("num", &crate::constants::SEARCH_MAX_RESULTS.to_string()),
+        ])
         .send()
         .await
         .context("Google search request failed")?;
@@ -71,7 +76,10 @@ async fn search_bing(client: &Client, query: &str, api_key: &str) -> Result<Vec<
     let resp = client
         .get("https://api.bing.microsoft.com/v7.0/search")
         .header("Ocp-Apim-Subscription-Key", api_key)
-        .query(&[("q", query), ("count", "8")])
+        .query(&[
+            ("q", query),
+            ("count", &crate::constants::SEARCH_MAX_RESULTS.to_string()),
+        ])
         .send()
         .await
         .context("Bing search request failed")?;
@@ -115,7 +123,7 @@ fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
     };
 
     let mut results = Vec::new();
-    for element in result_elements.iter().take(8) {
+    for element in result_elements.iter().take(crate::constants::SEARCH_MAX_RESULTS) {
         let title = title_selector
             .as_ref()
             .and_then(|sel| element.select(sel).next())

@@ -164,11 +164,9 @@ static ACTIVE_THEME: LazyLock<RwLock<Arc<Theme>>> = LazyLock::new(|| {
 
 /// Converts a hex color string to an ANSI foreground escape code.
 fn hex_to_ansi_fg(hex: &str) -> String {
-    debug_assert!(
-        hex.as_bytes().first() == Some(&b'#') && hex.len() == 7,
-        "bad hex: {}",
-        hex
-    );
+    if hex.as_bytes().first() != Some(&b'#') || hex.len() != 7 {
+        return String::new();
+    }
     let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(0);
     let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(0);
     let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(0);
@@ -180,11 +178,9 @@ fn hex_to_ansi_fg(hex: &str) -> String {
 
 /// Converts a hex color string to an ANSI background escape code.
 fn hex_to_ansi_bg(hex: &str) -> String {
-    debug_assert!(
-        hex.as_bytes().first() == Some(&b'#') && hex.len() == 7,
-        "bad hex: {}",
-        hex
-    );
+    if hex.as_bytes().first() != Some(&b'#') || hex.len() != 7 {
+        return String::new();
+    }
     let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(0);
     let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(0);
     let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(0);

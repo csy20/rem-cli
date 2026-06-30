@@ -5,7 +5,9 @@
 //! These functions are ready for CLI integration (e.g., via a `/watch` REPL command).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -36,12 +38,15 @@ where
             Ok(w) => w,
             Err(e) => {
                 warn!("failed to create file watcher: {}", e);
+                // Signal failure by closing the sender
+                let _ = tx;
                 return;
             }
         };
 
         if let Err(e) = watcher.watch(&watch_path, RecursiveMode::Recursive) {
             warn!("failed to watch directory: {}", e);
+            let _ = tx;
             return;
         }
 
@@ -89,13 +94,22 @@ where
 /// Call with the project root path. Returns a sender that stops the watcher.
 pub fn watch_and_reindex(root: &Path) -> Result<mpsc::Sender<()>> {
     let root_clone = root.to_path_buf();
-    watch_directory(root, move || {
-        let root = root_clone.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = auto_reindex(&root) {
-                warn!("auto-reindex failed: {}", e);
+    let reindex_busy = Arc::new(AtomicBool::new(false));
+    watch_directory(root, {
+        let reindex_busy = Arc::clone(&reindex_busy);
+        move || {
+            if reindex_busy.swap(true, Ordering::SeqCst) {
+                return;
             }
-        });
+            let root = root_clone.clone();
+            let reindex_busy = Arc::clone(&reindex_busy);
+            std::thread::spawn(move || {
+                if let Err(e) = auto_reindex(&root) {
+                    warn!("auto-reindex failed: {}", e);
+                }
+                reindex_busy.store(false, Ordering::SeqCst);
+            });
+        }
     })
 }
 

@@ -51,8 +51,10 @@ fn pager_args(cmd: &str) -> Vec<&str> {
 /// Cached result of checking whether a pager is available on this system.
 static PAGER_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
     let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    let pager_parts: Vec<&str> = pager_cmd.split_whitespace().collect();
     // Use --help which most pagers support (more portable than --version)
-    Command::new(&pager_cmd)
+    Command::new(pager_parts.first().copied().unwrap_or("less"))
+        .args(&pager_parts[1..])
         .arg("--help")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -67,10 +67,6 @@ fn setup_global_ctrlc_handler() {
                 Err(e) => {
                     consecutive_errors += 1;
                     tracing::error!("ctrl-c handler error (count={}): {}", consecutive_errors, e);
-                    if consecutive_errors >= 5 {
-                        tracing::error!("too many ctrl-c handler errors, stopping");
-                        break;
-                    }
                     let delay_ms = [100u64, 200, 400, 1000][(consecutive_errors as usize).saturating_sub(1).min(3)];
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
@@ -111,7 +107,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let verbose = cli.verbose;
 
-    let mut cfg = load_config().unwrap_or_default();
+    let mut cfg = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to load config, using defaults: {e}");
+            crate::cli::AppConfig::default()
+        }
+    };
     if let Some(m) = cli.model {
         cfg.model = m;
     }

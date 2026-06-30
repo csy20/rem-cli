@@ -5,19 +5,19 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
 async fn test_api_url_without_api_suffix() {
-    let url = api_url("http://localhost:11434", "tags");
+    let url = ollama_api_url("http://localhost:11434", "tags");
     assert_eq!(url, "http://localhost:11434/api/tags");
 }
 
 #[tokio::test]
 async fn test_api_url_with_api_suffix() {
-    let url = api_url("http://localhost:11434/api", "tags");
+    let url = ollama_api_url("http://localhost:11434/api", "tags");
     assert_eq!(url, "http://localhost:11434/api/tags");
 }
 
 #[tokio::test]
 async fn test_api_url_trailing_slash() {
-    let url = api_url("http://localhost:11434/", "generate");
+    let url = ollama_api_url("http://localhost:11434/", "generate");
     assert_eq!(url, "http://localhost:11434/api/generate");
 }
 

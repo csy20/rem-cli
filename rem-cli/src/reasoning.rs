@@ -53,7 +53,8 @@ impl Default for ReasoningConfig {
 /// Detects if a model name is a reasoning model that needs special handling.
 pub fn is_reasoning_model(model: &str) -> bool {
     let lower = model.to_lowercase();
-    lower.starts_with("o1-")
+    lower == "o1"
+        || lower.starts_with("o1-")
         || lower.starts_with("o3-")
         || lower.contains("deepseek-r1")
         || (lower.contains("claude-sonnet-4-20") && lower.contains("thinking"))
@@ -69,7 +70,7 @@ pub fn requires_non_streaming(model: &str) -> bool {
 /// Checks if a model does NOT support system prompts (o1/o3).
 pub fn system_prompt_not_supported(model: &str) -> bool {
     let lower = model.to_lowercase();
-    lower.starts_with("o1-") || lower.starts_with("o3-")
+    lower == "o1" || lower.starts_with("o1-") || lower.starts_with("o3-")
 }
 
 #[cfg(test)]

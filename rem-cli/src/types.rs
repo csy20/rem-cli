@@ -63,7 +63,7 @@ impl ModelReply {
         for line in raw_text.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with('$') {
-                commands.push(trimmed.trim_start_matches('$').trim().to_string());
+                commands.push(trimmed.strip_prefix('$').unwrap_or(trimmed).trim().to_string());
             } else if looks_like_shell_command(trimmed) {
                 commands.push(trimmed.to_string());
             }
@@ -119,7 +119,11 @@ pub(crate) fn extract_code_blocks_with_names(text: &str) -> Vec<FileEntry> {
             continue;
         }
 
-        if let Some(name) = trimmed.strip_prefix("### ").or_else(|| trimmed.strip_prefix("## ")) {
+        if let Some(name) = trimmed
+            .strip_prefix("### ")
+            .or_else(|| trimmed.strip_prefix("## "))
+            .or_else(|| trimmed.strip_prefix("# "))
+        {
             current_name = name.trim().to_string();
             continue;
         }

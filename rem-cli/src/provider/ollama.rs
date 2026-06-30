@@ -150,7 +150,7 @@ mod tests {
 #[async_trait]
 impl ProviderBackend for OllamaBackend {
     async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
-        let url = super::api_url(&ctx.base_url, "tags");
+        let url = super::ollama_api_url(&ctx.base_url, "tags");
         let resp = ctx.client.get(url).send().await?;
         if !resp.status().is_success() {
             return Err(anyhow!("Ollama unreachable at {}", ctx.base_url));
@@ -165,7 +165,7 @@ impl ProviderBackend for OllamaBackend {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<crate::ModelReply> {
-        let url = super::api_url(&ctx.base_url, "generate");
+        let url = super::ollama_api_url(&ctx.base_url, "generate");
         let final_prompt = format!("{system_prompt}\n\nUser request:\n{user_prompt}\n\nReturn JSON only.");
         let payload = json!({
             "model": ctx.model,
@@ -216,7 +216,7 @@ impl ProviderBackend for OllamaBackend {
         user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let url = super::api_url(&ctx.base_url, "chat");
+        let url = super::ollama_api_url(&ctx.base_url, "chat");
         let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
         if !history.is_empty() {
             messages.push(json!({"role": "user", "content": history}));
@@ -270,7 +270,7 @@ impl ProviderBackend for OllamaBackend {
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        let url = super::api_url(&ctx.base_url, "chat");
+        let url = super::ollama_api_url(&ctx.base_url, "chat");
         let mut messages: Vec<serde_json::Value> = vec![];
         if !history.is_empty() {
             messages.push(json!({"role": "user", "content": history}));
@@ -330,7 +330,7 @@ impl ProviderBackend for OllamaBackend {
         history: &str,
         tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        let url = super::api_url(&ctx.base_url, "chat");
+        let url = super::ollama_api_url(&ctx.base_url, "chat");
 
         let mut messages: Vec<serde_json::Value> = vec![];
         messages.push(json!({"role": "system", "content": system_prompt}));

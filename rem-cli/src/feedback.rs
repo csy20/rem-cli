@@ -112,10 +112,22 @@ impl FeedbackTracker {
     pub fn flush(&mut self) {
         if self.dirty {
             if let Some(parent) = self.path.parent() {
-                let _ = fs::create_dir_all(parent);
+                if let Err(e) = fs::create_dir_all(parent) {
+                    tracing::warn!("failed to create feedback dir: {e}");
+                    return;
+                }
             }
-            if let Ok(json) = serde_json::to_string_pretty(&self.store) {
-                let _ = fs::write(&self.path, json);
+            match serde_json::to_string_pretty(&self.store) {
+                Ok(json) => {
+                    if let Err(e) = fs::write(&self.path, json) {
+                        tracing::warn!("failed to write feedback: {e}");
+                        return;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to serialize feedback: {e}");
+                    return;
+                }
             }
             self.dirty = false;
         }

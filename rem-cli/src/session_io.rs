@@ -221,6 +221,7 @@ pub(crate) fn validate_chat_response(response: &str, intent: &TaskIntent, mode: 
     if *intent != TaskIntent::CodeAction && *mode != RunMode::Code {
         let has_code_fences = response.contains("```");
         let has_multi_file = response.contains("### ") && has_code_fences;
+        let has_lone_fence = has_code_fences && !response.contains("### ");
         let trimmed_response = response.trim();
         let has_json = serde_json::from_str::<serde_json::Value>(trimmed_response)
             .ok()
@@ -229,7 +230,7 @@ pub(crate) fn validate_chat_response(response: &str, intent: &TaskIntent, mode: 
                     || v.get("files").and_then(|f| f.as_array()).is_some_and(|f| !f.is_empty())
             });
 
-        if has_multi_file || has_json {
+        if has_multi_file || has_lone_fence || has_json {
             let code_stripped = strip_code_blocks(response);
             if !code_stripped.trim().is_empty() {
                 return (true, code_stripped);

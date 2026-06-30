@@ -240,7 +240,8 @@ fn classify_intent_heuristic(input: &str) -> TaskIntent {
     let has_create = has_creation_intent_lower(&lower);
 
     if has_create {
-        // Even question-form creation intents ("how do I create X") should produce code
+        // has_creation_intent_lower already excludes question prefixes,
+        // so only direct creation statements reach here.
         return TaskIntent::CodeAction;
     }
 

@@ -1,6 +1,7 @@
 //! Centralized magic constants for the REM CLI.
 //! All timeouts, byte limits, retry counts, and other tunable values
 //! live here to avoid scattering literals across the codebase.
+//! Constants may be unused in code but serve as documented, centrally-tuned defaults.
 #![allow(dead_code)]
 
 use std::time::Duration;

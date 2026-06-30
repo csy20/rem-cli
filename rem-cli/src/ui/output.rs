@@ -35,7 +35,7 @@ impl SpinnerGuard {
         let label = theme::paint(&t, "text_faint", msg, false);
         let handle = tokio::spawn(async move {
             let mut i = 0usize;
-            while r.load(Ordering::Relaxed) {
+            while r.load(Ordering::SeqCst) {
                 eprint!("\r  {}  {}", glyph_cache[i], label);
                 let _ = io::stderr().flush();
                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -50,10 +50,10 @@ impl SpinnerGuard {
 
     /// Stops the spinner and clears the line.
     pub fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        // Signal graceful shutdown via AtomicBool instead of abort.
-        // The task will exit on its next tick (within 80ms).
-        self.handle.take();
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
         eprint!("\r{}\r", " ".repeat(60));
         let _ = io::stderr().flush();
     }

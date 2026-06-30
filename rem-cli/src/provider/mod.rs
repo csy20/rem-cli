@@ -262,7 +262,7 @@ pub(crate) fn api_key_env_var(kind: ProviderKind) -> Option<&'static str> {
     API_KEY_ENV_VARS.iter().find(|(k, _)| *k == kind).map(|(_, e)| *e)
 }
 
-pub fn api_url(base_url: &str, endpoint: &str) -> String {
+pub fn ollama_api_url(base_url: &str, endpoint: &str) -> String {
     let base = base_url.trim_end_matches('/');
     let ep = endpoint.trim_start_matches('/');
     if base.ends_with("/api") {
@@ -570,12 +570,12 @@ where
     F: FnMut(&str) -> Result<bool>,
 {
     let mut stream = resp.bytes_stream();
-    let mut buf = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
+    let mut buf: Vec<u8> = Vec::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
     let mut cursor = 0usize;
 
     loop {
         if STREAM_CANCELLED.load(Ordering::SeqCst) {
-            break;
+            return Err(anyhow!("stream cancelled by user"));
         }
         let chunk = match timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
             Ok(Some(Ok(c))) => c,
@@ -583,14 +583,14 @@ where
             Ok(None) => break,
             Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
         };
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        buf.extend_from_slice(&chunk);
         loop {
             let tail = &buf[cursor..];
-            match tail.find('\n') {
+            match tail.iter().position(|&b| b == b'\n') {
                 Some(pos) => {
-                    let line = &tail[..pos];
+                    let line_bytes = &tail[..pos];
                     cursor += pos + 1;
-                    let trimmed = line.trim();
+                    let trimmed = std::str::from_utf8(line_bytes).map(|s| s.trim()).unwrap_or("");
                     if trimmed.is_empty() {
                         continue;
                     }
@@ -600,6 +600,10 @@ where
                 }
                 None => break,
             }
+        }
+        if cursor > buf.len() / 2 {
+            buf.drain(..cursor);
+            cursor = 0;
         }
     }
     Ok(())

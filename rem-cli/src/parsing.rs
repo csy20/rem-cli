@@ -99,7 +99,11 @@ pub fn guess_filename(lines: &[&str]) -> String {
             || trimmed.starts_with('#')
             || trimmed.starts_with("@media")
             || trimmed.starts_with(":root")
-            || (trimmed.contains("{") && trimmed.contains("}") && !trimmed.contains("function"))
+            || (trimmed.contains("{")
+                && trimmed.contains("}")
+                && !trimmed.contains("function")
+                && !trimmed.starts_with('{')
+                && !trimmed.contains("=>"))
         {
             return "style.css".to_string();
         }

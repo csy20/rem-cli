@@ -89,14 +89,14 @@ fn highlight_js(code: &str) -> String {
     out = RE_JS_COMMENT
         .replace_all(&out, |caps: &regex::Captures| ui::theme::paint_dim(&t, &caps[1]))
         .to_string();
-    out = RE_JS_STR
-        .replace_all(&out, |caps: &regex::Captures| {
-            ui::theme::paint_success_label(&t, &caps[1])
-        })
-        .to_string();
     out = RE_JS_KW
         .replace_all(&out, |caps: &regex::Captures| {
             ui::theme::paint(&t, "accent_info", &caps[1], true)
+        })
+        .to_string();
+    out = RE_JS_STR
+        .replace_all(&out, |caps: &regex::Captures| {
+            ui::theme::paint_success_label(&t, &caps[1])
         })
         .to_string();
     out
