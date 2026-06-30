@@ -12,7 +12,10 @@ pub async fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
         .ok();
     let client = match client {
         Some(c) => c,
-        None => return,
+        None => {
+            tracing::warn!("failed to build HTTP client for embeddings (Ollama unavailable?)");
+            return;
+        }
     };
 
     let url = format!("{}/api/embed", ollama_url.trim_end_matches('/'));
@@ -20,20 +23,29 @@ pub async fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
     for batch in chunks.chunks_mut(batch_size) {
         let mut futures = Vec::with_capacity(batch.len());
         for chunk in batch.iter() {
-            let text = if chunk.content.len() > 8000 {
-                &chunk.content[..8000]
+            let byte_len = chunk.content.len();
+            let cutoff = if byte_len > 8000 {
+                (0..=8000)
+                    .rev()
+                    .find(|&i| chunk.content.is_char_boundary(i))
+                    .unwrap_or(0)
             } else {
-                &chunk.content
+                byte_len
             };
-            if text.trim().is_empty() {
-                continue;
-            }
+            let text = if byte_len > cutoff {
+                chunk.content[..cutoff].to_string()
+            } else {
+                chunk.content.clone()
+            };
             let payload = serde_json::json!({
                 "model": "nomic-embed-text",
                 "input": text
             });
             let req = client.post(&url).json(&payload).send();
             futures.push(async move {
+                if text.trim().is_empty() {
+                    return None;
+                }
                 let resp = req.await.ok()?;
                 let body: serde_json::Value = resp.json().await.ok()?;
                 let embeddings = body.get("embeddings")?.as_array()?;

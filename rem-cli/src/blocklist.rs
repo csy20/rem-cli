@@ -49,6 +49,8 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
         || normalized.ends_with("rm -rf /")
         || normalized.contains("rm -rf /;")
         || normalized.contains("rm -rf /&")
+        || normalized.contains("rm -rf /|")
+        || normalized.contains("rm -rf /|&")
     {
         return true;
     }

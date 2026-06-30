@@ -65,13 +65,37 @@ fn initialize_session(client: &Provider, cfg: &mut AppConfig) -> Result<ChatSess
 }
 
 /// Returns true if the input has unbalanced brackets that need continuation.
+/// Skips bracket counting inside string literals to avoid false positives
+/// (e.g. `print("{")` should not trigger multi-line mode).
 fn needs_continuation(line: &str) -> bool {
     let trimmed = line.trim_end();
     if trimmed.ends_with('\\') {
         return true;
     }
     let mut opens: Vec<char> = Vec::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escape = false;
     for c in trimmed.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' && (in_single_quote || in_double_quote) {
+            escape = true;
+            continue;
+        }
+        if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            continue;
+        }
+        if in_single_quote || in_double_quote {
+            continue;
+        }
         match c {
             '{' | '(' | '[' => opens.push(c),
             '}' => {
@@ -362,12 +386,10 @@ fn build_llm_prompt(session: &mut ChatSession, trimmed: &str, intent: &TaskInten
     let final_prompt = if needs_path {
         let path = prompt_for_path(session).unwrap_or_else(|_| trimmed.to_string());
         format!("User request: {}\n\nSave file at: {}", trimmed, path)
+    } else if let Some(ref dir) = session.ctx.project_dir {
+        format!("User request: {}\n\nWorking directory: {}", trimmed, dir.display())
     } else {
-        if let Some(ref dir) = session.ctx.project_dir {
-            format!("User request: {}\n\nWorking directory: {}", trimmed, dir.display())
-        } else {
-            format!("User request: {}", trimmed)
-        }
+        format!("User request: {}", trimmed)
     };
 
     let search_ctx = session.build_search_context();
@@ -479,7 +501,13 @@ fn handle_llm_response(
         text.trim().to_string()
     };
 
-    session.last_tokens = estimate_tokens(&cleaned) as u32;
+    // Prefer real token counts from providers that track usage (e.g. Anthropic)
+    let usage = client.anthropic_usage();
+    session.last_tokens = if usage.output_tokens > 0 {
+        usage.output_tokens
+    } else {
+        estimate_tokens(&cleaned) as u32
+    };
 
     let treat_as_code = *intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
     if treat_as_code {
@@ -680,6 +708,8 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         }
 
         if exit_requested() {
+            session.save_history();
+            session.auto_save_session();
             break;
         }
     }

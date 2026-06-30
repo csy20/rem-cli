@@ -126,6 +126,7 @@ impl ProviderBackend for BedrockBackend {
                 Ok(Some(ConverseStreamOutput::ContentBlockDelta(delta))) => {
                     if let Some(aws_sdk_bedrockruntime::types::ContentBlockDelta::Text(t)) = delta.delta() {
                         full_text.push_str(t);
+                        super::emit_token(t);
                     }
                 }
                 Ok(Some(_)) => {}

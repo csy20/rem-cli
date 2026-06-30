@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 
 use super::{CodebaseIndex, IndexChunk};
 
-/// Tokenizes text into lowercase alphanumeric tokens (min 3 chars).
+/// Tokenizes text into lowercase alphanumeric tokens (min 2 chars).
 pub(crate) fn tokenize(text: &str) -> Vec<String> {
     let estimated = text.len() / 20;
     let mut tokens = Vec::with_capacity(estimated.max(16));
     tokens.extend(
         text.split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() > 2)
+            .filter(|w| w.len() > 1)
             .map(|w| w.to_lowercase()),
     );
     tokens
@@ -147,6 +147,6 @@ fn count_occurrences(text: &str, word: &str) -> usize {
         return 0;
     }
     text.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() > 2 && *t == word)
+        .filter(|t| t.len() > 1 && *t == word)
         .count()
 }

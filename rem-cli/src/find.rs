@@ -135,12 +135,19 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
             format!("(?i){}", query)
         };
         let mut cache = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        Some(
-            cache
-                .entry(re_query.clone())
-                .or_insert_with(|| regex::Regex::new(&re_query).expect("invalid regex pattern"))
-                .clone(),
-        )
+        let re = match regex::Regex::new(&re_query) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "  {} invalid regex pattern: {}",
+                    crate::ui::theme::paint_error_label(&crate::ui::theme::active(), "error:"),
+                    e
+                );
+                report.elapsed_ms = start.elapsed().as_millis();
+                return report;
+            }
+        };
+        Some(cache.entry(re_query.clone()).or_insert(re).clone())
     } else {
         None
     };

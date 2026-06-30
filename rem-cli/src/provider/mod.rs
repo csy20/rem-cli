@@ -382,7 +382,7 @@ impl Provider {
             return true;
         }
         if let Some(req_err) = e.downcast_ref::<reqwest::Error>() {
-            if req_err.is_timeout() || req_err.is_connect() || req_err.is_request() {
+            if req_err.is_timeout() || req_err.is_connect() {
                 return true;
             }
             if let Some(status) = req_err.status() {
@@ -420,13 +420,16 @@ impl Provider {
                     last_err = Some(e);
                     let delay =
                         Duration::from_millis(crate::constants::LLM_RETRY_BASE_DELAY_MS * 2u64.pow(attempt as u32));
-                    // Check for Ctrl+C during backoff sleep
-                    tokio::select! {
-                        _ = sleep(delay) => {},
-                        _ = tokio::signal::ctrl_c() => {
-                            STREAM_CANCELLED.store(true, Ordering::SeqCst);
+                    // Poll STREAM_CANCELLED during backoff sleep (avoids redundant signal listener)
+                    let poll_interval = Duration::from_millis(100);
+                    let mut remaining = delay;
+                    while remaining > Duration::ZERO {
+                        if STREAM_CANCELLED.load(Ordering::SeqCst) {
                             return Err(anyhow!("cancelled during retry backoff"));
                         }
+                        let step = remaining.min(poll_interval);
+                        sleep(step).await;
+                        remaining = remaining.saturating_sub(step);
                     }
                 }
             }
@@ -493,6 +496,42 @@ impl Provider {
     pub(crate) fn anthropic_usage(&self) -> anthropic::AnthropicUsage {
         self.last_usage.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
+}
+
+/// Parses the history string from [`build_chat_history`] into
+/// `(user_content, assistant_content)` pairs so providers can construct
+/// proper message arrays instead of lumping everything into a single user message.
+/// Within each turn, internal `\n` characters are escaped as `\\n` and unescaped here.
+fn parse_history_turns(history: &str) -> Vec<(String, String)> {
+    if history.is_empty() {
+        return Vec::new();
+    }
+    let mut turns = Vec::new();
+    for block in history.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        // Find the REM: boundary within the block (allows multi-line messages)
+        let (user_part, assistant_part) = if let Some(rem_idx) = block.find("\nREM: ") {
+            let user = &block[..rem_idx];
+            let assistant = &block[rem_idx + 6..]; // skip "\nREM: "
+            (user, assistant)
+        } else if let Some(rem_idx) = block.strip_prefix("REM: ") {
+            ("", rem_idx)
+        } else {
+            (block, "")
+        };
+        let user_content = user_part.strip_prefix("User: ").unwrap_or(user_part).trim();
+        let assistant_content = assistant_part.trim();
+        if !user_content.is_empty() || !assistant_content.is_empty() {
+            turns.push((
+                user_content.replace("\\n", "\n"),
+                assistant_content.replace("\\n", "\n"),
+            ));
+        }
+    }
+    turns
 }
 
 // ─── Shared streaming / utility functions ────────────────────────────────
@@ -605,6 +644,7 @@ pub(super) async fn stream_sse_response(resp: reqwest::Response) -> Result<Strin
 pub(super) async fn stream_anthropic_sse(
     resp: reqwest::Response,
     last_usage: &Mutex<anthropic::AnthropicUsage>,
+    show_reasoning: bool,
 ) -> Result<String> {
     stream_lines(resp, |trimmed, full| {
         if trimmed.starts_with("event: ") {
@@ -614,15 +654,27 @@ pub(super) async fn stream_anthropic_sse(
             if let Ok(chunk) = serde_json::from_str::<anthropic::AnthropicStreamChunk>(data) {
                 match chunk.chunk_type.as_deref() {
                     Some("content_block_delta") => {
-                        if let Some(text) = chunk.delta.and_then(|d| d.text) {
-                            full.push_str(&text);
-                            emit_token(&text);
+                        if let Some(ref delta) = chunk.delta {
+                            let is_thinking = delta.delta_type.as_deref() == Some("thinking_delta");
+                            if is_thinking && !show_reasoning {
+                                return Ok(true);
+                            }
+                            if let Some(ref text) = delta.text {
+                                full.push_str(text);
+                                emit_token(text);
+                            }
                         }
                     }
                     Some("content_block_start") => {
-                        if let Some(text) = chunk.content_block.and_then(|b| b.text) {
-                            full.push_str(&text);
-                            emit_token(&text);
+                        if let Some(ref block) = chunk.content_block {
+                            let is_thinking = block.block_type.as_deref() == Some("thinking");
+                            if is_thinking && !show_reasoning {
+                                return Ok(true);
+                            }
+                            if let Some(ref text) = block.text {
+                                full.push_str(text);
+                                emit_token(text);
+                            }
                         }
                     }
                     Some("message_start") => {
@@ -767,7 +819,11 @@ pub(super) async fn openai_compat_complete_json(
         .json()
         .await
         .with_context(|| format!("invalid {provider_name} response"))?;
-    let content = parsed.choices.first().map(|c| c.message.content.as_str()).unwrap_or("");
+    let content = parsed
+        .choices
+        .first()
+        .and_then(|c| c.message.content.as_deref())
+        .unwrap_or("");
     parse_json_fallback(content)
 }
 
@@ -782,7 +838,10 @@ pub(super) async fn openai_compat_chat_stream(
     let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
     let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
     if !history.is_empty() {
-        messages.push(json!({"role": "user", "content": history}));
+        for (user_msg, assistant_msg) in parse_history_turns(history) {
+            messages.push(json!({"role": "user", "content": user_msg}));
+            messages.push(json!({"role": "assistant", "content": assistant_msg}));
+        }
     }
     messages.push(json!({"role": "user", "content": user_prompt}));
     let resp = add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), kind)
@@ -802,6 +861,7 @@ pub(super) async fn openai_compat_chat_stream(
     stream_sse_response(resp).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn openai_compat_chat_stream_with_vision(
     ctx: &ProviderContext,
     kind: ProviderKind,
@@ -817,7 +877,12 @@ pub(super) async fn openai_compat_chat_stream_with_vision(
     let mut messages: Vec<serde_json::Value> = vec![];
     messages.push(json!({"role": "system", "content": system_prompt}));
     if !history.is_empty() {
-        messages.push(json!({"role": "user", "content": history}));
+        for (user_msg, assistant_msg) in parse_history_turns(history) {
+            messages.push(json!({"role": "user", "content": user_msg}));
+            if !assistant_msg.is_empty() {
+                messages.push(json!({"role": "assistant", "content": assistant_msg}));
+            }
+        }
     }
     messages.push(json!({
         "role": "user",
@@ -854,7 +919,12 @@ pub(super) async fn openai_compat_chat_stream_with_tools(
     let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
     let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
     if !history.is_empty() {
-        messages.push(json!({"role": "user", "content": history}));
+        for (user_msg, assistant_msg) in parse_history_turns(history) {
+            messages.push(json!({"role": "user", "content": user_msg}));
+            if !assistant_msg.is_empty() {
+                messages.push(json!({"role": "assistant", "content": assistant_msg}));
+            }
+        }
     }
     messages.push(json!({"role": "user", "content": user_prompt}));
     let tools_json: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
@@ -895,6 +965,7 @@ pub(crate) async fn stream_openai_tool_response(resp: reqwest::Response) -> Resu
         if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
             if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
                 full_text.push_str(content);
+                emit_token(content);
             }
             if let Some(tool_calls) = chunk.choices.first().and_then(|c| c.delta.tool_calls.as_ref()) {
                 tool_acc.absorb_chunk(tool_calls);

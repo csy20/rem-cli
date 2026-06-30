@@ -240,7 +240,12 @@ impl ProviderBackend for GeminiBackend {
 
         let mut contents = vec![];
         if !history.is_empty() {
-            contents.push(json!({"role": "user", "parts": [{"text": history}]}));
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                contents.push(json!({"role": "user", "parts": [{"text": user_msg}]}));
+                if !assistant_msg.is_empty() {
+                    contents.push(json!({"role": "model", "parts": [{"text": assistant_msg}]}));
+                }
+            }
         }
         contents.push(json!({"role": "user", "parts": [{"text": user_prompt}]}));
 
@@ -284,9 +289,6 @@ impl ProviderBackend for GeminiBackend {
         let url = self.gemini_url(ctx, &format!("/models/{}:streamGenerateContent?alt=sse", ctx.model));
 
         let mut parts: Vec<serde_json::Value> = vec![];
-        if !history.is_empty() {
-            parts.push(json!({"text": format!("[Previous conversation]:\n{}", history)}));
-        }
         parts.push(json!({"text": user_prompt}));
         parts.push(json!({
             "inline_data": {
@@ -295,8 +297,19 @@ impl ProviderBackend for GeminiBackend {
             }
         }));
 
+        let mut contents: Vec<serde_json::Value> = vec![];
+        if !history.is_empty() {
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                contents.push(json!({"role": "user", "parts": [{"text": user_msg}]}));
+                if !assistant_msg.is_empty() {
+                    contents.push(json!({"role": "model", "parts": [{"text": assistant_msg}]}));
+                }
+            }
+        }
+        contents.push(json!({"role": "user", "parts": parts}));
+
         let mut payload = json!({
-            "contents": [{"parts": parts}],
+            "contents": contents,
             "generationConfig": {
                 "temperature": crate::constants::DEFAULT_TEMPERATURE,
                 "maxOutputTokens": crate::constants::DEFAULT_MAX_TOKENS
@@ -335,7 +348,12 @@ impl ProviderBackend for GeminiBackend {
 
         let mut contents = vec![];
         if !history.is_empty() {
-            contents.push(json!({"role": "user", "parts": [{"text": history}]}));
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                contents.push(json!({"role": "user", "parts": [{"text": user_msg}]}));
+                if !assistant_msg.is_empty() {
+                    contents.push(json!({"role": "model", "parts": [{"text": assistant_msg}]}));
+                }
+            }
         }
         contents.push(json!({"role": "user", "parts": [{"text": user_prompt}]}));
 
@@ -371,7 +389,7 @@ impl ProviderBackend for GeminiBackend {
         }
 
         let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
-        let mut early_tool_response: Option<ToolResponse> = None;
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
 
         super::stream_buf(resp, |trimmed| {
             if trimmed.is_empty() || trimmed.starts_with(':') {
@@ -386,17 +404,17 @@ impl ProviderBackend for GeminiBackend {
                                     for part in parts {
                                         if let Some(text) = part.text {
                                             full_text.push_str(&text);
+                                            super::emit_token(&text);
                                         }
                                         if let Some(fc) = part.function_call {
                                             let name = fc.name.unwrap_or_default();
                                             let args = fc.args.unwrap_or(serde_json::Value::Null);
                                             if !name.is_empty() {
-                                                early_tool_response = Some(ToolResponse::ToolCalls(vec![ToolCall {
+                                                tool_calls.push(ToolCall {
                                                     id: format!("fc_{}", name),
                                                     name,
                                                     arguments: args,
-                                                }]));
-                                                return Ok(false);
+                                                });
                                             }
                                         }
                                     }
@@ -413,8 +431,8 @@ impl ProviderBackend for GeminiBackend {
         })
         .await?;
 
-        if let Some(response) = early_tool_response {
-            return Ok(response);
+        if !tool_calls.is_empty() {
+            return Ok(ToolResponse::ToolCalls(tool_calls));
         }
         Ok(ToolResponse::Text(full_text))
     }

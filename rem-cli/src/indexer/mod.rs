@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -244,7 +245,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
         }
 
         scanned_count += 1;
-        if scanned_count.is_multiple_of(100) {
+        if scanned_count.is_multiple_of(100) && std::io::stderr().is_terminal() {
             eprint!("\r  scanning... {} files", scanned_count);
             let _ = std::io::stderr().flush();
         }
@@ -281,7 +282,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     }
 
     // Clear progress line
-    if scanned_count >= 100 {
+    if scanned_count >= 100 && std::io::stderr().is_terminal() {
         eprint!("\r{}\r", " ".repeat(60));
         let _ = std::io::stderr().flush();
     }

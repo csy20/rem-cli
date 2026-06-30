@@ -15,7 +15,9 @@ pub fn maybe_page(text: &str) {
     }
 
     let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
-    let mut child = match Command::new(&pager_cmd)
+    let pager_parts: Vec<&str> = pager_cmd.split_whitespace().collect();
+    let mut child = match Command::new(pager_parts.first().copied().unwrap_or("less"))
+        .args(&pager_parts[1..])
         .args(pager_args(&pager_cmd))
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
@@ -37,7 +39,9 @@ pub fn maybe_page(text: &str) {
 }
 
 fn pager_args(cmd: &str) -> Vec<&str> {
-    if cmd.contains("less") {
+    // Check if the binary name (without path) is "less"
+    let binary_name = cmd.rsplit('/').next().unwrap_or(cmd);
+    if binary_name == "less" || binary_name == "busybox" {
         vec!["-R", "-F", "-X"]
     } else {
         vec![]
@@ -47,8 +51,9 @@ fn pager_args(cmd: &str) -> Vec<&str> {
 /// Cached result of checking whether a pager is available on this system.
 static PAGER_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
     let pager_cmd = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+    // Use --help which most pagers support (more portable than --version)
     Command::new(&pager_cmd)
-        .arg("--version")
+        .arg("--help")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

@@ -18,7 +18,7 @@ pub struct OpenAIChoice {
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAIMessage {
-    pub content: String,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,7 +218,7 @@ mod tests {
     fn openai_response_deserialize() {
         let json = r#"{"choices":[{"message":{"content":"hi"}}]}"#;
         let resp: OpenAIResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.choices[0].message.content, "hi");
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("hi"));
     }
 
     #[test]
@@ -281,16 +281,22 @@ impl ProviderBackend for OpenAIBackend {
         let is_reasoning = crate::reasoning::is_reasoning_model(&ctx.model);
         let no_system = crate::reasoning::system_prompt_not_supported(&ctx.model);
         let no_stream = crate::reasoning::requires_non_streaming(&ctx.model);
+        let lower = ctx.model.to_lowercase();
 
         let mut messages: Vec<serde_json::Value> = vec![];
+        if !history.is_empty() {
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                messages.push(json!({"role": "user", "content": user_msg}));
+                if !assistant_msg.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": assistant_msg}));
+                }
+            }
+        }
         if no_system {
             let combined = format!("{system_prompt}\n\n{user_prompt}");
             messages.push(json!({"role": "user", "content": combined}));
         } else {
             messages.push(json!({"role": "system", "content": system_prompt}));
-            if !history.is_empty() {
-                messages.push(json!({"role": "user", "content": history}));
-            }
             messages.push(json!({"role": "user", "content": user_prompt}));
         }
 
@@ -299,7 +305,7 @@ impl ProviderBackend for OpenAIBackend {
         payload.insert("messages".into(), json!(messages));
         payload.insert("max_tokens".into(), json!(crate::constants::DEFAULT_MAX_TOKENS));
 
-        if is_reasoning && ctx.reasoning_config.enabled {
+        if is_reasoning && ctx.reasoning_config.enabled && (lower.starts_with("o1-") || lower.starts_with("o3-")) {
             let effort = ctx.reasoning_config.effort.as_str();
             payload.insert("reasoning_effort".into(), json!(effort));
         } else {
@@ -320,7 +326,11 @@ impl ProviderBackend for OpenAIBackend {
                 return Err(super::parse_api_error("OpenAI", resp).await);
             }
             let parsed: OpenAIResponse = resp.json().await.context("invalid OpenAI response")?;
-            let content = parsed.choices.first().map(|c| c.message.content.as_str()).unwrap_or("");
+            let content = parsed
+                .choices
+                .first()
+                .and_then(|c| c.message.content.as_deref())
+                .unwrap_or("");
             return Ok(content.to_string());
         }
 

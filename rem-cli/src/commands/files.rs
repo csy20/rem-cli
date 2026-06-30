@@ -162,14 +162,14 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
             ui::theme::paint_bright(&t, &format!("{}", abs_path.display())),
             session.code_out.last_code.len()
         );
-        if session.code_out.last_files_written.len() >= 5 {
-            let batch = std::mem::take(&mut session.code_out.last_files_written);
-            session.code_out.push_undo(batch);
-        }
         session.code_out.last_files_written.push(BackupEntry {
             path: abs_path,
             original,
         });
+        if session.code_out.last_files_written.len() > 5 {
+            let batch = session.code_out.last_files_written.drain(..5).collect();
+            session.code_out.push_undo(batch);
+        }
     }
 }
 
@@ -339,8 +339,7 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
         return;
     }
 
-    let total =
-        session.code_out.last_files_written.len() + session.code_out.undo_stack.iter().map(|v| v.len()).sum::<usize>();
+    let current = session.code_out.last_files_written.len();
     println!(
         "{} {}",
         ui::theme::paint(&t, "accent_info", "\u{258C}  ?", true),
@@ -348,7 +347,7 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
             &t,
             &format!(
                 "Revert the last {} written file(s)? [y/N] (or /undo N for N levels)",
-                total
+                current
             )
         )
     );
@@ -507,16 +506,17 @@ pub(crate) fn print_last_files(session: &ChatSession) {
     }
 }
 
-/// Copies the last response to clipboard (`/copy` command).
+/// Copies the last N responses to clipboard (`/copy [N]` command).
 pub(crate) fn handle_copy(session: &ChatSession, n: usize) {
     let t = ui::theme::active();
-    let response = if n == 1 {
+    let response: String = if n == 1 {
         session
             .history_mgr
             .history
             .last()
             .map(|(_, a)| a.as_str())
             .unwrap_or("")
+            .to_string()
     } else {
         let total = session.history_mgr.history.len();
         if n > total {
@@ -530,9 +530,11 @@ pub(crate) fn handle_copy(session: &ChatSession, n: usize) {
         session
             .history_mgr
             .history
-            .get(total - n)
+            .iter()
+            .skip(total - n)
             .map(|(_, a)| a.as_str())
-            .unwrap_or("")
+            .collect::<Vec<_>>()
+            .join("\n\n")
     };
 
     if response.is_empty() {
@@ -540,7 +542,7 @@ pub(crate) fn handle_copy(session: &ChatSession, n: usize) {
         return;
     }
 
-    let copied = try_copy_to_clipboard(response);
+    let copied = try_copy_to_clipboard(&response);
 
     match copied {
         CopyResult::Success => {

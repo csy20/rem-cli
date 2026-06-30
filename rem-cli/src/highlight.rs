@@ -64,17 +64,19 @@ fn highlight_css(code: &str) -> String {
     out = RE_CSS_COMMENT
         .replace_all(&out, |caps: &regex::Captures| ui::theme::paint_dim(&t, &caps[1]))
         .to_string();
-    out = RE_CSS_PROP
-        .replace_all(&out, |caps: &regex::Captures| {
-            let mut s = String::new();
-            let _ = write!(s, "{}{}{}", &caps[1], ui::theme::paint_warning(&t, &caps[2]), &caps[3]);
-            s
-        })
-        .to_string();
+    // Apply values BEFORE properties so the property regex doesn't match
+    // within ANSI-colored values (values don't contain property-like patterns).
     out = RE_CSS_VAL
         .replace_all(&out, |caps: &regex::Captures| {
             let mut s = String::new();
             let _ = write!(s, "{}{}", &caps[1], ui::theme::paint_success_label(&t, caps[2].trim()));
+            s
+        })
+        .to_string();
+    out = RE_CSS_PROP
+        .replace_all(&out, |caps: &regex::Captures| {
+            let mut s = String::new();
+            let _ = write!(s, "{}{}{}", &caps[1], ui::theme::paint_warning(&t, &caps[2]), &caps[3]);
             s
         })
         .to_string();
@@ -110,25 +112,31 @@ pub fn detect_language_from_content(code: &str) -> &str {
     if first_line.starts_with("<!") || first_line.starts_with("<") {
         return "html";
     }
+    // Rust-specific keywords (checked first for accuracy)
     if first_line.starts_with("fn ")
         || first_line.starts_with("pub ")
         || first_line.starts_with("impl ")
         || first_line.starts_with("unsafe ")
         || first_line.starts_with("#[")
-        || first_line.starts_with("struct ")
-        || first_line.starts_with("enum ")
         || first_line.starts_with("trait ")
-        || first_line.starts_with("use ")
         || first_line.starts_with("mod ")
+        || first_line.starts_with("use ")
+        || first_line.starts_with("macro_rules!")
         || first_line.starts_with("let ")
-        || first_line.starts_with("const ")
-        || first_line.starts_with("static ")
         || first_line.starts_with("async ")
         || first_line.starts_with("await ")
         || first_line.starts_with("type ")
-        || first_line.starts_with("macro_rules!")
+        || first_line.starts_with("static ")
     {
         return "rust";
+    }
+    // JS/TS module import/export (check before Python's `import`)
+    if first_line.starts_with("import {")
+        || first_line.starts_with("import *")
+        || first_line.starts_with("import type")
+        || first_line.starts_with("export ")
+    {
+        return "js";
     }
     if first_line.starts_with("func ")
         || first_line.starts_with("package ")
@@ -137,14 +145,16 @@ pub fn detect_language_from_content(code: &str) -> &str {
     {
         return "go";
     }
+    // Python: `def`, `print(`, `from`, `class X:`, `import ` with `;` absence
     if first_line.starts_with("def ")
-        || first_line.starts_with("class ")
-        || first_line.starts_with("import ")
-        || first_line.starts_with("from ")
         || first_line.starts_with("print(")
+        || first_line.starts_with("from ")
+        || first_line.starts_with("class ") && first_line.trim_end().ends_with(':')
+        || first_line.starts_with("import ") && !first_line.contains("{")
     {
         return "python";
     }
+    // C/C++ keywords
     if first_line.starts_with("#include")
         || first_line.starts_with("int ")
         || first_line.starts_with("char ")
@@ -155,25 +165,33 @@ pub fn detect_language_from_content(code: &str) -> &str {
         || first_line.starts_with("short ")
         || first_line.starts_with("unsigned ")
         || first_line.starts_with("signed ")
-        || first_line.starts_with("static ")
         || first_line.starts_with("extern ")
         || first_line.starts_with("typedef ")
-        || first_line.starts_with("struct ")
-        || first_line.starts_with("enum ")
         || first_line.starts_with("union ")
     {
         return "c";
     }
-    if first_line.starts_with("const ")
-        || first_line.starts_with("let ")
-        || first_line.starts_with("function ")
-        || first_line.starts_with("import ")
-    {
-        return "js";
+    // Rust const (checked after C since `const` is rare in C headers)
+    if first_line.starts_with("const ") {
+        return "rust";
     }
-    if first_line.contains("{") && first_line.contains("}") && !first_line.contains("fn ") && !first_line.contains("=>")
+    // Rust keywords that overlap with C (checked after C for disambiguation)
+    if first_line.starts_with("struct ") && first_line.contains('{')
+        || first_line.starts_with("enum ") && first_line.contains('{')
+        || first_line.starts_with("union ") && first_line.contains('{')
+        || first_line.starts_with("struct ") && first_line.trim_end().ends_with('{')
+        || first_line.starts_with("enum ") && first_line.trim_end().ends_with('{')
+        || first_line.starts_with("union ") && first_line.trim_end().ends_with('{')
     {
-        return "css";
+        return "rust";
+    }
+    // Fall through to C if struct/enum/union without braces (C style)
+    if first_line.starts_with("struct ") || first_line.starts_with("enum ") || first_line.starts_with("union ") {
+        return "c";
+    }
+    // JS/TS general patterns (checked after more specific keywords)
+    if first_line.starts_with("function ") {
+        return "js";
     }
     ""
 }

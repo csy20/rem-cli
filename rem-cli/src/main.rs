@@ -83,6 +83,7 @@ fn setup_global_ctrlc_handler() {
 pub(crate) fn reset_ctrlc_count() {
     CTRL_C_COUNT.store(0, Ordering::SeqCst);
     SHOULD_EXIT.store(false, Ordering::SeqCst);
+    crate::provider::STREAM_CANCELLED.store(false, Ordering::SeqCst);
 }
 
 /// Returns `true` if the user pressed Ctrl+C twice and wants to exit.

@@ -155,7 +155,13 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         let files = extract_code_blocks_with_names(&cleaned);
         let code = extract_code_block(&cleaned);
         if files.is_empty() && code.is_empty() {
-            consecutive_empty_plans += 1;
+            // Only count as "stuck" if the response also has no useful analysis text
+            let has_analysis = cleaned.len() > 50;
+            if has_analysis {
+                consecutive_empty_plans = 0;
+            } else {
+                consecutive_empty_plans += 1;
+            }
             if consecutive_empty_plans >= 3 {
                 println!(
                     "{} {} no code generated for 3 iterations — goal appears stuck, stopping",

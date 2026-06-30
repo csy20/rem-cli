@@ -240,26 +240,27 @@ async fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path
     }
 
     // Interactive approval prompt for shell commands
-    if std::io::stdin().is_terminal() {
-        let full_cmd = if args.is_empty() {
-            command.clone()
-        } else {
-            format!("{} {}", command, args.join(" "))
-        };
-        eprint!("  ! Allow shell command? [y/N] {} ", full_cmd);
-        let _ = io::stderr().flush();
-        let mut input = String::new();
-        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-        match reader.read_line(&mut input).await {
-            Ok(_) => {
-                let trimmed = input.trim().to_lowercase();
-                if trimmed != "y" && trimmed != "yes" {
-                    return err_result(tool_call, "shell command execution denied by user");
-                }
+    let full_cmd = if args.is_empty() {
+        command.clone()
+    } else {
+        format!("{} {}", command, args.join(" "))
+    };
+    if !std::io::stdin().is_terminal() {
+        return err_result(tool_call, "shell command execution requires a terminal for approval");
+    }
+    eprint!("  ! Allow shell command? [y/N] {} ", full_cmd);
+    let _ = io::stderr().flush();
+    let mut input = String::new();
+    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+    match reader.read_line(&mut input).await {
+        Ok(_) => {
+            let trimmed = input.trim().to_lowercase();
+            if trimmed != "y" && trimmed != "yes" {
+                return err_result(tool_call, "shell command execution denied by user");
             }
-            Err(_) => {
-                return err_result(tool_call, "failed to read user input for approval");
-            }
+        }
+        Err(_) => {
+            return err_result(tool_call, "failed to read user input for approval");
         }
     }
 

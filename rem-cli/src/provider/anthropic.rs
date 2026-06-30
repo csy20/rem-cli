@@ -69,6 +69,9 @@ pub struct AnthropicDelta {
     pub delta_type: Option<String>,
     #[serde(default)]
     pub partial_json: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub thinking: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,9 +232,6 @@ impl ProviderBackend for AnthropicBackend {
         let url = format!("{}/v1/messages", base);
 
         let mut content_blocks: Vec<serde_json::Value> = vec![];
-        if !history.is_empty() {
-            content_blocks.push(json!({"type": "text", "text": format!("[Previous conversation]:\n{}", history), "cache_control": {"type": "ephemeral"}}));
-        }
         content_blocks.push(json!({"type": "text", "text": user_prompt}));
         content_blocks.push(json!({
             "type": "image",
@@ -246,12 +246,21 @@ impl ProviderBackend for AnthropicBackend {
             {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
         ]);
 
+        let mut messages: Vec<serde_json::Value> = vec![];
+        if !history.is_empty() {
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                messages.push(json!({"role": "user", "content": [{"type": "text", "text": user_msg, "cache_control": {"type": "ephemeral"}}]}));
+                if !assistant_msg.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": assistant_msg}]}));
+                }
+            }
+        }
+        messages.push(json!({"role": "user", "content": content_blocks}));
+
         let payload = json!({
             "model": ctx.model,
             "system": system_with_cache,
-            "messages": [
-                {"role": "user", "content": content_blocks}
-            ],
+            "messages": messages,
             "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
             "stream": true
         });
@@ -271,7 +280,7 @@ impl ProviderBackend for AnthropicBackend {
             return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
-        super::stream_anthropic_sse(resp, &self.last_usage).await
+        super::stream_anthropic_sse(resp, &self.last_usage, ctx.reasoning_config.show_reasoning).await
     }
 
     async fn complete_json(
@@ -311,7 +320,8 @@ impl ProviderBackend for AnthropicBackend {
             return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
-        let parsed: AnthropicResponse = resp.json().await.context("invalid Anthropic response")?;
+        let parsed: crate::provider::anthropic::AnthropicResponse =
+            resp.json().await.context("invalid Anthropic response")?;
         let text = parsed
             .content
             .and_then(|c| c.into_iter().next())
@@ -334,10 +344,13 @@ impl ProviderBackend for AnthropicBackend {
 
         let mut messages: Vec<serde_json::Value> = vec![];
         if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": [
-                {"type": "text", "text": format!("[Previous conversation]:\n{}", history), "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": user_prompt}
-            ]}));
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                messages.push(json!({"role": "user", "content": [{"type": "text", "text": user_msg}]}));
+                if !assistant_msg.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": assistant_msg}]}));
+                }
+            }
+            messages.push(json!({"role": "user", "content": user_prompt}));
         } else {
             messages.push(json!({"role": "user", "content": user_prompt}));
         }
@@ -376,7 +389,7 @@ impl ProviderBackend for AnthropicBackend {
             return Err(super::parse_api_error("Anthropic", resp).await);
         }
 
-        super::stream_anthropic_sse(resp, &self.last_usage).await
+        super::stream_anthropic_sse(resp, &self.last_usage, ctx.reasoning_config.show_reasoning).await
     }
 
     async fn complete_chat_stream_with_tools(
@@ -393,13 +406,14 @@ impl ProviderBackend for AnthropicBackend {
 
         let mut messages: Vec<serde_json::Value> = vec![];
         if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": [
-                {"type": "text", "text": format!("[Previous conversation]:\n{}", history), "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": user_prompt}
-            ]}));
-        } else {
-            messages.push(json!({"role": "user", "content": user_prompt}));
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                messages.push(json!({"role": "user", "content": [{"type": "text", "text": user_msg, "cache_control": {"type": "ephemeral"}}]}));
+                if !assistant_msg.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": assistant_msg}]}));
+                }
+            }
         }
+        messages.push(json!({"role": "user", "content": user_prompt}));
 
         let tools: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_anthropic_tool()).collect();
 
@@ -459,6 +473,7 @@ impl ProviderBackend for AnthropicBackend {
                                 } else if block.block_type.as_deref() == Some("text") {
                                     if let Some(ref text) = block.text {
                                         full_text.push_str(text);
+                                        super::emit_token(text);
                                     }
                                 }
                             }
@@ -474,6 +489,7 @@ impl ProviderBackend for AnthropicBackend {
                                     }
                                 } else if let Some(ref text) = delta.text {
                                     full_text.push_str(text);
+                                    super::emit_token(text);
                                 }
                             }
                         }

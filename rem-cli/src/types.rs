@@ -15,6 +15,8 @@ use crate::ui;
 // ── Constants ───────────────────────────────────────────────────────────────
 
 /// Compiled regex for `@filename` references in user input.
+/// The filter for http(s) URLs happens at the call site since the `regex`
+/// crate does not support lookahead assertions.
 pub(crate) static RE_AT_REF: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"@([^\s]+)").expect("invalid regex literal"));
 

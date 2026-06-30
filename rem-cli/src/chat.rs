@@ -8,6 +8,7 @@ use crate::intent::TaskIntent;
 use crate::memory::ProjectMemory;
 use crate::search::SearchResult;
 use crate::session_io::build_project_context;
+use crate::token_count::estimate_tokens;
 use crate::types::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
 use rustyline::config::Configurer;
@@ -90,10 +91,22 @@ impl HistoryManager {
         if self.history.is_empty() {
             return String::new();
         }
+        const TOKEN_BUDGET_PER_TURN: usize = 500;
         let mut out = String::from("[Previous conversation — keep context in mind]:\n\n");
         for (user, assistant) in self.history.iter().rev().take(6).rev() {
-            let truncated_assistant = crate::truncate_to_lines(assistant, 15);
-            out.push_str(&format!("User: {}\nREM: {}\n\n", user, truncated_assistant));
+            let truncated_assistant = if estimate_tokens(assistant) > TOKEN_BUDGET_PER_TURN {
+                let estimated_len = (assistant.len() * TOKEN_BUDGET_PER_TURN) / estimate_tokens(assistant).max(1);
+                let cutoff = estimated_len.min(assistant.len());
+                let cutoff = (0..=cutoff).rev().find(|&i| assistant.is_char_boundary(i)).unwrap_or(0);
+                let truncated = assistant[..cutoff].to_string();
+                format!("{}...\n[truncated to ~{} tokens]", truncated, TOKEN_BUDGET_PER_TURN)
+            } else {
+                assistant.clone()
+            };
+            // Escape internal newlines to avoid breaking the \n\n turn separator
+            let safe_user = user.replace('\n', "\\n");
+            let safe_assistant = truncated_assistant.replace('\n', "\\n");
+            out.push_str(&format!("User: {}\nREM: {}\n\n", safe_user, safe_assistant));
         }
         out
     }
@@ -157,6 +170,13 @@ impl ProjectContext {
             .as_ref()
             .cloned()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+    }
+
+    /// Invalidates cached data when the project directory changes.
+    pub(crate) fn invalidate_caches(&mut self) {
+        self.listing_cache = None;
+        self.cached_index = None;
+        self.project_type = None;
     }
 
     pub(crate) fn get_project_type(&mut self) -> &str {
@@ -324,10 +344,25 @@ impl ChatSession {
         if let Err(e) = std::fs::create_dir_all(dir.join(".rem")) {
             tracing::warn!("failed to create session dir: {}", e);
         }
-        let json = serde_json::to_string_pretty(&self.to_session_json()).unwrap_or_default();
+        let json = match serde_json::to_string_pretty(&self.to_session_json()) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::warn!("failed to serialize session: {}", e);
+                return;
+            }
+        };
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-        let _ = encoder.write_all(json.as_bytes());
-        let compressed = encoder.finish().unwrap_or_default();
+        if let Err(e) = encoder.write_all(json.as_bytes()) {
+            tracing::warn!("failed to compress session: {}", e);
+            return;
+        }
+        let compressed = match encoder.finish() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("failed to finish session compression: {}", e);
+                return;
+            }
+        };
         if let Err(e) = std::fs::write(&session_file, &compressed) {
             tracing::warn!("failed to auto-save session: {}", e);
         }
@@ -349,7 +384,7 @@ impl ChatSession {
             .collect();
         refs.sort_unstable();
         refs.dedup();
-        refs.sort_unstable_by(|a, b| b.len().cmp(&a.len()));
+        refs.sort_unstable_by_key(|a| std::cmp::Reverse(a.len()));
 
         for ref_path in &refs {
             let base = self.ctx.project_dir.as_deref().unwrap_or_else(|| Path::new("."));

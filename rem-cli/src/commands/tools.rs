@@ -172,7 +172,7 @@ pub(crate) async fn handle_refactor(client: &Provider, session: &mut ChatSession
 }
 
 /// Runs a linter on the specified file (`/lint` command).
-pub(crate) async fn handle_lint(_session: &mut ChatSession, path: &str) {
+pub(crate) async fn handle_lint(_session: &ChatSession, path: &str) {
     let t = ui::theme::active();
     let file_path = Path::new(path);
     if !file_path.exists() {

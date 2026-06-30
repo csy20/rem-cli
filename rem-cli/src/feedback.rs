@@ -35,8 +35,12 @@ pub struct FeedbackTracker {
 impl FeedbackTracker {
     /// Creates a new tracker, loading existing feedback from disk.
     pub fn new(model: &str) -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let path = home.join(".config/rem-cli/feedback.json");
+        let path = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            PathBuf::from(xdg).join("rem-cli/feedback.json")
+        } else {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            home.join(".config/rem-cli/feedback.json")
+        };
         Self::load_from_path(model, path)
     }
 

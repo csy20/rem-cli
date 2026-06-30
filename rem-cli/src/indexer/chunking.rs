@@ -27,16 +27,19 @@ pub(crate) fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize
         let mut start = 0usize;
         let mut lnum = 1usize;
         while start < big.len() {
-            let end = (start + target).min(big.len());
-            let end = big.floor_char_boundary(end);
+            let mut end = (start + target).min(big.len());
+            end = big.floor_char_boundary(end);
+            // Adjust end to nearest newline boundary to avoid mid-line split
+            if end < big.len() {
+                if let Some(newline_pos) = big[start..end].rfind('\n') {
+                    end = start + newline_pos + 1;
+                }
+            }
             let piece = big[start..end].to_string();
             let piece_lines = piece.lines().count().max(1);
             out.push((lnum, lnum + piece_lines - 1, piece));
             lnum += piece_lines;
             start = end;
-            if start < big.len() && big.as_bytes().get(start) == Some(&b'\n') {
-                start += 1;
-            }
         }
     }
     out

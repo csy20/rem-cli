@@ -145,15 +145,6 @@ pub(crate) fn load_config() -> Result<AppConfig> {
     Ok(cfg)
 }
 
-/// Invalidates the in-memory config cache so the next [`load_config`] re-reads from disk.
-/// Note: `save_config` now updates the cache directly, so this is only needed
-/// for forcing re-reads after external file modifications.
-#[allow(dead_code)]
-pub(crate) fn invalidate_config_cache() {
-    let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
-    *cache = None;
-}
-
 /// Builds a [`Provider`] from config, resolving API keys and model defaults.
 /// Per-provider overrides from `config.providers` are merged on top of global values.
 pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<Provider> {
@@ -225,8 +216,10 @@ fn resolve_api_key_from_env(kind: ProviderKind) -> Option<String> {
     }
 }
 
+type SystemPromptCache = RwLock<Option<(Option<String>, String)>>;
+
 /// Cached system prompt to avoid repeated disk reads.
-static SYSTEM_PROMPT: LazyLock<RwLock<Option<(Option<String>, String)>>> = LazyLock::new(|| RwLock::new(None));
+static SYSTEM_PROMPT: LazyLock<SystemPromptCache> = LazyLock::new(|| RwLock::new(None));
 
 /// Loads the system prompt from file, falling back to the built-in default.
 pub(crate) fn load_system_prompt(custom_prompts_dir: Option<&str>) -> String {
@@ -350,7 +343,17 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
 /// Persists the workspace directory to config.
 pub(crate) fn persist_workspace(dir: &Path) {
     let t = ui::theme::active();
-    let mut cfg = load_config().unwrap_or_default();
+    let mut cfg = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "  {} failed to load config, not saving workspace: {}",
+                ui::theme::paint_error_label(&t, "✗"),
+                e
+            );
+            return;
+        }
+    };
     cfg.workspace_dir = Some(dir.to_string_lossy().to_string());
     if let Err(e) = save_config(&cfg) {
         eprintln!(

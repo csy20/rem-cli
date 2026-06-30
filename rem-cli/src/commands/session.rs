@@ -48,7 +48,7 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
                         if safe
                             .canonicalize()
                             .map(|c| c.starts_with(&canon_parent))
-                            .unwrap_or(false)
+                            .unwrap_or(true)
                         {
                             safe
                         } else {
@@ -79,6 +79,7 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
     if resolved.exists() {
         session.ctx.project_dir = Some(resolved.clone());
         session.ctx.workspace_dir = Some(resolved.clone());
+        session.ctx.invalidate_caches();
         persist_workspace(&resolved);
         println!(
             "  {} workspace set to {}",
@@ -96,6 +97,7 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
         }
         session.ctx.project_dir = Some(resolved.clone());
         session.ctx.workspace_dir = Some(resolved.clone());
+        session.ctx.invalidate_caches();
         persist_workspace(&resolved);
         println!(
             "  {} workspace set to {}",
@@ -666,9 +668,10 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                     let written: Vec<BackupEntry> = paths
                         .iter()
                         .filter_map(|p| {
-                            p.as_str().map(|s| BackupEntry {
-                                path: PathBuf::from(s),
-                                original: None,
+                            p.as_str().map(|s| {
+                                let path = PathBuf::from(s);
+                                let original = std::fs::read_to_string(&path).ok();
+                                BackupEntry { path, original }
                             })
                         })
                         .collect();
