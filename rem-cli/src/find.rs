@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::Mutex;
@@ -210,26 +211,27 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
             continue;
         }
 
-        let contents = match fs::read_to_string(path) {
-            Ok(s) => s,
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
             Err(_) => {
                 report.files_skipped += 1;
                 continue;
             }
         };
         report.files_scanned += 1;
+        let reader = std::io::BufReader::new(file);
 
         if let Some(ref re) = regex_pattern {
-            for (idx, raw_line) in contents.lines().enumerate() {
+            for (idx, raw_line) in reader.lines().map_while(Result::ok).enumerate() {
                 let line_no = idx + 1;
-                if re.is_match(raw_line) {
-                    for cap in re.find_iter(raw_line) {
+                if re.is_match(&raw_line) {
+                    for cap in re.find_iter(&raw_line) {
                         let column = byte_to_column(&raw_line.as_bytes()[..cap.start()]);
                         report.matches.push(Match {
                             path: path.to_path_buf(),
                             line_no,
                             column: column + 1,
-                            line: raw_line.to_string(),
+                            line: raw_line.clone(),
                         });
                         if report.matches.len() >= opts.max_results {
                             report.truncated = true;
@@ -240,18 +242,17 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
                 }
             }
         } else if opts.case_sensitive {
-            for (idx, raw_line) in contents.lines().enumerate() {
+            for (idx, raw_line) in reader.lines().map_while(Result::ok).enumerate() {
                 let line_no = idx + 1;
                 let mut search_from = 0usize;
                 let haystack = raw_line.as_bytes();
                 while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
                     let column = byte_to_column(&haystack[..search_from + pos]);
-                    let line = raw_line.to_string();
                     report.matches.push(Match {
                         path: path.to_path_buf(),
                         line_no,
                         column: column + 1,
-                        line,
+                        line: raw_line.clone(),
                     });
                     if report.matches.len() >= opts.max_results {
                         report.truncated = true;
@@ -265,19 +266,23 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
                 }
             }
         } else {
-            let lowered_contents = contents.to_lowercase();
-            for (idx, (raw_line, lowered_line)) in contents.lines().zip(lowered_contents.lines()).enumerate() {
+            let mut lowered_lines: Vec<String> = Vec::new();
+            let mut raw_lines: Vec<String> = Vec::new();
+            for line in reader.lines().map_while(Result::ok) {
+                lowered_lines.push(line.to_lowercase());
+                raw_lines.push(line);
+            }
+            for (idx, raw_line) in raw_lines.iter().enumerate() {
                 let line_no = idx + 1;
                 let mut search_from = 0usize;
-                let haystack = lowered_line.as_bytes();
+                let haystack = lowered_lines[idx].as_bytes();
                 while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
                     let column = byte_to_column(&haystack[..search_from + pos]);
-                    let line = raw_line.to_string();
                     report.matches.push(Match {
                         path: path.to_path_buf(),
                         line_no,
                         column: column + 1,
-                        line,
+                        line: raw_line.clone(),
                     });
                     if report.matches.len() >= opts.max_results {
                         report.truncated = true;

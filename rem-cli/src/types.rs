@@ -214,18 +214,24 @@ pub(crate) fn file_icon(path: &str) -> String {
 }
 
 fn file_icon_for(path: &str) -> &'static str {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".html") || lower.ends_with(".htm") {
+    let lower = path.as_bytes();
+    if lower.ends_with(b".html") || lower.ends_with(b".htm") {
         "\u{1F310}"
-    } else if lower.ends_with(".css") {
+    } else if lower.len() >= 4 && lower[lower.len() - 4..].eq_ignore_ascii_case(b".css") {
         "\u{1F3A8}"
-    } else if lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".ts") {
+    } else if (lower.len() >= 3
+        && (lower[lower.len() - 3..].eq_ignore_ascii_case(b".js")
+            || lower[lower.len() - 3..].eq_ignore_ascii_case(b".ts")))
+        || (lower.len() >= 4 && lower[lower.len() - 4..].eq_ignore_ascii_case(b".mjs"))
+    {
         "\u{26A1}"
-    } else if lower.ends_with(".json") {
+    } else if lower.len() >= 5 && lower[lower.len() - 5..].eq_ignore_ascii_case(b".json") {
         "\u{1F4CB}"
-    } else if lower.ends_with(".md") || lower.ends_with(".txt") {
+    } else if (lower.len() >= 3 && lower[lower.len() - 3..].eq_ignore_ascii_case(b".md"))
+        || (lower.len() >= 4 && lower[lower.len() - 4..].eq_ignore_ascii_case(b".txt"))
+    {
         "\u{1F4C4}"
-    } else if lower.ends_with(".py") {
+    } else if lower.len() >= 3 && lower[lower.len() - 3..].eq_ignore_ascii_case(b".py") {
         "\u{1F40D}"
     } else {
         "\u{1F4C4}"

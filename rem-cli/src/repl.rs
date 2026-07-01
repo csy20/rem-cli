@@ -541,6 +541,7 @@ fn handle_llm_response(
 /// calls the LLM, and manages conversation history.
 pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> Result<()> {
     reset_ctrlc_count();
+    crate::REPL_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut session = initialize_session(client, cfg)?;
     let t = ui::theme::active();
 
@@ -551,6 +552,7 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             Some(l) => l,
             None => {
                 session.feedback.flush();
+                crate::REPL_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
                 return Ok(());
             }
         };
@@ -714,6 +716,7 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         }
     }
     session.feedback.flush();
+    crate::REPL_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 

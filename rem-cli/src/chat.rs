@@ -11,6 +11,7 @@ use crate::session_io::build_project_context;
 use crate::token_count::estimate_tokens;
 use crate::types::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
+use regex::Regex;
 use rustyline::config::Configurer;
 use rustyline::DefaultEditor;
 use std::fs;
@@ -39,7 +40,6 @@ pub(crate) struct HistoryManager {
     pub(crate) rl: DefaultEditor,
     pub(crate) history: Vec<(String, String)>,
     pub(crate) messages_since_save: usize,
-    max_history_turns: usize,
 }
 
 impl HistoryManager {
@@ -58,17 +58,11 @@ impl HistoryManager {
             rl,
             history: Vec::new(),
             messages_since_save: 0,
-            max_history_turns: 200,
         })
     }
 
-    /// Appends a turn to history and trims to max_history_turns to bound memory.
     pub(crate) fn push_turn(&mut self, user: String, assistant: String) {
         self.history.push((user, assistant));
-        if self.history.len() > self.max_history_turns {
-            let excess = self.history.len() - self.max_history_turns;
-            self.history.drain(..excess);
-        }
     }
 
     pub(crate) fn save_history(&mut self) {
@@ -208,7 +202,13 @@ impl ProjectContext {
             .map(|(cached_dir, _)| cached_dir != &dir)
             .unwrap_or(true);
         if should_reload {
-            self.cached_index = load_codebase_index(&dir).map(|i| (dir.clone(), i));
+            self.cached_index = load_codebase_index(&dir).map(|mut i| {
+                if i.inverted_index.is_empty() && !i.chunks.is_empty() {
+                    i.inverted_index = crate::indexer::build_inverted_index(&i.chunks, &mut i.doc_freqs);
+                    i.num_chunks = i.chunks.len();
+                }
+                (dir.clone(), i)
+            });
         }
 
         if let Some((_, idx)) = &self.cached_index {
@@ -438,7 +438,8 @@ impl ChatSession {
                 }
             }
 
-            cleaned_input = cleaned_input.replace(&format!("@{}", ref_path), ref_path);
+            let re = Regex::new(&format!(r"\b@{}\b", regex::escape(ref_path))).unwrap();
+            cleaned_input = re.replace_all(&cleaned_input, *ref_path).to_string();
         }
 
         (cleaned_input, extra_context)

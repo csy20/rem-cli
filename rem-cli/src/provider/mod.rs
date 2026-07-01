@@ -66,10 +66,10 @@ impl std::fmt::Display for LlmErrorBody {
 pub(crate) static STREAM_CANCELLED: AtomicBool = AtomicBool::new(false);
 pub(crate) static STREAM_TOKENS: AtomicBool = AtomicBool::new(false);
 
-/// Reusable HTTP client with connection pooling.
+/// Reusable HTTP client with connection pooling (no hard timeout — individual
+/// requests use their own per-call timeouts via tokio::time::timeout).
 pub(crate) static HTTP_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
     Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
         .pool_max_idle_per_host(4)
         .build()
         .unwrap_or_else(|_| Client::new())
@@ -571,7 +571,7 @@ where
 {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
-    let mut cursor = 0usize;
+    let mut offset = 0usize;
 
     loop {
         if STREAM_CANCELLED.load(Ordering::SeqCst) {
@@ -583,14 +583,17 @@ where
             Ok(None) => break,
             Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
         };
+        if offset > 0 && buf.len() > crate::constants::INITIAL_BUF_CAPACITY * 4 {
+            buf = buf[offset..].to_vec();
+            offset = 0;
+        }
         buf.extend_from_slice(&chunk);
         loop {
-            let tail = &buf[cursor..];
+            let tail = &buf[offset..];
             match tail.iter().position(|&b| b == b'\n') {
                 Some(pos) => {
-                    let line_bytes = &tail[..pos];
-                    cursor += pos + 1;
-                    let trimmed = std::str::from_utf8(line_bytes).map(|s| s.trim()).unwrap_or("");
+                    let trimmed = std::str::from_utf8(&tail[..pos]).map(|s| s.trim()).unwrap_or("");
+                    offset += pos + 1;
                     if trimmed.is_empty() {
                         continue;
                     }
@@ -600,10 +603,6 @@ where
                 }
                 None => break,
             }
-        }
-        if cursor > buf.len() / 2 {
-            buf.drain(..cursor);
-            cursor = 0;
         }
     }
     Ok(())
@@ -630,8 +629,9 @@ pub(super) async fn stream_sse_response(resp: reqwest::Response) -> Result<Strin
             if data == "[DONE]" {
                 return Ok(false);
             }
-            if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
-                if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
+            // Fast-path: extract content delta via string split instead of full JSON parse
+            if let Some(content) = data.split("\"content\":\"").nth(1).and_then(|s| s.split('"').next()) {
+                if !content.is_empty() {
                     full.push_str(content);
                     emit_token(content);
                     if full.len() > MAX_RESPONSE_BYTES {

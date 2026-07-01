@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
 
 use crate::agentic::{run_lint, run_test};
@@ -17,7 +16,12 @@ use crate::ui;
 const MAX_TOOL_ROUNDS: usize = crate::constants::MAX_TOOL_ROUNDS;
 
 /// Executes a single tool call and returns the result.
-pub(crate) async fn execute_tool_call(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+/// `approve_fn` is called for shell command approval (instead of reading from stdin).
+pub(crate) async fn execute_tool_call(
+    tool_call: &ToolCall,
+    project_dir: &std::path::Path,
+    approve_fn: &mut dyn FnMut(&str) -> bool,
+) -> ToolCallResult {
     match tool_call.name.as_str() {
         "read_file" => execute_read_file(tool_call, project_dir),
         "write_file" => execute_write_file(tool_call, project_dir),
@@ -26,7 +30,7 @@ pub(crate) async fn execute_tool_call(tool_call: &ToolCall, project_dir: &std::p
         "run_test" => execute_tool_test(tool_call, project_dir).await,
         "web_search" => execute_web_search(tool_call).await,
         "list_files" => execute_list_files(tool_call, project_dir),
-        "run_command" => execute_run_command(tool_call, project_dir).await,
+        "run_command" => execute_run_command(tool_call, project_dir, approve_fn).await,
         name => ToolCallResult {
             call_id: tool_call.id.clone(),
             name: name.to_string(),
@@ -217,7 +221,11 @@ fn execute_list_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> To
     }
 }
 
-async fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_run_command(
+    tool_call: &ToolCall,
+    project_dir: &std::path::Path,
+    approve_fn: &mut dyn FnMut(&str) -> bool,
+) -> ToolCallResult {
     let command = match extract_arg(tool_call, "command") {
         Some(c) => c,
         None => return err_result(tool_call, "missing 'command' argument"),
@@ -250,18 +258,8 @@ async fn execute_run_command(tool_call: &ToolCall, project_dir: &std::path::Path
     }
     eprint!("  ! Allow shell command? [y/N] {} ", full_cmd);
     let _ = io::stderr().flush();
-    let mut input = String::new();
-    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-    match reader.read_line(&mut input).await {
-        Ok(_) => {
-            let trimmed = input.trim().to_lowercase();
-            if trimmed != "y" && trimmed != "yes" {
-                return err_result(tool_call, "shell command execution denied by user");
-            }
-        }
-        Err(_) => {
-            return err_result(tool_call, "failed to read user input for approval");
-        }
+    if !approve_fn(&full_cmd) {
+        return err_result(tool_call, "shell command execution denied by user");
     }
 
     let cmd = command.clone();
@@ -327,11 +325,13 @@ fn err_result(tool_call: &ToolCall, msg: &str) -> ToolCallResult {
 
 /// Runs the tool loop: sends a prompt with tools, executes tool calls, and
 /// continues until the LLM produces a text response.
+/// `approve_fn` is called for shell command approval (instead of reading from stdin).
 pub(crate) async fn run_tool_loop(
     client: &Provider,
     prompt: &str,
     system_prompt: &str,
     history: &str,
+    approve_fn: &mut dyn FnMut(&str) -> bool,
 ) -> Result<String, String> {
     let tools = builtin_tools();
     let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -358,7 +358,7 @@ pub(crate) async fn run_tool_loop(
             Ok(ToolResponse::ToolCalls(calls)) => {
                 let mut results = Vec::new();
                 for call in &calls {
-                    let result = execute_tool_call(call, &project_dir).await;
+                    let result = execute_tool_call(call, &project_dir, approve_fn).await;
                     results.push(result.clone());
                     if result.is_error {
                         println!(
@@ -445,10 +445,15 @@ mod tests {
         assert!(err.content.contains("something went wrong"));
     }
 
+    fn deny_approve(_cmd: &str) -> bool {
+        false
+    }
+
     #[tokio::test]
     async fn execute_unknown_tool_returns_error() {
         let tc = make_tool_call("nonexistent_tool", serde_json::json!({}));
-        let result = execute_tool_call(&tc, &PathBuf::from(".")).await;
+        let mut approve = deny_approve;
+        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut approve).await;
         assert!(result.is_error);
         assert!(result.content.contains("Unknown tool"));
     }
@@ -456,7 +461,8 @@ mod tests {
     #[tokio::test]
     async fn execute_read_file_missing_path() {
         let tc = make_tool_call("read_file", serde_json::json!({}));
-        let result = execute_tool_call(&tc, &PathBuf::from(".")).await;
+        let mut approve = deny_approve;
+        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut approve).await;
         assert!(result.is_error);
         assert!(result.content.contains("missing 'path'"));
     }

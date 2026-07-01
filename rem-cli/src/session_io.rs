@@ -226,8 +226,9 @@ pub(crate) fn validate_chat_response(response: &str, intent: &TaskIntent, mode: 
         let has_json = serde_json::from_str::<serde_json::Value>(trimmed_response)
             .ok()
             .is_some_and(|v| {
-                v.get("code").and_then(|c| c.as_str()).is_some_and(|c| !c.is_empty())
-                    || v.get("files").and_then(|f| f.as_array()).is_some_and(|f| !f.is_empty())
+                v.is_object()
+                    && (v.get("code").and_then(|c| c.as_str()).is_some_and(|c| !c.is_empty())
+                        || v.get("files").and_then(|f| f.as_array()).is_some_and(|f| !f.is_empty()))
             });
 
         if has_multi_file || has_lone_fence || has_json {

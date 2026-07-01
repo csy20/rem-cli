@@ -16,7 +16,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// Sets the workspace directory (`/dir` command).
@@ -665,13 +665,15 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                     }
                 }
                 if let Some(paths) = data["last_files_written"].as_array() {
+                    let base = session.ctx.project_dir.as_deref().unwrap_or_else(|| Path::new("."));
                     let written: Vec<BackupEntry> = paths
                         .iter()
                         .filter_map(|p| {
-                            p.as_str().map(|s| {
-                                let path = PathBuf::from(s);
-                                let original = std::fs::read_to_string(&path).ok();
-                                BackupEntry { path, original }
+                            p.as_str().and_then(|s| {
+                                crate::types::resolve_safe_path(base, s).map(|path| {
+                                    let original = std::fs::read_to_string(&path).ok();
+                                    BackupEntry { path, original }
+                                })
                             })
                         })
                         .collect();

@@ -60,6 +60,12 @@ pub fn guess_filename(lines: &[&str]) -> String {
         {
             return "main.rs".to_string();
         }
+        if trimmed.starts_with("import {")
+            || trimmed.starts_with("import type {")
+            || trimmed.starts_with("import { type")
+        {
+            return "index.ts".to_string();
+        }
         if trimmed.starts_with("def ")
             || trimmed.starts_with("import ")
             || trimmed.starts_with("from ")

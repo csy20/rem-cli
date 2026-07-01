@@ -91,13 +91,8 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
         if let Ok(text) = fs::read_to_string(p) {
             let parsed_v2 = serde_json::from_str::<CodebaseIndex>(&text);
             // Try v2 format first (CodebaseIndex with inverted_index)
-            if let Ok(mut index) = parsed_v2 {
+            if let Ok(index) = parsed_v2 {
                 if !index.chunks.is_empty() {
-                    // Rebuild inverted index if missing (e.g. migrated from v1)
-                    if index.inverted_index.is_empty() {
-                        index.inverted_index = build_inverted_index(&index.chunks, &mut index.doc_freqs);
-                        index.num_chunks = index.chunks.len();
-                    }
                     return Some(index);
                 }
             } else if fs::metadata(p).map(|m| m.len()).unwrap_or(0) > 0 {
@@ -294,74 +289,101 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
         }
     }
 
-    // Phase 2: Read files in parallel and chain directly into chunking
-    let file_entries: Vec<FileEntryToProcess> = walk_entries
-        .par_iter()
-        .filter_map(|we| {
-            let text = std::fs::read_to_string(&we.path)
-                .ok()
-                .filter(|t| !t.trim().is_empty())?;
-            let line_count = text.lines().count().max(1);
-            Some(FileEntryToProcess {
-                rel_str: we.rel_str.clone(),
-                name: we.name.clone(),
-                content: text,
-                line_count,
+    // Phase 2: Read files and chunk them (parallel only for large sets)
+    let file_entries: Vec<FileEntryToProcess> = if walk_entries.len() > 100 {
+        walk_entries
+            .par_iter()
+            .filter_map(|we| {
+                let text = std::fs::read_to_string(&we.path)
+                    .ok()
+                    .filter(|t| !t.trim().is_empty())?;
+                let line_count = text.lines().count().max(1);
+                Some(FileEntryToProcess {
+                    rel_str: we.rel_str.clone(),
+                    name: we.name.clone(),
+                    content: text,
+                    line_count,
+                })
             })
-        })
-        .collect();
+            .collect()
+    } else {
+        walk_entries
+            .iter()
+            .filter_map(|we| {
+                let text = std::fs::read_to_string(&we.path)
+                    .ok()
+                    .filter(|t| !t.trim().is_empty())?;
+                let line_count = text.lines().count().max(1);
+                Some(FileEntryToProcess {
+                    rel_str: we.rel_str.clone(),
+                    name: we.name.clone(),
+                    content: text,
+                    line_count,
+                })
+            })
+            .collect()
+    };
 
-    let mut chunks: Vec<IndexChunk> = file_entries
-        .into_par_iter()
-        .flat_map(|fe| {
-            let mut local_chunks = Vec::new();
-            let ctype = guess_chunk_type(&fe.rel_str, &fe.content);
-
-            if fe.content.len() <= target_chunk + 400 {
-                local_chunks.push(IndexChunk {
-                    path: fe.rel_str.clone(),
-                    name: fe.name.clone(),
-                    chunk_type: ctype.to_string(),
-                    content: fe.content.clone(),
-                    content_lower: fe.content.to_lowercase(),
-                    name_lower: fe.name.to_lowercase(),
-                    path_lower: fe.rel_str.to_lowercase(),
-                    start_line: 1,
-                    end_line: fe.line_count,
-                    embedding: None,
-                });
-            } else {
-                let parts = split_content_into_chunks(&fe.content, target_chunk);
-                for (i, (start_l, end_l, piece)) in parts.into_iter().enumerate() {
-                    if piece.trim().is_empty() {
-                        continue;
-                    }
-                    let piece_ctype = if i == 0 {
-                        ctype
-                    } else {
-                        guess_chunk_type(&fe.rel_str, &piece)
-                    };
-                    let content_lower = piece.to_lowercase();
-                    local_chunks.push(IndexChunk {
-                        path: fe.rel_str.clone(),
-                        name: fe.name.clone(),
-                        chunk_type: piece_ctype.to_string(),
-                        content: piece,
-                        content_lower,
-                        name_lower: fe.name.to_lowercase(),
-                        path_lower: fe.rel_str.to_lowercase(),
-                        start_line: start_l,
-                        end_line: end_l,
-                        embedding: None,
-                    });
-                }
-            }
-            local_chunks
-        })
-        .collect();
+    let mut chunks: Vec<IndexChunk> = if file_entries.len() > 100 {
+        file_entries
+            .into_par_iter()
+            .flat_map(|fe| chunk_file_entry(fe, target_chunk))
+            .collect()
+    } else {
+        file_entries
+            .into_iter()
+            .flat_map(|fe| chunk_file_entry(fe, target_chunk))
+            .collect()
+    };
 
     chunks.par_sort_by(|a, b| a.path.cmp(&b.path).then(a.start_line.cmp(&b.start_line)));
     Ok((chunks, file_mtimes))
+}
+
+fn chunk_file_entry(fe: FileEntryToProcess, target_chunk: usize) -> Vec<IndexChunk> {
+    let mut local_chunks = Vec::new();
+    let ctype = guess_chunk_type(&fe.rel_str, &fe.content);
+
+    if fe.content.len() <= target_chunk + 400 {
+        local_chunks.push(IndexChunk {
+            path: fe.rel_str.clone(),
+            name: fe.name.clone(),
+            chunk_type: ctype.to_string(),
+            content: fe.content.clone(),
+            content_lower: fe.content.to_lowercase(),
+            name_lower: fe.name.to_lowercase(),
+            path_lower: fe.rel_str.to_lowercase(),
+            start_line: 1,
+            end_line: fe.line_count,
+            embedding: None,
+        });
+    } else {
+        let parts = split_content_into_chunks(&fe.content, target_chunk);
+        for (i, (start_l, end_l, piece)) in parts.into_iter().enumerate() {
+            if piece.trim().is_empty() {
+                continue;
+            }
+            let piece_ctype = if i == 0 {
+                ctype
+            } else {
+                guess_chunk_type(&fe.rel_str, &piece)
+            };
+            let content_lower = piece.to_lowercase();
+            local_chunks.push(IndexChunk {
+                path: fe.rel_str.clone(),
+                name: fe.name.clone(),
+                chunk_type: piece_ctype.to_string(),
+                content: piece,
+                content_lower,
+                name_lower: fe.name.to_lowercase(),
+                path_lower: fe.rel_str.to_lowercase(),
+                start_line: start_l,
+                end_line: end_l,
+                embedding: None,
+            });
+        }
+    }
+    local_chunks
 }
 
 /// Writes the codebase index to `.rem/codebase_index.json` with inverted index and mtimes.

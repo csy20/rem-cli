@@ -48,11 +48,21 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
             ui::theme::paint(&t, "accent", "\u{258C}", true),
             ui::theme::paint_dim(&t, "\u{26A1}")
         );
+        let mut approve_fn = |_cmd: &str| -> bool {
+            match session.readline("(y/N) ") {
+                Ok(line) => {
+                    let trimmed = line.trim().to_lowercase();
+                    trimmed == "y" || trimmed == "yes"
+                }
+                Err(_) => false,
+            }
+        };
         let result = tool_executor::run_tool_loop(
             client,
             condition,
             "[MODE: CODE] Use tools to achieve the goal. When done, explain what was accomplished.",
             "",
+            &mut approve_fn,
         )
         .await;
         match result {
