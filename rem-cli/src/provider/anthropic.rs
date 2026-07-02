@@ -350,9 +350,9 @@ impl ProviderBackend for AnthropicBackend {
                     messages.push(json!({"role": "assistant", "content": [{"type": "text", "text": assistant_msg}]}));
                 }
             }
-            messages.push(json!({"role": "user", "content": user_prompt}));
+            messages.push(json!({"role": "user", "content": [{"type": "text", "text": user_prompt}]}));
         } else {
-            messages.push(json!({"role": "user", "content": user_prompt}));
+            messages.push(json!({"role": "user", "content": [{"type": "text", "text": user_prompt}]}));
         }
 
         let system_with_cache = json!([

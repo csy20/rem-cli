@@ -219,7 +219,12 @@ impl ProviderBackend for OllamaBackend {
         let url = super::ollama_api_url(&ctx.base_url, "chat");
         let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
         if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                messages.push(json!({"role": "user", "content": user_msg}));
+                if !assistant_msg.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": assistant_msg}));
+                }
+            }
         }
         messages.push(json!({"role": "user", "content": user_prompt}));
         let payload = json!({
@@ -273,7 +278,12 @@ impl ProviderBackend for OllamaBackend {
         let url = super::ollama_api_url(&ctx.base_url, "chat");
         let mut messages: Vec<serde_json::Value> = vec![];
         if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                messages.push(json!({"role": "user", "content": user_msg}));
+                if !assistant_msg.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": assistant_msg}));
+                }
+            }
         }
         messages.push(json!({
             "role": "user",
@@ -335,7 +345,12 @@ impl ProviderBackend for OllamaBackend {
         let mut messages: Vec<serde_json::Value> = vec![];
         messages.push(json!({"role": "system", "content": system_prompt}));
         if !history.is_empty() {
-            messages.push(json!({"role": "user", "content": history}));
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                messages.push(json!({"role": "user", "content": user_msg}));
+                if !assistant_msg.is_empty() {
+                    messages.push(json!({"role": "assistant", "content": assistant_msg}));
+                }
+            }
         }
         messages.push(json!({"role": "user", "content": user_prompt}));
 

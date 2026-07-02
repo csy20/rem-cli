@@ -75,6 +75,7 @@ fn needs_continuation(line: &str) -> bool {
     let mut opens: Vec<char> = Vec::new();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
+    let mut in_backtick = false;
     let mut escape = false;
     for c in trimmed.chars() {
         if escape {
@@ -85,15 +86,19 @@ fn needs_continuation(line: &str) -> bool {
             escape = true;
             continue;
         }
-        if c == '\'' && !in_double_quote {
+        if c == '\'' && !in_double_quote && !in_backtick {
             in_single_quote = !in_single_quote;
             continue;
         }
-        if c == '"' && !in_single_quote {
+        if c == '"' && !in_single_quote && !in_backtick {
             in_double_quote = !in_double_quote;
             continue;
         }
-        if in_single_quote || in_double_quote {
+        if c == '`' && !in_single_quote && !in_double_quote {
+            in_backtick = !in_backtick;
+            continue;
+        }
+        if in_single_quote || in_double_quote || in_backtick {
             continue;
         }
         match c {
@@ -116,7 +121,7 @@ fn needs_continuation(line: &str) -> bool {
             _ => {}
         }
     }
-    !opens.is_empty()
+    !opens.is_empty() || in_backtick
 }
 
 /// Reads user input with multi-line support.
@@ -245,7 +250,8 @@ async fn dispatch_slash_command(
             return false;
         }
         "/undo" => {
-            handle_undo(session);
+            let n: usize = args.parse().unwrap_or(1);
+            handle_undo(session, n);
             return false;
         }
         "/files" => {

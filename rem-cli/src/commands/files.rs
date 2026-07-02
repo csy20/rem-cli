@@ -273,7 +273,11 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
     let mut written: Vec<BackupEntry> = Vec::new();
     for (f, abs_path) in &safe_entries {
         let will_overwrite = abs_path.exists();
-        let original = fs::read_to_string(abs_path).ok();
+        let original = if will_overwrite {
+            fs::read_to_string(abs_path).ok()
+        } else {
+            None
+        };
         if will_overwrite {
             println!(
                 "{}   {} {}",
@@ -332,10 +336,55 @@ pub(crate) fn auto_write_files(session: &mut ChatSession, files: &[FileEntry]) {
 /// Supports `/undo N` to undo multiple levels.
 /// If the file existed before writing, its original content is restored.
 /// If the file was new, it gets deleted.
-pub(crate) fn handle_undo(session: &mut ChatSession) {
+pub(crate) fn handle_undo(session: &mut ChatSession, levels: usize) {
     let t = ui::theme::active();
+
+    let total_batches = session.code_out.undo_stack.len() + 1;
+    let levels = levels.max(1).min(total_batches);
+
     if session.code_out.last_files_written.is_empty() && session.code_out.undo_stack.is_empty() {
         println!("  {} Nothing to undo.", ui::theme::paint_warning(&t, "!"));
+        return;
+    }
+
+    if levels > 1 {
+        // /undo N: skip interactive prompt, undo N levels directly
+        let mut modified = 0;
+        let mut dirs_to_clean: Vec<PathBuf> = Vec::new();
+
+        // Undo current batch
+        let batch = std::mem::take(&mut session.code_out.last_files_written);
+        modified += undo_batch(&batch, &t, &mut dirs_to_clean);
+
+        // Undo additional batches from stack
+        for _ in 1..levels {
+            if let Some(batch) = session.code_out.undo_stack.pop() {
+                modified += undo_batch(&batch, &t, &mut dirs_to_clean);
+            }
+        }
+
+        // Restore previous batch from stack if available
+        if let Some(prev) = session.code_out.undo_stack.pop() {
+            session.code_out.last_files_written = prev;
+        }
+
+        cleanup_dirs(dirs_to_clean);
+
+        if modified > 0 {
+            let input = session.last_user_input.clone();
+            let intent = session.last_intent.clone();
+            if intent == TaskIntent::CodeAction {
+                session
+                    .feedback
+                    .record_correction(&input, &intent, &TaskIntent::FastAnswer);
+            }
+            println!(
+                "  {} {} file(s) reverted across {} level(s).",
+                ui::theme::paint_success_label(&t, "\u{258C} \u{2713}"),
+                modified,
+                levels
+            );
+        }
         return;
     }
 
@@ -370,67 +419,8 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
         session.code_out.last_files_written = prev;
     }
 
-    for entry in &batch {
-        if let Some(ref original) = entry.original {
-            // Check if file was modified since we wrote it
-            if let Ok(current) = fs::read_to_string(&entry.path) {
-                if current != *original && !current.is_empty() {
-                    println!(
-                        "  {} {} has been modified since write — skipping restore (current differs from backup)",
-                        ui::theme::paint_warning(&t, "\u{258C}"),
-                        ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
-                    );
-                    continue;
-                }
-            }
-            // Restore original content
-            if let Err(e) = fs::write(&entry.path, original) {
-                println!(
-                    "  {} failed to restore {}: {}",
-                    ui::theme::paint_error_label(&t, "\u{258C}"),
-                    entry.path.display(),
-                    e
-                );
-            } else {
-                println!(
-                    "  {} restored {}",
-                    ui::theme::paint_warning(&t, "\u{258C}"),
-                    ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
-                );
-                modified += 1;
-            }
-        } else if entry.path.exists() {
-            // File was new, delete it
-            if let Some(parent) = entry.path.parent() {
-                dirs_to_clean.push(parent.to_path_buf());
-            }
-            match fs::remove_file(&entry.path) {
-                Ok(()) => {
-                    println!(
-                        "  {} removed {}",
-                        ui::theme::paint_warning(&t, "\u{258C}"),
-                        ui::theme::paint_dim(&t, &format!("{}", entry.path.display()))
-                    );
-                    modified += 1;
-                }
-                Err(e) => {
-                    println!(
-                        "  {} failed to remove {}: {}",
-                        ui::theme::paint_error_label(&t, "\u{258C}"),
-                        entry.path.display(),
-                        e
-                    );
-                }
-            }
-        }
-    }
-
-    dirs_to_clean.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
-    for dir in &dirs_to_clean {
-        if dir.exists() {
-            let _ = fs::remove_dir(dir);
-        }
-    }
+    modified += undo_batch(&batch, &t, &mut dirs_to_clean);
+    cleanup_dirs(dirs_to_clean);
 
     if modified > 0 {
         let input = session.last_user_input.clone();
@@ -445,6 +435,72 @@ pub(crate) fn handle_undo(session: &mut ChatSession) {
             ui::theme::paint_success_label(&t, "\u{258C} \u{2713}"),
             modified
         );
+    }
+}
+
+fn undo_batch(batch: &[BackupEntry], t: &crate::ui::theme::Theme, dirs_to_clean: &mut Vec<PathBuf>) -> usize {
+    let mut modified = 0;
+    for entry in batch {
+        if let Some(ref original) = entry.original {
+            if let Ok(current) = fs::read_to_string(&entry.path) {
+                if current != *original && !current.is_empty() {
+                    println!(
+                        "  {} {} has been modified since write — skipping restore (current differs from backup)",
+                        ui::theme::paint_warning(t, "\u{258C}"),
+                        ui::theme::paint_dim(t, &format!("{}", entry.path.display()))
+                    );
+                    continue;
+                }
+            }
+            if let Err(e) = fs::write(&entry.path, original) {
+                println!(
+                    "  {} failed to restore {}: {}",
+                    ui::theme::paint_error_label(t, "\u{258C}"),
+                    entry.path.display(),
+                    e
+                );
+            } else {
+                println!(
+                    "  {} restored {}",
+                    ui::theme::paint_warning(t, "\u{258C}"),
+                    ui::theme::paint_dim(t, &format!("{}", entry.path.display()))
+                );
+                modified += 1;
+            }
+        } else if entry.path.exists() {
+            if let Some(parent) = entry.path.parent() {
+                dirs_to_clean.push(parent.to_path_buf());
+            }
+            match fs::remove_file(&entry.path) {
+                Ok(()) => {
+                    println!(
+                        "  {} removed {}",
+                        ui::theme::paint_warning(t, "\u{258C}"),
+                        ui::theme::paint_dim(t, &format!("{}", entry.path.display()))
+                    );
+                    modified += 1;
+                }
+                Err(e) => {
+                    println!(
+                        "  {} failed to remove {}: {}",
+                        ui::theme::paint_error_label(t, "\u{258C}"),
+                        entry.path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+    modified
+}
+
+fn cleanup_dirs(dirs_to_clean: Vec<PathBuf>) {
+    let mut dirs = dirs_to_clean;
+    dirs.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
+    for dir in &dirs {
+        if dir.exists() {
+            let _ = fs::remove_dir(dir);
+        }
     }
 }
 

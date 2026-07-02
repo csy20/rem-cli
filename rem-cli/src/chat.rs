@@ -438,7 +438,7 @@ impl ChatSession {
                 }
             }
 
-            let re = Regex::new(&format!(r"\b@{}\b", regex::escape(ref_path))).unwrap();
+            let re = Regex::new(&format!(r"@{}", regex::escape(ref_path))).unwrap();
             cleaned_input = re.replace_all(&cleaned_input, *ref_path).to_string();
         }
 

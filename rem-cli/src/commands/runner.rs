@@ -54,7 +54,7 @@ pub(crate) async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, v
 pub(crate) async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: bool) -> Result<()> {
     let mut composed = args.prompt;
     if let Some(path) = args.file {
-        let ctx = build_context(&path, cfg.max_context_bytes)?;
+        let ctx = build_context(&path, cfg.max_context_bytes, None)?;
         composed = format!("{}\n\nFile context:\n{}", composed, ctx);
     }
     let t = theme::active();
@@ -145,7 +145,7 @@ pub(crate) async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArg
     let t = theme::active();
     print_banner(client);
     let existing = fs::read_to_string(&args.file).with_context(|| format!("failed to read {}", args.file.display()))?;
-    let dir_ctx = build_context(&args.file, cfg.max_context_bytes)?;
+    let dir_ctx = build_context(&args.file, cfg.max_context_bytes, Some(&existing))?;
     let prompt = format!(
         "Task: {}\n\nTarget file: {}\n\nCurrent content:\n{}\n\nNearby context:\n{}\n\nReturn updated file content in code or files array.",
         args.task, args.file.display(), existing, dir_ctx
@@ -166,23 +166,90 @@ pub(crate) async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArg
     Ok(())
 }
 
-fn build_context(target: &Path, max_bytes: usize) -> Result<String> {
+fn should_skip_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | "node_modules"
+            | "target"
+            | "dist"
+            | "build"
+            | ".next"
+            | ".cache"
+            | ".rem"
+            | "__pycache__"
+            | ".venv"
+            | "venv"
+    )
+}
+
+fn should_skip_file(name: &str) -> bool {
+    let lower = name.as_bytes();
+    let len = lower.len();
+    if len > 7 {
+        let end = &lower[len.saturating_sub(7)..];
+        if end.eq_ignore_ascii_case(b".min.js") || end.eq_ignore_ascii_case(b".min.css") {
+            return true;
+        }
+    }
+    name.ends_with(".lock")
+        || name.ends_with(".png")
+        || name.ends_with(".jpg")
+        || name.ends_with(".jpeg")
+        || name.ends_with(".gif")
+        || name.ends_with(".webp")
+        || name.ends_with(".ico")
+        || name.ends_with(".pdf")
+        || name.ends_with(".zip")
+        || name.ends_with(".tar")
+        || name.ends_with(".gz")
+        || name.ends_with(".bz2")
+        || name.ends_with(".xz")
+        || name.ends_with(".7z")
+        || name.ends_with(".mp3")
+        || name.ends_with(".mp4")
+        || name.ends_with(".mov")
+        || name.ends_with(".woff")
+        || name.ends_with(".woff2")
+        || name.ends_with(".ttf")
+        || name.ends_with(".otf")
+        || name.ends_with(".eot")
+}
+
+fn build_context(target: &Path, max_bytes: usize, existing_content: Option<&str>) -> Result<String> {
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let mut out = String::from("Directory snapshot:\n");
     for entry in WalkDir::new(parent).max_depth(2) {
         let entry = entry?;
-        let p = entry.path();
-        let rel = p.strip_prefix(parent).unwrap_or(p);
-        if rel.as_os_str().is_empty() {
+        if entry.depth() == 0 {
             continue;
         }
+        if entry.file_type().is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                if should_skip_dir(name) {
+                    continue;
+                }
+            }
+        }
+        if entry.file_type().is_file() {
+            if let Some(name) = entry.file_name().to_str() {
+                if should_skip_file(name) {
+                    continue;
+                }
+            }
+        }
+        let p = entry.path();
+        let rel = p.strip_prefix(parent).unwrap_or(p);
         out.push_str(&format!("- {}\n", rel.display()));
         if out.len() > max_bytes {
             break;
         }
     }
-    if target.exists() {
-        let content = fs::read_to_string(target).with_context(|| format!("failed to read {}", target.display()))?;
+    if target.exists() || existing_content.is_some() {
+        let content = match existing_content {
+            Some(c) => c.to_string(),
+            None => fs::read_to_string(target).with_context(|| format!("failed to read {}", target.display()))?,
+        };
         out.push_str("\nTarget file:\n");
         out.push_str(&truncate_bytes(&content, max_bytes / 2));
     }
@@ -415,7 +482,7 @@ mod tests {
         let (dir, _guard) = unique_dir("build-empty");
         let file = dir.join("empty.txt");
         std::fs::write(&file, "").unwrap();
-        let result = build_context(&file, 16_000).unwrap();
+        let result = build_context(&file, 16_000, None).unwrap();
         assert!(result.contains("Directory snapshot"), "result: {result}");
         assert!(result.contains("empty.txt"), "result: {result}");
     }
@@ -425,7 +492,7 @@ mod tests {
         let (dir, _guard) = unique_dir("build-file");
         let file = dir.join("hello.txt");
         std::fs::write(&file, "Hello, world!").unwrap();
-        let result = build_context(&file, 16_000).unwrap();
+        let result = build_context(&file, 16_000, None).unwrap();
         assert!(result.contains("Directory snapshot"));
         assert!(result.contains("hello.txt"));
         assert!(result.contains("Hello, world!"));
@@ -437,7 +504,7 @@ mod tests {
         let file = dir.join("big.txt");
         let big = "A".repeat(10_000);
         std::fs::write(&file, &big).unwrap();
-        let result = build_context(&file, 200).unwrap();
+        let result = build_context(&file, 200, None).unwrap();
         assert!(
             result.len() < 500,
             "expected output to be truncated, got {} bytes: {result}",
@@ -445,6 +512,17 @@ mod tests {
         );
         assert!(result.contains("Directory snapshot"));
         assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_build_context_with_existing_content() {
+        let (dir, _guard) = unique_dir("build-preexisting");
+        let file = dir.join("hello.txt");
+        std::fs::write(&file, "Goodbye, world!").unwrap();
+        // Pass pre-read content that differs from file on disk
+        let result = build_context(&file, 16_000, Some("Hello, world!")).unwrap();
+        assert!(result.contains("Hello, world!"));
+        assert!(!result.contains("Goodbye, world!"));
     }
 
     // -----------------------------------------------------------------------

@@ -4,6 +4,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::agentic::{
@@ -48,6 +49,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
             ui::theme::paint(&t, "accent", "\u{258C}", true),
             ui::theme::paint_dim(&t, "\u{26A1}")
         );
+        let project_path = session.ctx.project_dir.clone().unwrap_or_else(|| PathBuf::from("."));
         let mut approve_fn = |_cmd: &str| -> bool {
             match session.readline("(y/N) ") {
                 Ok(line) => {
@@ -57,12 +59,14 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                 Err(_) => false,
             }
         };
+        let project_dir: &Path = &project_path;
         let result = tool_executor::run_tool_loop(
             client,
             condition,
             "[MODE: CODE] Use tools to achieve the goal. When done, explain what was accomplished.",
             "",
             &mut approve_fn,
+            project_dir,
         )
         .await;
         match result {

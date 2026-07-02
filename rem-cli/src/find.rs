@@ -78,6 +78,8 @@ pub const SKIP_SUFFIXES: &[&str] = &[
     ".bz2", ".xz", ".7z", ".mp3", ".mp4", ".mov", ".woff", ".woff2", ".ttf", ".otf", ".eot",
 ];
 
+const REGEX_CACHE_MAX_SIZE: usize = 64;
+
 static REGEX_CACHE: LazyLock<Mutex<HashMap<String, regex::Regex>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Checks whether a directory name should be skipped during traversal.
@@ -136,19 +138,28 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
             format!("(?i){}", query)
         };
         let mut cache = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        let re = match regex::Regex::new(&re_query) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "  {} invalid regex pattern: {}",
-                    crate::ui::theme::paint_error_label(&crate::ui::theme::active(), "error:"),
-                    e
-                );
-                report.elapsed_ms = start.elapsed().as_millis();
-                return report;
+        if let Some(re) = cache.get(&re_query) {
+            Some(re.clone())
+        } else {
+            if cache.len() >= REGEX_CACHE_MAX_SIZE {
+                cache.clear();
             }
-        };
-        Some(cache.entry(re_query.clone()).or_insert(re).clone())
+            match regex::Regex::new(&re_query) {
+                Ok(re) => {
+                    cache.insert(re_query, re.clone());
+                    Some(re)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {} invalid regex pattern: {}",
+                        crate::ui::theme::paint_error_label(&crate::ui::theme::active(), "error:"),
+                        e
+                    );
+                    report.elapsed_ms = start.elapsed().as_millis();
+                    return report;
+                }
+            }
+        }
     } else {
         None
     };
@@ -266,16 +277,11 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
                 }
             }
         } else {
-            let mut lowered_lines: Vec<String> = Vec::new();
-            let mut raw_lines: Vec<String> = Vec::new();
-            for line in reader.lines().map_while(Result::ok) {
-                lowered_lines.push(line.to_lowercase());
-                raw_lines.push(line);
-            }
-            for (idx, raw_line) in raw_lines.iter().enumerate() {
+            for (idx, raw_line) in reader.lines().map_while(Result::ok).enumerate() {
                 let line_no = idx + 1;
+                let lowered = raw_line.to_lowercase();
+                let haystack = lowered.as_bytes();
                 let mut search_from = 0usize;
-                let haystack = lowered_lines[idx].as_bytes();
                 while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
                     let column = byte_to_column(&haystack[..search_from + pos]);
                     report.matches.push(Match {

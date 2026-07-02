@@ -332,9 +332,9 @@ pub(crate) async fn run_tool_loop(
     system_prompt: &str,
     history: &str,
     approve_fn: &mut dyn FnMut(&str) -> bool,
+    project_dir: &std::path::Path,
 ) -> Result<String, String> {
     let tools = builtin_tools();
-    let project_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let t = ui::theme::active();
 
     let mut current_prompt = prompt.to_string();
@@ -358,7 +358,7 @@ pub(crate) async fn run_tool_loop(
             Ok(ToolResponse::ToolCalls(calls)) => {
                 let mut results = Vec::new();
                 for call in &calls {
-                    let result = execute_tool_call(call, &project_dir, approve_fn).await;
+                    let result = execute_tool_call(call, project_dir, approve_fn).await;
                     results.push(result.clone());
                     if result.is_error {
                         println!(

@@ -154,7 +154,7 @@ impl ProviderKind {
 
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
-            "openai" => ProviderKind::OpenAI,
+            "openai" | "vllm" => ProviderKind::OpenAI,
             "gemini" | "google" => ProviderKind::Gemini,
             "anthropic" | "claude" => ProviderKind::Anthropic,
             "azure" => ProviderKind::Azure,
@@ -561,7 +561,9 @@ pub fn emit_token(text: &str) {
     if STREAM_TOKENS.load(Ordering::SeqCst) {
         use std::io::Write;
         let _ = std::io::stdout().write(text.as_bytes());
-        let _ = std::io::stdout().flush();
+        if text.contains('\n') {
+            let _ = std::io::stdout().flush();
+        }
     }
 }
 
@@ -586,6 +588,12 @@ where
         if offset > 0 && buf.len() > crate::constants::INITIAL_BUF_CAPACITY * 4 {
             buf = buf[offset..].to_vec();
             offset = 0;
+        }
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(anyhow!(
+                "stream buffer exceeded max size ({} bytes)",
+                MAX_RESPONSE_BYTES
+            ));
         }
         buf.extend_from_slice(&chunk);
         loop {
@@ -629,13 +637,14 @@ pub(super) async fn stream_sse_response(resp: reqwest::Response) -> Result<Strin
             if data == "[DONE]" {
                 return Ok(false);
             }
-            // Fast-path: extract content delta via string split instead of full JSON parse
-            if let Some(content) = data.split("\"content\":\"").nth(1).and_then(|s| s.split('"').next()) {
-                if !content.is_empty() {
-                    full.push_str(content);
-                    emit_token(content);
-                    if full.len() > MAX_RESPONSE_BYTES {
-                        return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
+            if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
+                if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
+                    if !content.is_empty() {
+                        full.push_str(content);
+                        emit_token(content);
+                        if full.len() > MAX_RESPONSE_BYTES {
+                            return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
+                        }
                     }
                 }
             }
@@ -731,6 +740,8 @@ pub(super) async fn handle_ollama_error(resp: reqwest::Response, url: &str, mode
 }
 
 #[allow(dead_code)]
+/// Stream handler for the legacy `/api/generate` endpoint (vs `/api/chat`).
+/// Kept for reference in case non-chat Ollama endpoints are needed later.
 pub(super) async fn stream_ollama_response(resp: reqwest::Response) -> Result<String> {
     stream_lines(resp, |trimmed, full| {
         if let Ok(obj) = serde_json::from_str::<ollama::OllamaStreamLine>(trimmed) {
@@ -844,7 +855,9 @@ pub(super) async fn openai_compat_chat_stream(
     if !history.is_empty() {
         for (user_msg, assistant_msg) in parse_history_turns(history) {
             messages.push(json!({"role": "user", "content": user_msg}));
-            messages.push(json!({"role": "assistant", "content": assistant_msg}));
+            if !assistant_msg.is_empty() {
+                messages.push(json!({"role": "assistant", "content": assistant_msg}));
+            }
         }
     }
     messages.push(json!({"role": "user", "content": user_prompt}));
