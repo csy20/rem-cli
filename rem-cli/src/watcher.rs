@@ -104,6 +104,17 @@ pub fn watch_and_reindex(root: &Path) -> Result<mpsc::Sender<()>> {
             let root = root_clone.clone();
             let reindex_busy = Arc::clone(&reindex_busy);
             std::thread::spawn(move || {
+                // Guard resets reindex_busy on drop — covers both normal exit and panic
+                struct ReindexGuard<'a> {
+                    flag: &'a AtomicBool,
+                }
+                impl Drop for ReindexGuard<'_> {
+                    fn drop(&mut self) {
+                        self.flag.store(false, Ordering::SeqCst);
+                    }
+                }
+                let _guard = ReindexGuard { flag: &reindex_busy };
+
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     if let Err(e) = auto_reindex(&root) {
                         warn!("auto-reindex failed: {}", e);
@@ -112,7 +123,6 @@ pub fn watch_and_reindex(root: &Path) -> Result<mpsc::Sender<()>> {
                 if let Err(panic) = result {
                     warn!("auto-reindex thread panicked: {:?}", panic);
                 }
-                reindex_busy.store(false, Ordering::SeqCst);
             });
         }
     })

@@ -205,23 +205,12 @@ fn classify_intent_heuristic(input: &str) -> TaskIntent {
         return TaskIntent::WebNeeded;
     }
 
-    let is_question = lower.starts_with("what ")
-        || lower.starts_with("how ")
-        || lower.starts_with("why ")
-        || lower.starts_with("when ")
-        || lower.starts_with("where ")
-        || lower.starts_with("who ")
-        || lower.starts_with("can you explain")
-        || lower.starts_with("explain ")
-        || lower.starts_with("describe ")
-        || lower.starts_with("tell me ")
-        || lower.starts_with("show me ");
+    let is_question = has_question_prefix_lower(&lower);
 
-    let plan_indicators = lower.contains("how would you")
+    let plan_indicators = lower.contains("suggest an approach")
         || lower.contains("how should i")
         || lower.contains("what's the best way")
         || lower.contains("what is the best way")
-        || lower.contains("suggest an approach")
         || lower.contains("suggest a strategy")
         || lower.contains("design a system")
         || lower.contains("what are the trade")

@@ -138,6 +138,11 @@ async fn main() -> Result<()> {
 
     validate_config(&cfg);
 
+    // Commands that don't need a provider — handle early
+    let _handled = matches!(
+        cli.command,
+        Some(Commands::New(_)) | Some(Commands::Index(_)) | Some(Commands::Pull(_))
+    );
     if let Some(Commands::New(args)) = cli.command {
         return run_new(args, &cfg);
     }

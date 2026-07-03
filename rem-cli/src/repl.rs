@@ -250,7 +250,13 @@ async fn dispatch_slash_command(
             return false;
         }
         "/undo" => {
-            let n: usize = args.parse().unwrap_or(1);
+            let n: usize = match args.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    tracing::warn!("invalid /undo argument '{}', defaulting to 1", args);
+                    1
+                }
+            };
             handle_undo(session, n);
             return false;
         }
@@ -323,7 +329,13 @@ async fn dispatch_slash_command(
             return false;
         }
         "/copy" => {
-            let n: usize = args.parse().unwrap_or(1);
+            let n: usize = match args.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    tracing::warn!("invalid /copy argument '{}', defaulting to 1", args);
+                    1
+                }
+            };
             handle_copy(session, n);
             return false;
         }
@@ -551,6 +563,9 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
     let mut session = initialize_session(client, cfg)?;
     let t = ui::theme::active();
 
+    // Pre-warm the HTTP client so the first API call doesn't pay lazy-init cost
+    let _ = crate::provider::HTTP_CLIENT.clone();
+
     loop {
         let prompt = build_prompt(&session, client);
 
@@ -675,10 +690,6 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         // Static thinking indicator (no spinner to avoid TTY conflict with token streaming)
         eprint!("  {} ", ui::theme::paint_dim(&t, "thinking..."));
         let _ = std::io::stderr().flush();
-
-        {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
 
         // Clear thinking indicator and show streaming label
         eprint!("\r{}\r", " ".repeat(30));

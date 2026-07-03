@@ -11,7 +11,6 @@ use crate::session_io::build_project_context;
 use crate::token_count::estimate_tokens;
 use crate::types::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
-use regex::Regex;
 use rustyline::config::Configurer;
 use rustyline::DefaultEditor;
 use std::fs;
@@ -89,7 +88,8 @@ impl HistoryManager {
         let mut out = String::from("[Previous conversation — keep context in mind]:\n\n");
         for (user, assistant) in self.history.iter().rev().take(6).rev() {
             let truncated_assistant = if estimate_tokens(assistant) > TOKEN_BUDGET_PER_TURN {
-                let estimated_len = (assistant.len() * TOKEN_BUDGET_PER_TURN) / estimate_tokens(assistant).max(1);
+                let char_count = assistant.chars().count();
+                let estimated_len = (char_count * TOKEN_BUDGET_PER_TURN) / estimate_tokens(assistant).max(1);
                 let cutoff = estimated_len.min(assistant.len());
                 let cutoff = (0..=cutoff).rev().find(|&i| assistant.is_char_boundary(i)).unwrap_or(0);
                 let truncated = assistant[..cutoff].to_string();
@@ -393,17 +393,7 @@ impl ChatSession {
                 None => continue,
             };
 
-            if path.is_file() {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    let truncated = crate::truncate_bytes(&content, 8000);
-                    extra_context.push_str(&format!(
-                        "\n[File: {}]\n{}\n[/File: {}]\n",
-                        path.display(),
-                        truncated,
-                        path.display()
-                    ));
-                }
-            } else if path.is_dir() {
+            if path.is_dir() {
                 let mut listing = String::new();
                 for e in WalkDir::new(&path)
                     .max_depth(2)
@@ -436,10 +426,16 @@ impl ChatSession {
                         path.display()
                     ));
                 }
+            } else if let Ok(content) = fs::read_to_string(&path) {
+                let truncated = crate::truncate_bytes(&content, 8000);
+                extra_context.push_str(&format!(
+                    "\n[File: {}]\n{}\n[/File: {}]\n",
+                    path.display(),
+                    truncated,
+                    path.display()
+                ));
             }
-
-            let re = Regex::new(&format!(r"@{}", regex::escape(ref_path))).unwrap();
-            cleaned_input = re.replace_all(&cleaned_input, *ref_path).to_string();
+            cleaned_input = cleaned_input.replace(&format!("@{}", ref_path), ref_path);
         }
 
         (cleaned_input, extra_context)

@@ -307,7 +307,7 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
     }
 
     let url = cfg.ollama_url.trim();
-    if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
+    if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
         warn!(
             "ollama_url '{}' does not look like a valid URL (expected http:// or https://)",
             url

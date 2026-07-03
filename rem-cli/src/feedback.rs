@@ -2,6 +2,7 @@
 //! Tracks user corrections to intent classification so the system can learn
 //! from mistakes. Persisted to `~/.config/rem-cli/feedback.json`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -30,6 +31,7 @@ pub struct FeedbackTracker {
     store: FeedbackStore,
     path: PathBuf,
     dirty: bool,
+    seen_keys: HashSet<String>,
 }
 
 impl FeedbackTracker {
@@ -67,6 +69,7 @@ impl FeedbackTracker {
             store,
             path,
             dirty: false,
+            seen_keys: HashSet::new(),
         }
     }
 
@@ -82,15 +85,8 @@ impl FeedbackTracker {
 
         let key = format!("{}:{}:{}", input, classified_str, correct_str);
 
-        if let Some(entry) = self
-            .store
-            .entries
-            .iter_mut()
-            .find(|e| format!("{}:{}:{}", e.input, e.classified_as, e.correct_intent) == key)
-        {
-            entry.count += 1;
-            entry.timestamp = now;
-        } else {
+        if !self.seen_keys.contains(&key) {
+            self.seen_keys.insert(key);
             self.store.entries.push(FeedbackEntry {
                 input: input.to_string(),
                 classified_as: classified_str,
@@ -100,8 +96,20 @@ impl FeedbackTracker {
             });
             if self.store.entries.len() > 500 {
                 self.store.entries.sort_by_key(|e| e.timestamp);
-                self.store.entries.drain(0..(self.store.entries.len() - 500));
+                let drained: Vec<_> = self.store.entries.drain(0..(self.store.entries.len() - 500)).collect();
+                for entry in &drained {
+                    let ek = format!("{}:{}:{}", entry.input, entry.classified_as, entry.correct_intent);
+                    self.seen_keys.remove(&ek);
+                }
             }
+        } else if let Some(entry) = self
+            .store
+            .entries
+            .iter_mut()
+            .find(|e| e.input == input && e.classified_as == classified_str && e.correct_intent == correct_str)
+        {
+            entry.count += 1;
+            entry.timestamp = now;
         }
 
         self.store.total_corrections += 1;

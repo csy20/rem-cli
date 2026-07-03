@@ -30,19 +30,19 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     // Exact dangerous command patterns (after normalization)
     // Uses word-boundary checks to avoid false positives on benign paths.
     // e.g. "rm -rf /" should match "rm -rf /" but not "rm -rf /tmp"
-    let blocked_patterns = [
-        "rm -rf --no-preserve-root",
-        "rm -rf /*",
-        "rm -rf /.",
-        "mkfs",
-        ":(){:|:&};:",
-        "shutdown",
-        "reboot",
-    ];
+    let blocked_patterns = ["rm -rf --no-preserve-root", "rm -rf /*", "rm -rf /.", ":(){:|:&};:"];
     for pat in &blocked_patterns {
         if normalized.contains(pat) {
             return true;
         }
+    }
+    // Check dangerous standalone commands as complete tokens to avoid
+    // false positives like `echo mkfs`, `comment about shutdown`, etc.
+    if normalized
+        .split_whitespace()
+        .any(|w| w == "mkfs" || w == "shutdown" || w == "reboot")
+    {
+        return true;
     }
     // rm -rf / (standalone root, not a prefix like /tmp)
     if normalized.contains("rm -rf / ")
@@ -65,7 +65,9 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
         }
     }
     // chmod 777 on system roots (handles flags between chmod and mode like "chmod -R 777 /")
-    if normalized.split_whitespace().any(|w| w.ends_with("chmod"))
+    if normalized
+        .split_whitespace()
+        .any(|w| w == "chmod" || w.ends_with("/chmod"))
         && normalized.split_whitespace().any(|w| w == "777")
         && normalized
             .split_whitespace()
@@ -210,6 +212,14 @@ mod tests {
         assert!(
             is_command_blocked("chmod -R 777 /etc"),
             "chmod -R 777 /etc should be blocked"
+        );
+    }
+
+    #[test]
+    fn chmod_false_positive() {
+        assert!(
+            !is_command_blocked("./mychmod 777 /tmp/file"),
+            "mychmod 777 should not be blocked (false positive)"
         );
     }
 

@@ -179,9 +179,6 @@ pub fn detect_language_from_content(code: &str) -> &str {
     if first_line.starts_with("struct ") && first_line.contains('{')
         || first_line.starts_with("enum ") && first_line.contains('{')
         || first_line.starts_with("union ") && first_line.contains('{')
-        || first_line.starts_with("struct ") && first_line.trim_end().ends_with('{')
-        || first_line.starts_with("enum ") && first_line.trim_end().ends_with('{')
-        || first_line.starts_with("union ") && first_line.trim_end().ends_with('{')
     {
         return "rust";
     }

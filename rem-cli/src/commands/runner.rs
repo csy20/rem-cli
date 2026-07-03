@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 use crate::cli::{AppConfig, AskArgs, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs, ThemeArgs};
 use crate::config;
 use crate::constants::CHAT_SYSTEM_PROMPT_CONVERSATIONAL;
+use crate::find;
 use crate::indexer;
 use crate::intent::{classify_intent, TaskIntent};
 use crate::provider::Provider;
@@ -81,10 +82,14 @@ pub(crate) async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, v
     let reply = result?;
     match args.format.as_str() {
         "json" => {
-            println!("{}", serde_json::to_string(&reply).unwrap_or_default());
+            let json = serde_json::to_string(&reply)
+                .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {}\"}}", e));
+            println!("{}", json);
         }
         "json-pretty" => {
-            println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
+            let json = serde_json::to_string_pretty(&reply)
+                .unwrap_or_else(|e| format!("{{\"error\": \"serialization failed: {}\"}}", e));
+            println!("{}", json);
         }
         _ => {
             if verbose {
@@ -166,56 +171,6 @@ pub(crate) async fn run_patch(client: &Provider, cfg: &AppConfig, args: PatchArg
     Ok(())
 }
 
-fn should_skip_dir(name: &str) -> bool {
-    matches!(
-        name,
-        ".git"
-            | "node_modules"
-            | "target"
-            | "dist"
-            | "build"
-            | ".next"
-            | ".cache"
-            | ".rem"
-            | "__pycache__"
-            | ".venv"
-            | "venv"
-    )
-}
-
-fn should_skip_file(name: &str) -> bool {
-    let lower = name.as_bytes();
-    let len = lower.len();
-    if len > 7 {
-        let end = &lower[len.saturating_sub(7)..];
-        if end.eq_ignore_ascii_case(b".min.js") || end.eq_ignore_ascii_case(b".min.css") {
-            return true;
-        }
-    }
-    name.ends_with(".lock")
-        || name.ends_with(".png")
-        || name.ends_with(".jpg")
-        || name.ends_with(".jpeg")
-        || name.ends_with(".gif")
-        || name.ends_with(".webp")
-        || name.ends_with(".ico")
-        || name.ends_with(".pdf")
-        || name.ends_with(".zip")
-        || name.ends_with(".tar")
-        || name.ends_with(".gz")
-        || name.ends_with(".bz2")
-        || name.ends_with(".xz")
-        || name.ends_with(".7z")
-        || name.ends_with(".mp3")
-        || name.ends_with(".mp4")
-        || name.ends_with(".mov")
-        || name.ends_with(".woff")
-        || name.ends_with(".woff2")
-        || name.ends_with(".ttf")
-        || name.ends_with(".otf")
-        || name.ends_with(".eot")
-}
-
 fn build_context(target: &Path, max_bytes: usize, existing_content: Option<&str>) -> Result<String> {
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
     let mut out = String::from("Directory snapshot:\n");
@@ -226,14 +181,14 @@ fn build_context(target: &Path, max_bytes: usize, existing_content: Option<&str>
         }
         if entry.file_type().is_dir() {
             if let Some(name) = entry.file_name().to_str() {
-                if should_skip_dir(name) {
+                if find::should_skip_dir(name) {
                     continue;
                 }
             }
         }
         if entry.file_type().is_file() {
             if let Some(name) = entry.file_name().to_str() {
-                if should_skip_file(name) {
+                if find::should_skip_file(name) {
                     continue;
                 }
             }

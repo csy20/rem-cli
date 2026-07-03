@@ -1,6 +1,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::time::timeout;
@@ -17,14 +18,16 @@ const MAX_TOOL_ROUNDS: usize = crate::constants::MAX_TOOL_ROUNDS;
 
 /// Executes a single tool call and returns the result.
 /// `approve_fn` is called for shell command approval (instead of reading from stdin).
+/// `tracked_writes` is populated with paths of written files (for undo/session tracking).
 pub(crate) async fn execute_tool_call(
     tool_call: &ToolCall,
     project_dir: &std::path::Path,
     approve_fn: &mut dyn FnMut(&str) -> bool,
+    tracked_writes: &Mutex<Vec<String>>,
 ) -> ToolCallResult {
     match tool_call.name.as_str() {
         "read_file" => execute_read_file(tool_call, project_dir),
-        "write_file" => execute_write_file(tool_call, project_dir),
+        "write_file" => execute_write_file(tool_call, project_dir, tracked_writes),
         "search_files" => execute_search_files(tool_call, project_dir),
         "run_lint" => execute_tool_lint(tool_call, project_dir).await,
         "run_test" => execute_tool_test(tool_call, project_dir).await,
@@ -65,7 +68,11 @@ fn execute_read_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> Too
     }
 }
 
-fn execute_write_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+fn execute_write_file(
+    tool_call: &ToolCall,
+    project_dir: &std::path::Path,
+    tracked_writes: &Mutex<Vec<String>>,
+) -> ToolCallResult {
     let path_str = match extract_arg(tool_call, "path") {
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
@@ -82,12 +89,17 @@ fn execute_write_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> To
         let _ = std::fs::create_dir_all(parent);
     }
     match std::fs::write(&path, content) {
-        Ok(()) => ToolCallResult {
-            call_id: tool_call.id.clone(),
-            name: "write_file".into(),
-            content: format!("Successfully wrote {} bytes to {}", content.len(), path.display()),
-            is_error: false,
-        },
+        Ok(()) => {
+            if let Ok(mut writes) = tracked_writes.lock() {
+                writes.push(path.to_string_lossy().to_string());
+            }
+            ToolCallResult {
+                call_id: tool_call.id.clone(),
+                name: "write_file".into(),
+                content: format!("Successfully wrote {} bytes to {}", content.len(), path.display()),
+                is_error: false,
+            }
+        }
         Err(e) => err_result(tool_call, &format!("cannot write '{}': {}", path.display(), e)),
     }
 }
@@ -243,7 +255,7 @@ async fn execute_run_command(
     } else {
         format!("{} {}", command, args.join(" "))
     };
-    if is_command_blocked(&full_cmd_str) || is_command_blocked(&command) || args.iter().any(|a| is_command_blocked(a)) {
+    if is_command_blocked(&full_cmd_str) || is_command_blocked(&command) {
         return err_result(tool_call, "shell command blocked by security policy");
     }
 
@@ -256,8 +268,8 @@ async fn execute_run_command(
     if !std::io::stdin().is_terminal() {
         return err_result(tool_call, "shell command execution requires a terminal for approval");
     }
-    eprint!("  ! Allow shell command? [y/N] {} ", full_cmd);
-    let _ = io::stderr().flush();
+    print!("  ! Allow shell command? [y/N] {} ", full_cmd);
+    let _ = io::stdout().flush();
     if !approve_fn(&full_cmd) {
         return err_result(tool_call, "shell command execution denied by user");
     }
@@ -326,6 +338,7 @@ fn err_result(tool_call: &ToolCall, msg: &str) -> ToolCallResult {
 /// Runs the tool loop: sends a prompt with tools, executes tool calls, and
 /// continues until the LLM produces a text response.
 /// `approve_fn` is called for shell command approval (instead of reading from stdin).
+/// Returns (summary_text, written_file_paths).
 pub(crate) async fn run_tool_loop(
     client: &Provider,
     prompt: &str,
@@ -333,9 +346,10 @@ pub(crate) async fn run_tool_loop(
     history: &str,
     approve_fn: &mut dyn FnMut(&str) -> bool,
     project_dir: &std::path::Path,
-) -> Result<String, String> {
+) -> Result<(String, Vec<String>), String> {
     let tools = builtin_tools();
     let t = ui::theme::active();
+    let tracked_writes = Arc::new(Mutex::new(Vec::new()));
 
     let mut current_prompt = prompt.to_string();
     let current_system = system_prompt.to_string();
@@ -353,12 +367,13 @@ pub(crate) async fn run_tool_loop(
             .await
         {
             Ok(ToolResponse::Text(text)) => {
-                return Ok(text);
+                let writes = tracked_writes.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                return Ok((text, writes));
             }
             Ok(ToolResponse::ToolCalls(calls)) => {
                 let mut results = Vec::new();
                 for call in &calls {
-                    let result = execute_tool_call(call, project_dir, approve_fn).await;
+                    let result = execute_tool_call(call, project_dir, approve_fn, &tracked_writes).await;
                     results.push(result.clone());
                     if result.is_error {
                         println!(
@@ -453,7 +468,8 @@ mod tests {
     async fn execute_unknown_tool_returns_error() {
         let tc = make_tool_call("nonexistent_tool", serde_json::json!({}));
         let mut approve = deny_approve;
-        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut approve).await;
+        let tracked = Mutex::new(Vec::new());
+        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut approve, &tracked).await;
         assert!(result.is_error);
         assert!(result.content.contains("Unknown tool"));
     }
@@ -462,7 +478,8 @@ mod tests {
     async fn execute_read_file_missing_path() {
         let tc = make_tool_call("read_file", serde_json::json!({}));
         let mut approve = deny_approve;
-        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut approve).await;
+        let tracked = Mutex::new(Vec::new());
+        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut approve, &tracked).await;
         assert!(result.is_error);
         assert!(result.content.contains("missing 'path'"));
     }

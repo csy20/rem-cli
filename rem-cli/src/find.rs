@@ -198,14 +198,7 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
         }
 
         let path = entry.path();
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => {
-                report.files_skipped += 1;
-                continue;
-            }
-        };
-        if should_skip_file(name) {
+        if path.file_name().and_then(|n| n.to_str()).is_none() {
             report.files_skipped += 1;
             continue;
         }
@@ -252,35 +245,14 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
                     }
                 }
             }
-        } else if opts.case_sensitive {
-            for (idx, raw_line) in reader.lines().map_while(Result::ok).enumerate() {
-                let line_no = idx + 1;
-                let mut search_from = 0usize;
-                let haystack = raw_line.as_bytes();
-                while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
-                    let column = byte_to_column(&haystack[..search_from + pos]);
-                    report.matches.push(Match {
-                        path: path.to_path_buf(),
-                        line_no,
-                        column: column + 1,
-                        line: raw_line.clone(),
-                    });
-                    if report.matches.len() >= opts.max_results {
-                        report.truncated = true;
-                        report.elapsed_ms = start.elapsed().as_millis();
-                        return report;
-                    }
-                    search_from += pos + needle.len();
-                    if search_from > haystack.len() {
-                        break;
-                    }
-                }
-            }
         } else {
             for (idx, raw_line) in reader.lines().map_while(Result::ok).enumerate() {
                 let line_no = idx + 1;
-                let lowered = raw_line.to_lowercase();
-                let haystack = lowered.as_bytes();
+                let haystack = if opts.case_sensitive {
+                    raw_line.as_bytes().to_vec()
+                } else {
+                    raw_line.to_lowercase().into_bytes()
+                };
                 let mut search_from = 0usize;
                 while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
                     let column = byte_to_column(&haystack[..search_from + pos]);

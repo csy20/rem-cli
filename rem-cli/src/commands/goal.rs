@@ -15,7 +15,7 @@ use crate::constants::CHAT_SYSTEM_PROMPT_CODE;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
 use crate::tool_executor;
-use crate::types::extract_code_blocks_with_names;
+use crate::types::{extract_code_blocks_with_names, FileEntry};
 use crate::ui;
 
 const MAX_TOOL_OUTPUT_LEN: usize = crate::constants::GOAL_TOOL_OUTPUT_MAX_CHARS;
@@ -70,7 +70,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         )
         .await;
         match result {
-            Ok(text) => {
+            Ok((text, writes)) => {
                 println!("\n{}", text);
                 println!("{}", ui::theme::paint_rail_empty(&t));
                 println!(
@@ -79,7 +79,13 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                     ui::theme::paint_success_label(&t, "\u{2713}")
                 );
 
-                let files = extract_code_blocks_with_names(&text);
+                let files: Vec<FileEntry> = writes
+                    .into_iter()
+                    .map(|p| {
+                        let content = std::fs::read_to_string(&p).unwrap_or_default();
+                        FileEntry { path: p, content }
+                    })
+                    .collect();
                 if !files.is_empty() {
                     session.code_out.last_files = files.clone();
                     crate::commands::auto_write_files(session, &files);
@@ -236,41 +242,42 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         let mut tool_results = String::new();
         if !last_written_files.is_empty() {
             for file_path in &last_written_files {
-                let lint_result = run_lint(file_path).await;
-                println!("{}", format_tool_output(&lint_result));
-
                 let is_test_file = file_path.contains("test")
                     || file_path.contains("spec")
                     || file_path.ends_with("_test.rs")
                     || file_path.ends_with("_test.py")
                     || file_path.ends_with("_spec.js");
-                let test_result = if is_test_file {
-                    let r = run_test(file_path).await;
-                    if !r.stderr.is_empty() || !r.stdout.is_empty() {
-                        println!("{}", format_tool_output(&r));
+
+                let (lint_result, test_result) = tokio::join!(run_lint(file_path), async {
+                    if is_test_file {
+                        let r = run_test(file_path).await;
+                        if !r.stderr.is_empty() || !r.stdout.is_empty() {
+                            println!("{}", format_tool_output(&r));
+                        }
+                        r
+                    } else {
+                        ToolOutput {
+                            tool_name: "test".into(),
+                            success: true,
+                            stdout: "[skipped — not a test file]".into(),
+                            stderr: String::new(),
+                            duration_ms: 0,
+                            action: "test".into(),
+                        }
                     }
-                    r
-                } else {
-                    ToolOutput {
-                        tool_name: "test".into(),
-                        success: true,
-                        stdout: "[skipped — not a test file]".into(),
-                        stderr: String::new(),
-                        duration_ms: 0,
-                        action: "test".into(),
-                    }
-                };
+                });
+                println!("{}", format_tool_output(&lint_result));
 
                 tool_results.push_str(&build_tool_context(Some(&lint_result), Some(&test_result), None));
             }
         } else {
-            tool_results.push_str(&format!("[No files written in this iteration]\n{}", cleaned));
+            tool_results.push_str("[No files written in this iteration]");
         }
 
         // Tool-level circuit breaker: detect repeated tool output
         if !tool_results.is_empty() {
             let new_hash = circuit_breaker_hash(&tool_results);
-            if new_hash == last_tool_hash && !tool_results.is_empty() && i > 0 {
+            if new_hash == last_tool_hash && i > 0 {
                 println!(
                     "{} {} circuit breaker: same results as previous iteration, stopping",
                     ui::theme::paint_warning(&t, "\u{258C}"),

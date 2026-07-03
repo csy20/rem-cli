@@ -569,8 +569,16 @@ pub(crate) fn handle_save_session(session: &ChatSession) {
     let _ = fs::create_dir_all(dir.join(".rem"));
     let json = serde_json::to_string_pretty(&session.to_session_json()).unwrap_or_default();
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    let _ = encoder.write_all(json.as_bytes());
-    let compressed = encoder.finish().unwrap_or_default();
+    if let Err(e) = encoder.write_all(json.as_bytes()) {
+        tracing::warn!("gzip write failed: {}", e);
+    }
+    let compressed = match encoder.finish() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("gzip finish failed: {}", e);
+            return;
+        }
+    };
     match fs::write(&session_file, &compressed) {
         Ok(()) => println!(
             "{} session saved to {} ({} bytes)",

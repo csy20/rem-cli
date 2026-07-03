@@ -94,8 +94,7 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
         if rel_str.starts_with('.') && rel_str != "." {
             continue;
         }
-        if rel_str.contains("venv")
-            || rel_str.contains("dist")
+        if rel_str.contains("dist")
             || rel_str.contains(".pytest_cache")
             || rel
                 .components()

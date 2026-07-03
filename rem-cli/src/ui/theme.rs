@@ -9,13 +9,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 
 const DEFAULT_THEME_NAME: &str = "GHOST";
 
 /// Returns true if NO_COLOR or CLICOLOR=0 is set (disables ANSI output).
+/// Result is cached on first call since environment variables don't change at runtime.
 fn no_color() -> bool {
-    std::env::var("NO_COLOR").is_ok() || std::env::var("CLICOLOR").map(|v| v == "0").unwrap_or(false)
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        std::env::var("NO_COLOR").is_ok() || std::env::var("CLICOLOR").map(|v| v == "0").unwrap_or(false)
+    })
 }
 
 /// Custom theme definition for loading from TOML files.

@@ -58,7 +58,8 @@ pub fn is_reasoning_model(model: &str) -> bool {
         || lower.starts_with("o3-")
         || lower.contains("deepseek-r1")
         || (lower.contains("claude-sonnet-4-20") && lower.contains("thinking"))
-        || lower.contains("thinking")
+        || lower.contains("-thinking")
+        || lower.starts_with("thinking")
 }
 
 /// Detects if a model requires disabling streaming (e.g., o1-preview).
@@ -86,6 +87,8 @@ mod tests {
         assert!(is_reasoning_model("deepseek-r1:671b"));
         assert!(!is_reasoning_model("gpt-4o"));
         assert!(!is_reasoning_model("claude-sonnet-4-20250514"));
+        assert!(is_reasoning_model("claude-sonnet-4-20250514-thinking"));
+        assert!(!is_reasoning_model("unthinking-v1"));
     }
 
     #[test]

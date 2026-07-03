@@ -120,6 +120,7 @@ pub struct PullArgs {
 /// Per-provider configuration overrides.
 /// Values here override the top-level `AppConfig` fields when the matching provider is active.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderSettings {
     pub model: Option<String>,
     pub api_url: Option<String>,
@@ -203,7 +204,9 @@ impl Default for AppConfig {
 }
 
 /// Partial config for incremental merging (from TOML files).
+/// Unknown fields are rejected to catch typos early.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PartialConfig {
     pub model: Option<String>,
     pub ollama_url: Option<String>,
