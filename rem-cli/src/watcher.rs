@@ -14,6 +14,33 @@ use anyhow::Result;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::warn;
 
+/// Creates a `RecommendedWatcher` with up to 3 retry attempts and exponential backoff.
+/// Logs errors and returns `None` if all attempts fail.
+fn create_watcher_with_retry(tx: &mpsc::Sender<()>, event_tx: &mpsc::Sender<Vec<Event>>) -> Option<RecommendedWatcher> {
+    for attempt in 1..=3 {
+        let tx_clone = event_tx.clone();
+        match RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| match res {
+                Ok(event) => {
+                    let _ = tx_clone.send(vec![event]);
+                }
+                Err(e) => warn!("notify watch error: {}", e),
+            },
+            Config::default(),
+        ) {
+            Ok(w) => return Some(w),
+            Err(e) => {
+                warn!("failed to create file watcher (attempt {}/3): {}", attempt, e);
+                if attempt < 3 {
+                    std::thread::sleep(Duration::from_millis(500 * attempt));
+                }
+            }
+        }
+    }
+    let _ = tx; // suppress unused warning — sender stays alive for the caller
+    None
+}
+
 /// Starts a file watcher on `root` that triggers `on_change` when files change.
 /// Returns a channel sender that can be used to stop the watcher by sending `()`.
 pub fn watch_directory<F>(root: &Path, mut on_change: F) -> Result<mpsc::Sender<()>>
@@ -25,28 +52,28 @@ where
 
     let watch_path = root.to_path_buf();
 
+    let tx_clone = tx.clone();
     // Watcher thread
     std::thread::spawn(move || {
-        let mut watcher = match RecommendedWatcher::new(
-            move |res: Result<Event, notify::Error>| {
-                if let Ok(event) = res {
-                    let _ = event_tx.send(vec![event]);
-                }
-            },
-            Config::default(),
-        ) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!("failed to create file watcher: {}", e);
-                // Signal failure by closing the sender
-                let _ = tx;
-                return;
-            }
+        let mut watcher = match create_watcher_with_retry(&tx_clone, &event_tx) {
+            Some(w) => w,
+            None => return,
         };
 
-        if let Err(e) = watcher.watch(&watch_path, RecursiveMode::Recursive) {
-            warn!("failed to watch directory: {}", e);
-            let _ = tx;
+        // Retry watch() with backoff
+        let mut last_err = String::new();
+        for attempt in 1..=3 {
+            match watcher.watch(&watch_path, RecursiveMode::Recursive) {
+                Ok(()) => break,
+                Err(e) => {
+                    last_err = e.to_string();
+                    warn!("failed to watch directory (attempt {}/3): {}", attempt, last_err);
+                    std::thread::sleep(Duration::from_millis(200 * attempt));
+                }
+            }
+        }
+        if !last_err.is_empty() {
+            warn!("failed to watch directory after 3 attempts: {}", last_err);
             return;
         }
 

@@ -529,6 +529,7 @@ fn handle_llm_response(
 
     let treat_as_code = *intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
     if treat_as_code {
+        session.code_out.last_trigger_input = trimmed.to_string();
         display_code_files(session, &cleaned, t);
     } else if cleaned.is_empty() {
         println!(
@@ -612,6 +613,7 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         let intent = classify_intent(trimmed);
         session.last_intent = intent.clone();
         session.last_user_input = trimmed.to_string();
+        session.code_out.last_trigger_input.clear();
 
         let (full_prompt, history_ctx) = build_llm_prompt(&mut session, trimmed, &intent);
 
@@ -687,16 +689,24 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         // Reset cancellation flag right before the LLM call
         crate::provider::STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        // Static thinking indicator (no spinner to avoid TTY conflict with token streaming)
-        eprint!("  {} ", ui::theme::paint_dim(&t, "thinking..."));
-        let _ = std::io::stderr().flush();
-
-        // Clear thinking indicator and show streaming label
-        eprint!("\r{}\r", " ".repeat(30));
-        let _ = std::io::stderr().flush();
-        let stream_label = ui::theme::paint_dim(&t, "▸ ");
-        eprint!("  {stream_label}");
-        let _ = std::io::stderr().flush();
+        // Frame-based spinner during LLM call (writes to stderr; tokens stream to stdout, no conflict)
+        let spinner_frames_raw = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spinner_frames: Vec<String> = spinner_frames_raw
+            .iter()
+            .map(|c| ui::theme::paint(&t, "accent_dim", c, true))
+            .collect();
+        let thinking_label = ui::theme::paint_dim(&t, "thinking...");
+        let spinner_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sd = spinner_done.clone();
+        let spinner_handle = tokio::spawn(async move {
+            let mut i = 0usize;
+            while !sd.load(std::sync::atomic::Ordering::SeqCst) {
+                eprint!("\r  {} {}", spinner_frames[i], thinking_label);
+                let _ = std::io::stderr().flush();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                i = (i + 1) % spinner_frames.len();
+            }
+        });
 
         crate::provider::STREAM_TOKENS.store(true, std::sync::atomic::Ordering::SeqCst);
         let result = client
@@ -704,7 +714,9 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             .await;
         crate::provider::STREAM_TOKENS.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        // Clear the streaming label after completion
+        // Stop and clear the spinner
+        spinner_done.store(true, std::sync::atomic::Ordering::SeqCst);
+        spinner_handle.abort();
         eprint!("\r{}\r", " ".repeat(35));
         let _ = std::io::stderr().flush();
         let elapsed = start.elapsed();

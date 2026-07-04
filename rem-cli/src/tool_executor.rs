@@ -249,22 +249,17 @@ async fn execute_run_command(
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
 
-    // Blocklist check against FULL reconstructed command (prevents bypass via split args)
-    let full_cmd_str = if args.is_empty() {
-        command.clone()
-    } else {
-        format!("{} {}", command, args.join(" "))
-    };
-    if is_command_blocked(&full_cmd_str) || is_command_blocked(&command) {
-        return err_result(tool_call, "shell command blocked by security policy");
-    }
-
-    // Interactive approval prompt for shell commands
+    // Reconstruct full command for blocklist check (catches split-arg bypass)
     let full_cmd = if args.is_empty() {
         command.clone()
     } else {
         format!("{} {}", command, args.join(" "))
     };
+    if is_command_blocked(&full_cmd) || is_command_blocked(&command) {
+        return err_result(tool_call, "shell command blocked by security policy");
+    }
+
+    // Interactive approval prompt for shell commands
     if !std::io::stdin().is_terminal() {
         return err_result(tool_call, "shell command execution requires a terminal for approval");
     }
@@ -285,26 +280,24 @@ async fn execute_run_command(
 
     match result {
         Ok(Ok(Ok(output))) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let stdout_max = output.stdout.len().min(crate::constants::TOOL_COMMAND_STDOUT_MAX);
+            let stderr_max = output.stderr.len().min(crate::constants::TOOL_COMMAND_STDERR_MAX);
+            let stdout_end = match std::str::from_utf8(&output.stdout[..stdout_max]) {
+                Ok(s) => s.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            let stderr_end = match std::str::from_utf8(&output.stderr[..stderr_max]) {
+                Ok(s) => s.len(),
+                Err(e) => e.valid_up_to(),
+            };
+            let stdout = String::from_utf8_lossy(&output.stdout[..stdout_end]).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr[..stderr_end]).into_owned();
             let mut content = String::new();
             if !stdout.is_empty() {
-                content.push_str(&format!(
-                    "stdout:\n{}\n",
-                    &stdout
-                        .chars()
-                        .take(crate::constants::TOOL_COMMAND_STDOUT_MAX)
-                        .collect::<String>()
-                ));
+                content.push_str(&format!("stdout:\n{}\n", stdout));
             }
             if !stderr.is_empty() {
-                content.push_str(&format!(
-                    "stderr:\n{}\n",
-                    &stderr
-                        .chars()
-                        .take(crate::constants::TOOL_COMMAND_STDERR_MAX)
-                        .collect::<String>()
-                ));
+                content.push_str(&format!("stderr:\n{}\n", stderr));
             }
             ToolCallResult {
                 call_id: tool_call.id.clone(),

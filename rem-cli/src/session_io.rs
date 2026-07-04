@@ -32,26 +32,29 @@ pub(crate) fn check_system_resources() {
 }
 
 fn detect_system_ram_gb() -> u64 {
-    // Linux: /proc/meminfo
-    if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
-        for line in content.lines() {
-            if line.starts_with("MemTotal:") {
-                let kb: u64 = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-                return kb / 1024 / 1024;
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        // Linux: /proc/meminfo
+        if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+            for line in content.lines() {
+                if line.starts_with("MemTotal:") {
+                    let kb: u64 = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+                    return kb / 1024 / 1024;
+                }
             }
         }
-    }
 
-    // macOS: sysctl hw.memsize
-    if let Ok(output) = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
-        if let Ok(s) = String::from_utf8(output.stdout) {
-            if let Ok(bytes) = s.trim().parse::<u64>() {
-                return bytes / 1024 / 1024 / 1024;
+        // macOS: sysctl hw.memsize
+        if let Ok(output) = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output() {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                if let Ok(bytes) = s.trim().parse::<u64>() {
+                    return bytes / 1024 / 1024 / 1024;
+                }
             }
         }
-    }
 
-    0
+        0
+    })
 }
 
 /// Prints the welcome banner with model and mode information.
@@ -109,7 +112,7 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
             }
             format!("{}/", rel_str)
         } else {
-            let size = p.metadata().map(|m| m.len()).unwrap_or(0);
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             format!("{}  ({} bytes)", rel_str, size)
         };
         let entry_len = entry_str.len() + 1;
@@ -130,9 +133,9 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
 }
 
 /// Detects project language type from files in directory (Cargo.toml \u{2192} rust, etc.).
-pub(crate) fn detect_project_type(dir: &Path) -> &'static str {
+pub(crate) fn detect_project_type(dir: &Path) -> String {
     if !dir.exists() {
-        return "";
+        return String::new();
     }
     let entries: Vec<String> = WalkDir::new(dir)
         .max_depth(1)
@@ -144,28 +147,29 @@ pub(crate) fn detect_project_type(dir: &Path) -> &'static str {
 
     let has_file = |name: &str| entries.iter().any(|f| f == name);
 
+    let mut types: Vec<&'static str> = Vec::new();
     if has_file("cargo.toml") {
-        return "rust";
+        types.push("rust");
     }
     if has_file("go.mod") {
-        return "go";
+        types.push("go");
     }
     if has_file("pyproject.toml") || has_file("setup.py") || has_file("requirements.txt") {
-        return "python";
+        types.push("python");
     }
     if has_file("package.json") {
-        return "javascript";
+        types.push("javascript");
     }
     if has_file("index.html") && has_file("style.css") {
-        return "html_css";
+        types.push("html_css");
     }
     if has_file("dart.yaml") || has_file("pubspec.yaml") {
-        return "dart";
+        types.push("dart");
     }
     if has_file("makefile") {
-        return "cpp";
+        types.push("cpp");
     }
-    ""
+    types.join(",")
 }
 
 /// Returns language-specific guidance text for the system prompt.

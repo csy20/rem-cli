@@ -6,7 +6,6 @@ use std::io::IsTerminal;
 
 use crate::chat::ChatSession;
 use crate::highlight;
-use crate::intent::TaskIntent;
 use crate::types::{file_icon, resolve_safe_path, BackupEntry, FileEntry};
 use crate::ui;
 use std::fs;
@@ -371,13 +370,6 @@ pub(crate) fn handle_undo(session: &mut ChatSession, levels: usize) {
         cleanup_dirs(dirs_to_clean);
 
         if modified > 0 {
-            let input = session.last_user_input.clone();
-            let intent = session.last_intent.clone();
-            if intent == TaskIntent::CodeAction {
-                session
-                    .feedback
-                    .record_correction(&input, &intent, &TaskIntent::FastAnswer);
-            }
             println!(
                 "  {} {} file(s) reverted across {} level(s).",
                 ui::theme::paint_success_label(&t, "\u{258C} \u{2713}"),
@@ -423,13 +415,6 @@ pub(crate) fn handle_undo(session: &mut ChatSession, levels: usize) {
     cleanup_dirs(dirs_to_clean);
 
     if modified > 0 {
-        let input = session.last_user_input.clone();
-        let intent = session.last_intent.clone();
-        if intent == TaskIntent::CodeAction {
-            session
-                .feedback
-                .record_correction(&input, &intent, &TaskIntent::FastAnswer);
-        }
         println!(
             "  {} {}  file(s) reverted.",
             ui::theme::paint_success_label(&t, "\u{258C} \u{2713}"),

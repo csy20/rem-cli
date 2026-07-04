@@ -87,11 +87,11 @@ impl HistoryManager {
         const TOKEN_BUDGET_PER_TURN: usize = 500;
         let mut out = String::from("[Previous conversation — keep context in mind]:\n\n");
         for (user, assistant) in self.history.iter().rev().take(6).rev() {
-            let truncated_assistant = if estimate_tokens(assistant) > TOKEN_BUDGET_PER_TURN {
-                let char_count = assistant.chars().count();
-                let estimated_len = (char_count * TOKEN_BUDGET_PER_TURN) / estimate_tokens(assistant).max(1);
+            let tokens = estimate_tokens(assistant);
+            let truncated_assistant = if tokens > TOKEN_BUDGET_PER_TURN {
+                let estimated_len = (assistant.len() * TOKEN_BUDGET_PER_TURN) / tokens.max(1);
                 let cutoff = estimated_len.min(assistant.len());
-                let cutoff = (0..=cutoff).rev().find(|&i| assistant.is_char_boundary(i)).unwrap_or(0);
+                let cutoff = assistant.floor_char_boundary(cutoff);
                 let truncated = assistant[..cutoff].to_string();
                 format!("{}...\n[truncated to ~{} tokens]", truncated, TOKEN_BUDGET_PER_TURN)
             } else {
@@ -115,6 +115,9 @@ pub(crate) struct CodeOutput {
     pub(crate) last_files: Vec<FileEntry>,
     pub(crate) last_files_written: Vec<crate::BackupEntry>,
     pub(crate) undo_stack: Vec<Vec<crate::BackupEntry>>,
+    /// The user input that triggered the most recent code generation.
+    /// Used by /undo to reference the correct input for feedback.
+    pub(crate) last_trigger_input: String,
 }
 
 impl CodeOutput {
@@ -124,6 +127,7 @@ impl CodeOutput {
             last_files: Vec::new(),
             last_files_written: Vec::new(),
             undo_stack: Vec::new(),
+            last_trigger_input: String::new(),
         }
     }
 
@@ -179,8 +183,7 @@ impl ProjectContext {
                 .project_dir
                 .as_deref()
                 .map(crate::session_io::detect_project_type)
-                .unwrap_or("")
-                .to_string();
+                .unwrap_or_default();
             self.project_type = Some(t);
         }
         self.project_type.as_deref().unwrap_or("")
@@ -284,7 +287,7 @@ impl ChatSession {
         }
         let mut ctx = String::from("Web search results:\n");
         for (i, r) in self.last_search.iter().enumerate().take(3) {
-            ctx.push_str(&format!("{}. {} — {}\n", i + 1, r.title, r.snippet));
+            ctx.push_str(&format!("{}. {} — {}\n   URL: {}\n", i + 1, r.title, r.snippet, r.url));
         }
         ctx
     }

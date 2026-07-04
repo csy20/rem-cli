@@ -449,7 +449,7 @@ pub(crate) fn handle_init(session: &mut ChatSession) {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let ptype = detect_project_type(&dir);
-    let ptype_label = if ptype.is_empty() { "unknown" } else { ptype };
+    let ptype_label = if ptype.is_empty() { "unknown" } else { &ptype };
     let t = ui::theme::active();
     println!("{}", ui::theme::paint_rail_empty(&t));
     println!(
@@ -462,7 +462,7 @@ pub(crate) fn handle_init(session: &mut ChatSession) {
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         ui::theme::paint_dim(&t, "generating .rem/memory.md...")
     );
-    let starter = ProjectMemory::generate_starter(&dir, ptype);
+    let starter = ProjectMemory::generate_starter(&dir, &ptype);
     if let Err(e) = session.ctx.project_memory.set(&starter) {
         println!(
             "{} {} failed: {}",

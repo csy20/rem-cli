@@ -54,8 +54,9 @@ pub(crate) fn guess_chunk_type(rel_path: &str, content: &str) -> &'static str {
         .unwrap_or("")
         .to_lowercase();
 
-    // Look at the first several lines for signature-like things
-    let head: String = content.lines().take(12).collect::<Vec<_>>().join("\n").to_lowercase();
+    // Scan up to 50 lines for signature-like things (files with many imports
+    // at the top need deeper scanning to find the actual code definition)
+    let head: String = content.lines().take(50).collect::<Vec<_>>().join("\n").to_lowercase();
 
     match ext.as_str() {
         "rs" => {

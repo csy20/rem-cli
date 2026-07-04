@@ -318,7 +318,7 @@ pub fn has_file_path(input: &str) -> bool {
         || lower.contains(".go")
         || lower.contains(".dart")
         || lower.contains(".sh")
-        || (lower.contains("/") && !lower.starts_with("http"))
+        || (lower.contains("/") && !lower.contains("://"))
         || lower.contains("into ./")
         || lower.contains("into /")
         || lower.contains("save to ")
@@ -370,5 +370,11 @@ mod tests {
     #[test]
     fn classify_fast_answer_for_explain() {
         assert_eq!(classify_intent("explain rust ownership"), TaskIntent::FastAnswer);
+    }
+
+    #[test]
+    fn has_file_path_ignores_urls_in_middle() {
+        assert!(!has_file_path("check http://example.com/api"));
+        assert!(!has_file_path("see https://example.com/path/file"));
     }
 }

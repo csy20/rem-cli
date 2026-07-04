@@ -203,6 +203,7 @@ pub(crate) async fn handle_lint_with_fallback(session: &mut ChatSession, args: &
                     .code_out
                     .last_files_written
                     .iter()
+                    .filter(|p| p.path.exists())
                     .map(|p| p.path.display().to_string())
                     .collect()
             } else {
@@ -211,7 +212,17 @@ pub(crate) async fn handle_lint_with_fallback(session: &mut ChatSession, args: &
                     .last_files
                     .iter()
                     .filter(|f| !f.path.is_empty())
-                    .map(|f| f.path.clone())
+                    .map(|f| {
+                        let base = session
+                            .ctx
+                            .project_dir
+                            .clone()
+                            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                        crate::types::resolve_safe_path(&base, &f.path)
+                            .filter(|p| p.exists())
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| f.path.clone())
+                    })
                     .collect()
             };
             for p in paths {

@@ -21,8 +21,9 @@ use crate::ui;
 const MAX_TOOL_OUTPUT_LEN: usize = crate::constants::GOAL_TOOL_OUTPUT_MAX_CHARS;
 const ITERATION_TIMEOUT: Duration = crate::constants::GOAL_ITERATION_TIMEOUT;
 
-fn circuit_breaker_hash(output: &str) -> u64 {
+fn circuit_breaker_hash(output: &str, iteration: usize) -> u64 {
     let mut hasher = DefaultHasher::new();
+    iteration.hash(&mut hasher);
     output.hash(&mut hasher);
     hasher.finish()
 }
@@ -228,7 +229,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         }
 
         // Response-level circuit breaker: detect repeated LLM output (stalling)
-        let response_hash = circuit_breaker_hash(&cleaned);
+        let response_hash = circuit_breaker_hash(&cleaned, i);
         if response_hash == last_response_hash && i > 0 {
             println!(
                 "{} {} circuit breaker: same response as previous iteration, stopping",
@@ -276,7 +277,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
 
         // Tool-level circuit breaker: detect repeated tool output
         if !tool_results.is_empty() {
-            let new_hash = circuit_breaker_hash(&tool_results);
+            let new_hash = circuit_breaker_hash(&tool_results, i);
             if new_hash == last_tool_hash && i > 0 {
                 println!(
                     "{} {} circuit breaker: same results as previous iteration, stopping",

@@ -31,6 +31,7 @@ pub struct FeedbackTracker {
     store: FeedbackStore,
     path: PathBuf,
     dirty: bool,
+    #[allow(dead_code)]
     seen_keys: HashSet<String>,
 }
 
@@ -74,6 +75,7 @@ impl FeedbackTracker {
     }
 
     /// Records a user correction to intent classification.
+    #[allow(dead_code)]
     pub fn record_correction(&mut self, input: &str, classified_as: &TaskIntent, correct: &TaskIntent) {
         let classified_str = intent_to_str(classified_as);
         let correct_str = intent_to_str(correct);
@@ -148,6 +150,7 @@ impl Drop for FeedbackTracker {
     }
 }
 
+#[allow(dead_code)]
 fn intent_to_str(intent: &TaskIntent) -> String {
     match intent {
         TaskIntent::FastAnswer => "FastAnswer".to_string(),
