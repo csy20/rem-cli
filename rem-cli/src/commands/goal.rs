@@ -140,7 +140,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         let prompt = if last_tool_output.is_empty() {
             goal_prompt_text.clone()
         } else {
-            build_agentic_prompt(&goal_prompt_text, &last_tool_output, i, max_iter)
+            build_agentic_prompt(&goal_prompt_text, &last_tool_output, i + 1, max_iter)
         };
 
         let result = tokio::time::timeout(

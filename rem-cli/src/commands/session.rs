@@ -5,6 +5,7 @@
 use crate::chat::ChatSession;
 use crate::config::persist_workspace;
 use crate::memory::ProjectMemory;
+use crate::pager::maybe_page;
 use crate::provider::Provider;
 use crate::session_io::detect_project_type;
 use crate::text_util::human_size;
@@ -117,14 +118,6 @@ pub(crate) fn handle_list_files(session: &ChatSession) {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let t = ui::theme::active();
 
-    println!("{}", ui::theme::paint_rail_empty(&t));
-    println!(
-        "{} {}",
-        ui::theme::paint_rail_empty(&t),
-        ui::theme::paint_bright(&t, &format!("\u{1f4c2} project ({})", dir.display()))
-    );
-    println!("{}", ui::theme::paint_rail_empty(&t));
-
     let mut entries: Vec<(String, bool, u64)> = Vec::new();
     for entry in WalkDir::new(&dir).max_depth(4).into_iter().filter_map(|e| e.ok()) {
         let p = entry.path();
@@ -141,6 +134,58 @@ pub(crate) fn handle_list_files(session: &ChatSession) {
         }
     }
     entries.sort();
+
+    if entries.len() > 46 {
+        let mut buf = String::new();
+        buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(&t)));
+        buf.push_str(&format!(
+            "{} {}\n",
+            ui::theme::paint_rail_empty(&t),
+            ui::theme::paint_bright(&t, &format!("\u{1f4c2} project ({})", dir.display()))
+        ));
+        buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(&t)));
+        for (path, is_dir, size) in &entries {
+            let depth = path.chars().filter(|&c| c == '/').count();
+            let indent = "  ".repeat(depth);
+            let name = if let Some(pos) = path.rfind('/') {
+                &path[pos + 1..]
+            } else {
+                path
+            };
+            if *is_dir {
+                buf.push_str(&format!(
+                    "{} {} {} {} \n",
+                    ui::theme::paint_rail_empty(&t),
+                    indent,
+                    ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
+                    ui::theme::paint(&t, "accent_info", &format!("\u{1f4c1} {}/", name), true)
+                ));
+            } else {
+                let icon = file_icon(name);
+                let hs = human_size(*size);
+                buf.push_str(&format!(
+                    "{} {} {} {} {} {}\n",
+                    ui::theme::paint_rail_empty(&t),
+                    indent,
+                    ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
+                    icon,
+                    ui::theme::paint_bright(&t, name),
+                    ui::theme::paint_dim(&t, &format!("({})", hs))
+                ));
+            }
+        }
+        buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(&t)));
+        maybe_page(&buf);
+        return;
+    }
+
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint_bright(&t, &format!("\u{1f4c2} project ({})", dir.display()))
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
 
     if entries.is_empty() {
         println!(

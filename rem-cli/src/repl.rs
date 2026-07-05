@@ -139,9 +139,6 @@ fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme
         let line = session.readline(&current_prompt);
         match line {
             Ok(s) => {
-                crate::CTRL_C_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
-                crate::SHOULD_EXIT.store(false, std::sync::atomic::Ordering::SeqCst);
-
                 let trimmed = s.trim_end().to_string();
 
                 // Slash commands don't get multi-line treatment
@@ -465,13 +462,10 @@ fn build_last_code_context(session: &ChatSession, trimmed: &str) -> String {
         "expand",
     ];
     let lower_in = trimmed.to_lowercase();
-    if !mod_triggers
-        .iter()
-        .any(|t| lower_in.starts_with(t) || lower_in.contains(&format!(" {} ", t)))
-        && !lower_in.contains("also")
-        && !lower_in.contains("and then")
-        && !lower_in.contains("more")
-    {
+    let words: Vec<&str> = lower_in.split_whitespace().collect();
+    let has_trigger = mod_triggers.iter().any(|t| words.contains(t));
+    let has_qualifier = words.contains(&"also") || words.contains(&"more") || lower_in.contains("and then");
+    if !has_trigger && !has_qualifier {
         return String::new();
     }
 

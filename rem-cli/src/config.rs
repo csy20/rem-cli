@@ -6,6 +6,7 @@ use crate::cli::{AppConfig, PartialConfig};
 use crate::provider::{Provider, ProviderKind};
 use crate::ui;
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -205,15 +206,24 @@ fn resolve_model(kind: ProviderKind, model: String) -> String {
     }
 }
 
+/// Cached resolved API keys from environment variables.
+static API_KEY_CACHE: LazyLock<RwLock<BTreeMap<&'static str, Option<String>>>> =
+    LazyLock::new(|| RwLock::new(BTreeMap::new()));
+
 /// Resolves the API key from the appropriate environment variable for the provider kind.
+/// Results are cached since environment variables don't change at runtime.
 fn resolve_api_key_from_env(kind: ProviderKind) -> Option<String> {
     let var = crate::provider::api_key_env_var(kind)?;
-    let val = std::env::var(var).ok()?;
-    if val.is_empty() {
-        None
-    } else {
-        Some(val)
+    {
+        let cache = API_KEY_CACHE.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(cached) = cache.get(var) {
+            return cached.clone();
+        }
     }
+    let val = std::env::var(var).ok().filter(|v| !v.is_empty());
+    let mut cache = API_KEY_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    cache.insert(var, val.clone());
+    val
 }
 
 type SystemPromptCache = RwLock<Option<(Option<String>, String)>>;

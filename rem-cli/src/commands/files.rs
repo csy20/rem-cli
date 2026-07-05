@@ -15,7 +15,15 @@ use std::path::{Path, PathBuf};
 /// Atomically writes content to a file using tmp+rename pattern.
 /// Returns `true` on success.
 fn write_file_atomic(abs_path: &Path, content: &str, t: &crate::ui::theme::Theme) -> bool {
-    let tmp = abs_path.with_extension("tmp");
+    let tmp = {
+        let mut p = abs_path.to_path_buf();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.set_extension(format!("tmp_{nanos}"));
+        p
+    };
     match fs::write(&tmp, content) {
         Ok(()) => {
             if let Err(e) = fs::rename(&tmp, abs_path) {
@@ -165,10 +173,6 @@ pub(crate) fn handle_write(session: &mut ChatSession, path: &str) {
             path: abs_path,
             original,
         });
-        if session.code_out.last_files_written.len() > 5 {
-            let batch = session.code_out.last_files_written.drain(..5).collect();
-            session.code_out.push_undo(batch);
-        }
     }
 }
 
@@ -743,11 +747,19 @@ mod tests {
         let path = dir.join("test.txt");
         std::fs::write(&path, "original").unwrap();
         let t = crate::ui::theme::active();
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, "stale tmp").unwrap();
         let result = write_file_atomic(&path, "updated", &t);
         assert!(result);
-        assert!(!tmp.exists());
+        // Verify no leftover .tmp_* files remain
+        let leftover_tmp = std::fs::read_dir(&dir).unwrap().any(|e| {
+            e.ok()
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|ext| ext.to_string_lossy().starts_with("tmp_"))
+                })
+                .is_some()
+        });
+        assert!(!leftover_tmp);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "updated");
         let _ = std::fs::remove_dir_all(&dir);
     }

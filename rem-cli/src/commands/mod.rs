@@ -59,6 +59,71 @@ impl CommandRegistry {
     /// Prints formatted help text for all registered commands.
     pub fn print_help(&self) {
         let t = crate::ui::theme::active();
+        let num_commands = self.entries.iter().filter(|(name, _)| name.starts_with('/')).count();
+        if num_commands > 40 {
+            let mut buf = String::new();
+            buf.push_str(&format!("{}\n", crate::ui::theme::paint_rail_empty(&t)));
+            buf.push_str(&format!("{}\n", crate::ui::theme::paint_rail_header(&t, "COMMANDS")));
+            let mut seen_descriptions: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for &(name, info) in &self.entries {
+                if !name.starts_with('/') || !seen_descriptions.insert(info.description) {
+                    continue;
+                }
+                buf.push_str(&format!(
+                    "{}\n",
+                    crate::ui::theme::paint_help_line(&t, info.usage, info.description)
+                ));
+            }
+            buf.push_str(&format!("{}\n", crate::ui::theme::paint_rail_empty(&t)));
+            buf.push_str(&format!("{}\n", crate::ui::theme::paint_rail_header(&t, "TIPS")));
+            buf.push_str(&format!(
+                "{}\n",
+                crate::ui::theme::paint_bullet_line(
+                    &t,
+                    &[
+                        ("text_faint", "use ", false),
+                        ("accent", "@<path>", true),
+                        ("text_faint", " to include file context: @src/main.rs", false),
+                    ]
+                )
+            ));
+            buf.push_str(&format!(
+                "{}\n",
+                crate::ui::theme::paint_bullet_line(
+                    &t,
+                    &[
+                        ("text_faint", "use ", false),
+                        ("accent", "/mode", true),
+                        ("text_faint", " to toggle between chat, code, and plan modes", false),
+                    ]
+                )
+            ));
+            buf.push_str(&format!(
+                "{}\n",
+                crate::ui::theme::paint_bullet_line(
+                    &t,
+                    &[
+                        ("accent", "/plan", true),
+                        (
+                            "text_faint",
+                            " for analysis first — REM explores codebase before coding",
+                            false
+                        ),
+                    ]
+                )
+            ));
+            buf.push_str(&format!(
+                "{}\n",
+                crate::ui::theme::paint_rail_bullet(&t, "describe what you want — REM detects intent")
+            ));
+            buf.push_str(&format!(
+                "{}\n",
+                crate::ui::theme::paint_rail_bullet(&t, "multi-file intent and auto-writes after confirmation")
+            ));
+            buf.push_str(&format!("{}\n", crate::ui::theme::paint_rail_empty(&t)));
+            crate::pager::maybe_page(&buf);
+            return;
+        }
         println!("{}", crate::ui::theme::paint_rail_empty(&t));
         println!("{}", crate::ui::theme::paint_rail_header(&t, "COMMANDS"));
         let mut seen_descriptions: std::collections::HashSet<&str> = std::collections::HashSet::new();

@@ -586,7 +586,7 @@ where
             Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
         };
         if offset > 0 && buf.len() > crate::constants::INITIAL_BUF_CAPACITY * 2 {
-            buf = buf[offset..].to_vec();
+            buf.drain(..offset);
             offset = 0;
         }
         if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {

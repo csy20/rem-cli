@@ -226,13 +226,15 @@ pub(crate) fn validate_chat_response(response: &str, intent: &TaskIntent, mode: 
         let has_multi_file = response.contains("### ") && has_code_fences;
         let has_lone_fence = has_code_fences && !response.contains("### ");
         let trimmed_response = response.trim();
-        let has_json = serde_json::from_str::<serde_json::Value>(trimmed_response)
-            .ok()
-            .is_some_and(|v| {
-                v.is_object()
-                    && (v.get("code").and_then(|c| c.as_str()).is_some_and(|c| !c.is_empty())
-                        || v.get("files").and_then(|f| f.as_array()).is_some_and(|f| !f.is_empty()))
-            });
+        // Skip JSON parse for plain text (must start with '{' to be an object)
+        let has_json = trimmed_response.starts_with('{')
+            && serde_json::from_str::<serde_json::Value>(trimmed_response)
+                .ok()
+                .is_some_and(|v| {
+                    v.is_object()
+                        && (v.get("code").and_then(|c| c.as_str()).is_some_and(|c| !c.is_empty())
+                            || v.get("files").and_then(|f| f.as_array()).is_some_and(|f| !f.is_empty()))
+                });
 
         if has_multi_file || has_lone_fence || has_json {
             let code_stripped = strip_code_blocks(response);

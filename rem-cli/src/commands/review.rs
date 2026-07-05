@@ -179,11 +179,16 @@ pub(crate) fn handle_apply(session: &mut ChatSession) {
         if f.path.is_empty() {
             continue;
         }
-        let rel_path = PathBuf::from(&f.path);
-        let abs_path = if rel_path.is_relative() {
-            base_dir.join(&rel_path)
-        } else {
-            rel_path
+        let abs_path = match crate::types::resolve_safe_path(&base_dir, &f.path) {
+            Some(p) => p,
+            None => {
+                println!(
+                    "  {} path traversal blocked: {}",
+                    ui::theme::paint_warning(&t, "\u{2717}"),
+                    f.path
+                );
+                continue;
+            }
         };
 
         // Capture original content for undo
