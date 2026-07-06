@@ -7,3 +7,13 @@ use crate::commands::registry;
 pub(crate) fn print_chat_help() {
     registry().print_help();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn print_chat_help_does_not_panic() {
+        print_chat_help();
+    }
+}

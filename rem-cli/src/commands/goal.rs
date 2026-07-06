@@ -302,3 +302,36 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
     }
     println!("{}", ui::theme::paint_rail_empty(&t));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn circuit_breaker_hash_different_iterations_differ() {
+        let output = "fixed output";
+        let h1 = circuit_breaker_hash(output, 1);
+        let h2 = circuit_breaker_hash(output, 2);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn circuit_breaker_hash_different_outputs_differ() {
+        let h1 = circuit_breaker_hash("output_a", 1);
+        let h2 = circuit_breaker_hash("output_b", 1);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn circuit_breaker_hash_same_inputs_match() {
+        let h1 = circuit_breaker_hash("hello world", 5);
+        let h2 = circuit_breaker_hash("hello world", 5);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn circuit_breaker_hash_empty_output() {
+        let h = circuit_breaker_hash("", 0);
+        assert_ne!(h, 0);
+    }
+}

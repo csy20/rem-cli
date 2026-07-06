@@ -13,6 +13,7 @@ use crate::types::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
 use rustyline::config::Configurer;
 use rustyline::DefaultEditor;
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self};
 use std::path::{Path, PathBuf};
@@ -39,6 +40,7 @@ pub(crate) struct HistoryManager {
     pub(crate) rl: DefaultEditor,
     pub(crate) history: Vec<(String, String)>,
     pub(crate) messages_since_save: usize,
+    assistant_token_cache: Vec<usize>,
 }
 
 impl HistoryManager {
@@ -57,10 +59,13 @@ impl HistoryManager {
             rl,
             history: Vec::new(),
             messages_since_save: 0,
+            assistant_token_cache: Vec::new(),
         })
     }
 
     pub(crate) fn push_turn(&mut self, user: String, assistant: String) {
+        let tokens = crate::token_count::estimate_tokens(&assistant);
+        self.assistant_token_cache.push(tokens);
         self.history.push((user, assistant));
     }
 
@@ -86,16 +91,27 @@ impl HistoryManager {
         }
         const TOKEN_BUDGET_PER_TURN: usize = 500;
         let mut out = String::from("[Previous conversation — keep context in mind]:\n\n");
-        for (user, assistant) in self.history.iter().rev().take(6).rev() {
-            let tokens = estimate_tokens(assistant);
-            let truncated_assistant = if tokens > TOKEN_BUDGET_PER_TURN {
+        let len = self.history.len();
+        let start_idx = len.saturating_sub(6);
+        for i in start_idx..len {
+            let (user, assistant) = &self.history[i];
+            // Use cached token count if available (maintained by push_turn)
+            let tokens = self
+                .assistant_token_cache
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| estimate_tokens(assistant));
+            let truncated_assistant: Cow<'_, str> = if tokens > TOKEN_BUDGET_PER_TURN {
                 let estimated_len = (assistant.len() * TOKEN_BUDGET_PER_TURN) / tokens.max(1);
                 let cutoff = estimated_len.min(assistant.len());
                 let cutoff = assistant.floor_char_boundary(cutoff);
                 let truncated = assistant[..cutoff].to_string();
-                format!("{}...\n[truncated to ~{} tokens]", truncated, TOKEN_BUDGET_PER_TURN)
+                Cow::Owned(format!(
+                    "{}...\n[truncated to ~{} tokens]",
+                    truncated, TOKEN_BUDGET_PER_TURN
+                ))
             } else {
-                assistant.clone()
+                Cow::Borrowed(assistant)
             };
             // Escape internal newlines to avoid breaking the \n\n turn separator
             let safe_user = user.replace('\n', "\\n");

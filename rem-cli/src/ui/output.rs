@@ -54,7 +54,11 @@ impl SpinnerGuard {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
-        eprint!("\r{}\r", " ".repeat(60));
+        let width = std::env::var("COLUMNS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(80usize);
+        eprint!("\r{}\r", " ".repeat(width));
         let _ = io::stderr().flush();
     }
 }
@@ -151,5 +155,162 @@ pub fn print_reply(reply: &ModelReply, newline: bool) {
             "  {}",
             theme::paint_error(&t, &format!("caution: {}", reply.caution))
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::FileEntry;
+
+    #[test]
+    fn print_reply_empty() {
+        let reply = ModelReply {
+            explanation: String::new(),
+            code: String::new(),
+            files: vec![],
+            commands: vec![],
+            checks: vec![],
+            caution: String::new(),
+        };
+        print_reply(&reply, false);
+    }
+
+    #[test]
+    fn print_reply_with_explanation() {
+        let reply = ModelReply {
+            explanation: "Hello world".into(),
+            code: String::new(),
+            files: vec![],
+            commands: vec![],
+            checks: vec![],
+            caution: String::new(),
+        };
+        print_reply(&reply, true);
+    }
+
+    #[test]
+    fn print_reply_with_files() {
+        let reply = ModelReply {
+            explanation: String::new(),
+            code: String::new(),
+            files: vec![FileEntry {
+                path: "src/main.rs".into(),
+                content: "fn main() {}".into(),
+            }],
+            commands: vec![],
+            checks: vec![],
+            caution: String::new(),
+        };
+        print_reply(&reply, false);
+    }
+
+    #[test]
+    fn print_reply_with_code() {
+        let reply = ModelReply {
+            explanation: String::new(),
+            code: "fn main() {}".into(),
+            files: vec![],
+            commands: vec![],
+            checks: vec![],
+            caution: String::new(),
+        };
+        print_reply(&reply, false);
+    }
+
+    #[test]
+    fn print_reply_with_commands() {
+        let reply = ModelReply {
+            explanation: String::new(),
+            code: String::new(),
+            files: vec![],
+            commands: vec!["ls -la".into(), "cargo test".into()],
+            checks: vec![],
+            caution: String::new(),
+        };
+        print_reply(&reply, false);
+    }
+
+    #[test]
+    fn print_reply_with_blocked_command() {
+        let reply = ModelReply {
+            explanation: String::new(),
+            code: String::new(),
+            files: vec![],
+            commands: vec!["rm -rf / ".into()],
+            checks: vec![],
+            caution: String::new(),
+        };
+        print_reply(&reply, false);
+    }
+
+    #[test]
+    fn print_reply_with_checks() {
+        let reply = ModelReply {
+            explanation: String::new(),
+            code: String::new(),
+            files: vec![],
+            commands: vec![],
+            checks: vec!["Verify the output".into()],
+            caution: String::new(),
+        };
+        print_reply(&reply, false);
+    }
+
+    #[test]
+    fn print_reply_with_caution() {
+        let reply = ModelReply {
+            explanation: String::new(),
+            code: String::new(),
+            files: vec![],
+            commands: vec![],
+            checks: vec![],
+            caution: "This is dangerous".into(),
+        };
+        print_reply(&reply, false);
+    }
+
+    #[test]
+    fn print_reply_all_fields() {
+        let reply = ModelReply {
+            explanation: "Explanation text".into(),
+            code: "code block".into(),
+            files: vec![FileEntry {
+                path: "test.py".into(),
+                content: "print('hello')".into(),
+            }],
+            commands: vec!["python test.py".into()],
+            checks: vec!["Run python test.py".into()],
+            caution: "Check output".into(),
+        };
+        print_reply(&reply, true);
+    }
+
+    #[tokio::test]
+    async fn spinner_guard_create_and_drop() {
+        let spinner = SpinnerGuard::new("loading...");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        drop(spinner);
+    }
+
+    #[tokio::test]
+    async fn spinner_guard_stop_explicitly() {
+        let mut spinner = SpinnerGuard::new("testing...");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        spinner.stop();
+    }
+
+    #[test]
+    fn print_banner_no_panic() {
+        let provider = Provider::new(
+            crate::provider::ProviderKind::Ollama,
+            "http://localhost:11434".into(),
+            "llama3".into(),
+            30,
+            String::new(),
+            None,
+            4096,
+        );
+        print_banner(&provider);
     }
 }

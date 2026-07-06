@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[command(
     name = "rem",
     version,
-    about = "REM — Coding assistant CLI. Run `rem` to start interactive chat. Type /mode to toggle CHAT ↔ CODE ↔ PLAN.",
+    about = "REM — Coding assistant CLI. Run `rem` to start interactive chat. Pipe input for non-interactive mode.",
     long_about = None,
 )]
 pub struct Cli {
@@ -21,7 +21,11 @@ pub struct Cli {
     pub model: Option<String>,
     #[arg(long, global = true, help = "Ollama API URL")]
     pub ollama_url: Option<String>,
-    #[arg(long, global = true, help = "Provider: ollama (default), openai, vllm")]
+    #[arg(
+        long,
+        global = true,
+        help = "Provider: ollama (default), openai, anthropic, gemini, azure, bedrock, openrouter"
+    )]
     pub provider: Option<String>,
     #[arg(long, global = true, help = "API key for OpenAI-compatible providers")]
     pub api_key: Option<String>,

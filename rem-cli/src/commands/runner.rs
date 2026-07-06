@@ -44,8 +44,14 @@ pub(crate) async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, v
             if verbose {
                 eprintln!("\n  {} raw:\n{}\n", theme::paint_dim(&t, "verbose:"), text);
             }
+            // Show a brief header with provider/model context
+            let rail = theme::paint(&t, "accent", "\u{258C}", true);
+            let model_tag = theme::paint(&t, "accent", &client.provider_label(), false);
+            let hint = theme::paint_dim(&t, "(piped input)");
             println!();
-            println!("{}", text.trim());
+            println!("{rail} {model_tag} {hint}");
+            println!("{rail} {}", text.trim());
+            println!();
             Ok(())
         }
         Err(e) => Err(e),

@@ -57,10 +57,10 @@ fn detect_system_ram_gb() -> u64 {
     })
 }
 
-/// Prints the welcome banner with model and mode information.
-pub(crate) fn print_welcome(client: &Provider) {
+/// Prints the welcome banner with the given mode string.
+pub(crate) fn print_welcome_with_mode(client: &Provider, mode: &str) {
     println!();
-    ui::header::render(&client.provider_label(), "CHAT");
+    ui::header::render(&client.provider_label(), mode);
     println!();
 }
 

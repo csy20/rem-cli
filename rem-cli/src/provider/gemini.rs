@@ -62,105 +62,6 @@ pub struct GeminiModelEntry {
 
 pub(super) struct GeminiBackend;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn gemini_url_basic() {
-        let backend = GeminiBackend;
-        let provider = super::super::Provider::new(
-            super::super::ProviderKind::Gemini,
-            "https://generativelanguage.googleapis.com".into(),
-            "gemini-2.0-flash".into(),
-            30,
-            "system".into(),
-            Some("key".into()),
-            4096,
-        );
-        let url = backend.gemini_url(&provider.ctx, "/models");
-        assert_eq!(url, "https://generativelanguage.googleapis.com/v1beta/models");
-    }
-
-    #[test]
-    fn gemini_url_stream() {
-        let backend = GeminiBackend;
-        let provider = super::super::Provider::new(
-            super::super::ProviderKind::Gemini,
-            "https://generativelanguage.googleapis.com/".into(),
-            "gemini-2.0-flash".into(),
-            30,
-            "".into(),
-            None,
-            4096,
-        );
-        let url = backend.gemini_url(&provider.ctx, "/models/gemini-pro:streamGenerateContent?alt=sse");
-        assert!(url.contains("v1beta/models/gemini-pro:streamGenerateContent"));
-    }
-
-    #[test]
-    fn gemini_response_deserialize() {
-        let json = r#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
-        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
-        let text = resp
-            .candidates
-            .and_then(|c| c.into_iter().next())
-            .and_then(|c| c.content)
-            .and_then(|c| c.parts)
-            .and_then(|p| p.into_iter().next())
-            .and_then(|p| p.text);
-        assert_eq!(text.as_deref(), Some("hello"));
-    }
-
-    #[test]
-    fn gemini_response_empty_candidates() {
-        let json = r#"{}"#;
-        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.candidates.is_none());
-    }
-
-    #[test]
-    fn gemini_stream_chunk_deserialize() {
-        let json = r#"{"candidates":[{"content":{"parts":[{"text":"world"}]}}]}"#;
-        let chunk: GeminiStreamChunk = serde_json::from_str(json).unwrap();
-        let text = chunk
-            .candidates
-            .and_then(|c| c.into_iter().next())
-            .and_then(|c| c.content)
-            .and_then(|c| c.parts)
-            .and_then(|p| p.into_iter().next())
-            .and_then(|p| p.text);
-        assert_eq!(text.as_deref(), Some("world"));
-    }
-
-    #[test]
-    fn gemini_models_response_deserialize() {
-        let json = r#"{"models":[{"name":"models/gemini-2.0-flash"},{"name":"models/gemini-pro"}]}"#;
-        let resp: GeminiModelsResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.models.as_ref().map(|m| m.len()), Some(2));
-    }
-
-    #[test]
-    fn gemini_part_with_function_call() {
-        let json = r#"{"text":null,"function_call":{"name":"read_file","args":{"path":"test.txt"}}}"#;
-        let part: GeminiPart = serde_json::from_str(json).unwrap();
-        assert!(part.function_call.is_some());
-        let fc = part.function_call.unwrap();
-        assert_eq!(fc.name.as_deref(), Some("read_file"));
-        assert_eq!(
-            fc.args.as_ref().and_then(|a| a.get("path")).and_then(|v| v.as_str()),
-            Some("test.txt")
-        );
-    }
-
-    #[test]
-    fn gemini_candidate_no_content() {
-        let json = r#"{"candidates":[{}]}"#;
-        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.candidates.unwrap()[0].content.is_none());
-    }
-}
-
 impl GeminiBackend {
     fn gemini_url(&self, ctx: &ProviderContext, path: &str) -> String {
         format!("{}/v1beta{}", ctx.base_url.trim_end_matches('/'), path)
@@ -435,5 +336,104 @@ impl ProviderBackend for GeminiBackend {
             return Ok(ToolResponse::ToolCalls(tool_calls));
         }
         Ok(ToolResponse::Text(full_text))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_url_basic() {
+        let backend = GeminiBackend;
+        let provider = super::super::Provider::new(
+            super::super::ProviderKind::Gemini,
+            "https://generativelanguage.googleapis.com".into(),
+            "gemini-2.0-flash".into(),
+            30,
+            "system".into(),
+            Some("key".into()),
+            4096,
+        );
+        let url = backend.gemini_url(&provider.ctx, "/models");
+        assert_eq!(url, "https://generativelanguage.googleapis.com/v1beta/models");
+    }
+
+    #[test]
+    fn gemini_url_stream() {
+        let backend = GeminiBackend;
+        let provider = super::super::Provider::new(
+            super::super::ProviderKind::Gemini,
+            "https://generativelanguage.googleapis.com/".into(),
+            "gemini-2.0-flash".into(),
+            30,
+            "".into(),
+            None,
+            4096,
+        );
+        let url = backend.gemini_url(&provider.ctx, "/models/gemini-pro:streamGenerateContent?alt=sse");
+        assert!(url.contains("v1beta/models/gemini-pro:streamGenerateContent"));
+    }
+
+    #[test]
+    fn gemini_response_deserialize() {
+        let json = r#"{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}"#;
+        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
+        let text = resp
+            .candidates
+            .and_then(|c| c.into_iter().next())
+            .and_then(|c| c.content)
+            .and_then(|c| c.parts)
+            .and_then(|p| p.into_iter().next())
+            .and_then(|p| p.text);
+        assert_eq!(text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn gemini_response_empty_candidates() {
+        let json = r#"{}"#;
+        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.candidates.is_none());
+    }
+
+    #[test]
+    fn gemini_stream_chunk_deserialize() {
+        let json = r#"{"candidates":[{"content":{"parts":[{"text":"world"}]}}]}"#;
+        let chunk: GeminiStreamChunk = serde_json::from_str(json).unwrap();
+        let text = chunk
+            .candidates
+            .and_then(|c| c.into_iter().next())
+            .and_then(|c| c.content)
+            .and_then(|c| c.parts)
+            .and_then(|p| p.into_iter().next())
+            .and_then(|p| p.text);
+        assert_eq!(text.as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn gemini_models_response_deserialize() {
+        let json = r#"{"models":[{"name":"models/gemini-2.0-flash"},{"name":"models/gemini-pro"}]}"#;
+        let resp: GeminiModelsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.models.as_ref().map(|m| m.len()), Some(2));
+    }
+
+    #[test]
+    fn gemini_part_with_function_call() {
+        let json = r#"{"text":null,"function_call":{"name":"read_file","args":{"path":"test.txt"}}}"#;
+        let part: GeminiPart = serde_json::from_str(json).unwrap();
+        assert!(part.function_call.is_some());
+        let fc = part.function_call.unwrap();
+        assert_eq!(fc.name.as_deref(), Some("read_file"));
+        assert_eq!(
+            fc.args.as_ref().and_then(|a| a.get("path")).and_then(|v| v.as_str()),
+            Some("test.txt")
+        );
+    }
+
+    #[test]
+    fn gemini_candidate_no_content() {
+        let json = r#"{"candidates":[{}]}"#;
+        let resp: GeminiResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.candidates.unwrap()[0].content.is_none());
     }
 }

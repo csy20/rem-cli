@@ -62,11 +62,7 @@ pub fn retrieve_relevant_chunks<'a>(
     const K1: f64 = 1.5;
     const B: f64 = 0.75;
     let n = index.chunks.len() as f64;
-    let avg_dl: f64 = if n > 0.0 {
-        index.chunks.iter().map(|c| c.content.len() as f64).sum::<f64>() / n
-    } else {
-        1.0
-    };
+    let avg_dl = if index.avg_dl > 0.0 { index.avg_dl } else { 1.0 };
 
     let mut scored: Vec<(f64, &IndexChunk)> = Vec::with_capacity(candidate_indices.len() + 16);
 
@@ -76,8 +72,18 @@ pub fn retrieve_relevant_chunks<'a>(
         let mut score = 0.0f64;
         let dl = c.content.len() as f64;
 
+        // Tokenize chunk content once and build frequency map for all query words
+        let tokens: Vec<&str> = c
+            .content_lower
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|t| t.len() > 1)
+            .collect();
+        let has_name_or_path_match = q_words
+            .iter()
+            .any(|w| c.name_lower.contains(w) || c.path_lower.contains(w));
+
         for w in &q_words {
-            let tf_val = count_occurrences(&c.content_lower, w);
+            let tf_val = tokens.iter().filter(|&&t| t == w).count();
             if tf_val == 0 {
                 continue;
             }
@@ -88,11 +94,9 @@ pub fn retrieve_relevant_chunks<'a>(
             score += tf_norm * idf;
         }
 
-        // Name/path bonus for candidates
-        for w in &q_words {
-            if c.name_lower.contains(w) || c.path_lower.contains(w) {
-                score += 2.0;
-            }
+        // Name/path bonus (computed once, not per word)
+        if has_name_or_path_match {
+            score += 2.0;
         }
 
         // Chunk type bonus
@@ -110,11 +114,12 @@ pub fn retrieve_relevant_chunks<'a>(
         if candidate_indices.contains(&idx) {
             continue; // already scored
         }
+        let has_name_or_path = q_words
+            .iter()
+            .any(|w| c.name_lower.contains(w) || c.path_lower.contains(w));
         let mut bonus = 0.0f64;
-        for w in &q_words {
-            if c.name_lower.contains(w) || c.path_lower.contains(w) {
-                bonus += 2.0;
-            }
+        if has_name_or_path {
+            bonus += 2.0;
         }
         if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
             bonus += 0.5;
@@ -139,14 +144,111 @@ pub fn retrieve_relevant_chunks<'a>(
     chosen
 }
 
-/// Counts occurrences of `word` as a standalone token in lowercased `text`.
-/// Both `text` and `word` are expected to be pre-lowercased.
-/// Uses the same tokenization as the indexer for consistency.
-fn count_occurrences(text: &str, word: &str) -> usize {
-    if word.is_empty() || text.is_empty() {
-        return 0;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokenize_empty() {
+        let result = tokenize("");
+        assert!(result.is_empty());
     }
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() > 1 && *t == word)
-        .count()
+
+    #[test]
+    fn tokenize_short_words_filtered() {
+        let result = tokenize("a b cd ef");
+        assert_eq!(result, vec!["cd", "ef"]);
+    }
+
+    #[test]
+    fn tokenize_lowercase() {
+        let result = tokenize("Hello WORLD");
+        assert!(result.contains(&"hello".to_string()));
+        assert!(result.contains(&"world".to_string()));
+    }
+
+    #[test]
+    fn tokenize_with_underscores() {
+        let result = tokenize("fn_123 bar_456");
+        assert_eq!(result, vec!["fn", "123", "bar", "456"]);
+    }
+
+    #[test]
+    fn tokenize_unicode() {
+        let result = tokenize("café résumé");
+        assert!(result.contains(&"café".to_string()));
+        assert!(result.contains(&"résumé".to_string()));
+    }
+
+    #[test]
+    fn tokenize_special_chars() {
+        let result = tokenize("hello.world!foo-bar");
+        assert_eq!(result, vec!["hello", "world", "foo", "bar"]);
+    }
+
+    #[test]
+    fn build_inverted_index_empty() {
+        let chunks = vec![];
+        let mut doc_freqs = HashMap::new();
+        let inverted = build_inverted_index(&chunks, &mut doc_freqs);
+        assert!(inverted.is_empty());
+        assert!(doc_freqs.is_empty());
+    }
+
+    #[test]
+    fn build_inverted_index_single_chunk() {
+        let chunks = vec![IndexChunk {
+            path: "src/lib.rs".into(),
+            name: "lib.rs".into(),
+            chunk_type: "function".into(),
+            content: "fn hello() {}".into(),
+            content_lower: "fn hello() {}".into(),
+            name_lower: "lib.rs".into(),
+            path_lower: "src/lib.rs".into(),
+            start_line: 1,
+            end_line: 1,
+            embedding: None,
+        }];
+        let mut doc_freqs = HashMap::new();
+        let inverted = build_inverted_index(&chunks, &mut doc_freqs);
+        assert!(inverted.contains_key("hello"));
+        assert!(inverted.contains_key("fn"));
+        assert_eq!(doc_freqs.get("hello"), Some(&1));
+    }
+
+    #[test]
+    fn build_inverted_index_doc_freq() {
+        let chunks = vec![
+            IndexChunk {
+                path: "a.rs".into(),
+                name: "a.rs".into(),
+                chunk_type: "file".into(),
+                content: "hello world".into(),
+                content_lower: "hello world".into(),
+                name_lower: "a.rs".into(),
+                path_lower: "a.rs".into(),
+                start_line: 1,
+                end_line: 1,
+                embedding: None,
+            },
+            IndexChunk {
+                path: "b.rs".into(),
+                name: "b.rs".into(),
+                chunk_type: "file".into(),
+                content: "hello there".into(),
+                content_lower: "hello there".into(),
+                name_lower: "b.rs".into(),
+                path_lower: "b.rs".into(),
+                start_line: 1,
+                end_line: 1,
+                embedding: None,
+            },
+        ];
+        let mut doc_freqs = HashMap::new();
+        let inverted = build_inverted_index(&chunks, &mut doc_freqs);
+        assert_eq!(doc_freqs.get("hello"), Some(&2));
+        assert_eq!(doc_freqs.get("world"), Some(&1));
+        assert_eq!(doc_freqs.get("there"), Some(&1));
+        assert_eq!(inverted.get("hello").unwrap().len(), 2);
+    }
 }

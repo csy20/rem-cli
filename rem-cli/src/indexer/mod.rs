@@ -20,16 +20,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::find;
-use std::io::Write;
 
 mod bm25;
 mod chunking;
@@ -52,6 +54,9 @@ pub struct CodebaseIndex {
     pub inverted_index: HashMap<String, Vec<usize>>,
     pub doc_freqs: HashMap<String, u32>,
     pub num_chunks: usize,
+    /// Pre-computed average chunk length for BM25 scoring (avoids O(n) recomputation).
+    #[serde(default)]
+    pub avg_dl: f64,
 }
 
 /// Chunk of source code stored in the retrieval index.
@@ -83,6 +88,20 @@ pub struct IndexChunk {
 ///   <project>/models/codebase_index.json   (legacy)
 /// Returns None if not present or unreadable.
 pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
+    // Try compressed format first (.json.gz), then plain JSON
+    let gz_path = project_dir.join(".rem/codebase_index.json.gz");
+    if let Ok(file) = fs::File::open(&gz_path) {
+        let mut decoder = GzDecoder::new(file);
+        let mut text = String::new();
+        if decoder.read_to_string(&mut text).is_ok() {
+            if let Ok(index) = serde_json::from_str::<CodebaseIndex>(&text) {
+                if !index.chunks.is_empty() {
+                    return Some(index);
+                }
+            }
+        }
+    }
+
     let candidates = [
         project_dir.join(".rem/codebase_index.json"),
         project_dir.join("models/codebase_index.json"),
@@ -129,6 +148,7 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
                             inverted_index,
                             doc_freqs,
                             num_chunks,
+                            avg_dl: 0.0,
                         });
                     }
                 }
@@ -406,6 +426,11 @@ pub fn write_codebase_index(root: &Path, chunks: Vec<IndexChunk>, file_mtimes: H
     }
 
     let num_chunks = chunks.len();
+    let avg_dl = if num_chunks > 0 {
+        chunks.iter().map(|c| c.content.len() as f64).sum::<f64>() / num_chunks as f64
+    } else {
+        1.0
+    };
     let index = CodebaseIndex {
         version: INDEX_VERSION,
         generated_at: crate::format_timestamp(),
@@ -414,10 +439,18 @@ pub fn write_codebase_index(root: &Path, chunks: Vec<IndexChunk>, file_mtimes: H
         inverted_index,
         doc_freqs,
         num_chunks,
+        avg_dl,
     };
 
     let text = serde_json::to_string_pretty(&index).context("failed to serialize index")?;
-    fs::write(&out_path, text).context("failed to write codebase_index.json")?;
+    fs::write(&out_path, &text).context("failed to write codebase_index.json")?;
+
+    // Write compressed variant for faster loading
+    let gz_path = rem_dir.join("codebase_index.json.gz");
+    if let Ok(file) = fs::File::create(&gz_path) {
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        let _ = encoder.write_all(text.as_bytes());
+    }
     Ok(())
 }
 
@@ -505,6 +538,7 @@ mod tests {
             inverted_index,
             doc_freqs,
             num_chunks: 3,
+            avg_dl: 0.0,
         }
     }
 
@@ -518,6 +552,7 @@ mod tests {
             inverted_index: HashMap::new(),
             doc_freqs: HashMap::new(),
             num_chunks: 0,
+            avg_dl: 0.0,
         };
         let result = retrieve_relevant_chunks(&empty, "login", 5, 10000);
         assert!(result.is_empty());

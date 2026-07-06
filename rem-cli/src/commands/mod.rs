@@ -47,6 +47,15 @@ impl CommandRegistry {
         self.commands.contains_key(name)
     }
 
+    /// Returns all registered command names.
+    pub fn command_names(&self) -> Vec<&'static str> {
+        self.entries
+            .iter()
+            .filter(|(name, _)| name.starts_with('/'))
+            .map(|(name, _)| *name)
+            .collect()
+    }
+
     /// Returns the command name and argument parts.
     pub fn parse<'a>(&self, input: &'a str) -> (&'a str, &'a str) {
         if let Some(pos) = input.find(' ') {
@@ -474,3 +483,115 @@ pub(crate) use session::{
 pub(crate) use tools::{
     handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_test,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_contains_expected_commands() {
+        let reg = registry();
+        assert!(reg.is_command("/help"));
+        assert!(reg.is_command("help"));
+        assert!(reg.is_command("exit"));
+        assert!(reg.is_command("quit"));
+        assert!(reg.is_command("/model"));
+        assert!(reg.is_command("/clear"));
+        assert!(reg.is_command("/goal"));
+        assert!(reg.is_command("/vision"));
+    }
+
+    #[test]
+    fn registry_rejects_unknown() {
+        let reg = registry();
+        assert!(!reg.is_command("/nonexistent"));
+        assert!(!reg.is_command("foobar"));
+        assert!(!reg.is_command(""));
+    }
+
+    #[test]
+    fn command_names_returns_slash_prefixed() {
+        let reg = registry();
+        let names = reg.command_names();
+        assert!(names.len() > 5);
+        assert!(names.iter().all(|n| n.starts_with('/')));
+        assert!(names.contains(&"/help"));
+        assert!(names.contains(&"/clear"));
+    }
+
+    #[test]
+    fn command_names_excludes_non_slash() {
+        let reg = registry();
+        let names = reg.command_names();
+        assert!(!names.contains(&"help"));
+        assert!(!names.contains(&"exit"));
+        assert!(!names.contains(&"quit"));
+    }
+
+    #[test]
+    fn parse_with_args() {
+        let reg = registry();
+        let (cmd, args) = reg.parse("/model gpt-4");
+        assert_eq!(cmd, "/model");
+        assert_eq!(args, "gpt-4");
+    }
+
+    #[test]
+    fn parse_without_args() {
+        let reg = registry();
+        let (cmd, args) = reg.parse("/help");
+        assert_eq!(cmd, "/help");
+        assert_eq!(args, "");
+    }
+
+    #[test]
+    fn parse_empty() {
+        let reg = registry();
+        let (cmd, args) = reg.parse("");
+        assert_eq!(cmd, "");
+        assert_eq!(args, "");
+    }
+
+    #[test]
+    fn parse_trailing_spaces() {
+        let reg = registry();
+        let (cmd, args) = reg.parse("/model   gpt-4  ");
+        assert_eq!(cmd, "/model");
+        assert_eq!(args, "gpt-4");
+    }
+
+    #[test]
+    fn registry_command_count() {
+        let reg = registry();
+        let names = reg.command_names();
+        // Count all entries starting with '/'
+        let slash_count = reg.entries.iter().filter(|(name, _)| name.starts_with('/')).count();
+        assert_eq!(names.len(), slash_count);
+        assert!(slash_count > 30, "expected at least 30 slash commands");
+    }
+
+    #[test]
+    fn custom_registry() {
+        let entries = [
+            (
+                "/foo",
+                CommandInfo {
+                    description: "Foo command",
+                    usage: "/foo",
+                },
+            ),
+            (
+                "bar",
+                CommandInfo {
+                    description: "Bar command",
+                    usage: "bar",
+                },
+            ),
+        ];
+        let reg = CommandRegistry::new(&entries);
+        assert!(reg.is_command("/foo"));
+        assert!(reg.is_command("bar"));
+        assert!(!reg.is_command("/baz"));
+        assert_eq!(reg.command_names(), vec!["/foo"]);
+    }
+}

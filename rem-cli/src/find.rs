@@ -248,12 +248,15 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
         } else {
             for (idx, raw_line) in reader.lines().map_while(Result::ok).enumerate() {
                 let line_no = idx + 1;
-                let haystack = if opts.case_sensitive {
-                    raw_line.as_bytes().to_vec()
-                } else {
-                    raw_line.to_lowercase().into_bytes()
-                };
                 let mut search_from = 0usize;
+                let haystack: &[u8];
+                let _lower_buf: Vec<u8>;
+                if opts.case_sensitive {
+                    haystack = raw_line.as_bytes();
+                } else {
+                    _lower_buf = raw_line.to_lowercase().into_bytes();
+                    haystack = &_lower_buf;
+                }
                 while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
                     let column = byte_to_column(&haystack[..search_from + pos]);
                     report.matches.push(Match {

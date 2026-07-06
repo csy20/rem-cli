@@ -2,13 +2,10 @@
 //! Tracks user corrections to intent classification so the system can learn
 //! from mistakes. Persisted to `~/.config/rem-cli/feedback.json`.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
-use crate::intent::TaskIntent;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FeedbackEntry {
@@ -31,8 +28,6 @@ pub struct FeedbackTracker {
     store: FeedbackStore,
     path: PathBuf,
     dirty: bool,
-    #[allow(dead_code)]
-    seen_keys: HashSet<String>,
 }
 
 impl FeedbackTracker {
@@ -70,52 +65,7 @@ impl FeedbackTracker {
             store,
             path,
             dirty: false,
-            seen_keys: HashSet::new(),
         }
-    }
-
-    /// Records a user correction to intent classification.
-    #[allow(dead_code)]
-    pub fn record_correction(&mut self, input: &str, classified_as: &TaskIntent, correct: &TaskIntent) {
-        let classified_str = intent_to_str(classified_as);
-        let correct_str = intent_to_str(correct);
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let key = format!("{}:{}:{}", input, classified_str, correct_str);
-
-        if !self.seen_keys.contains(&key) {
-            self.seen_keys.insert(key);
-            self.store.entries.push(FeedbackEntry {
-                input: input.to_string(),
-                classified_as: classified_str,
-                correct_intent: correct_str,
-                count: 1,
-                timestamp: now,
-            });
-            if self.store.entries.len() > 500 {
-                self.store.entries.sort_by_key(|e| e.timestamp);
-                let drained: Vec<_> = self.store.entries.drain(0..(self.store.entries.len() - 500)).collect();
-                for entry in &drained {
-                    let ek = format!("{}:{}:{}", entry.input, entry.classified_as, entry.correct_intent);
-                    self.seen_keys.remove(&ek);
-                }
-            }
-        } else if let Some(entry) = self
-            .store
-            .entries
-            .iter_mut()
-            .find(|e| e.input == input && e.classified_as == classified_str && e.correct_intent == correct_str)
-        {
-            entry.count += 1;
-            entry.timestamp = now;
-        }
-
-        self.store.total_corrections += 1;
-        self.dirty = true;
     }
 
     /// Writes feedback to disk if there are unsaved changes.
@@ -150,93 +100,12 @@ impl Drop for FeedbackTracker {
     }
 }
 
-#[allow(dead_code)]
-fn intent_to_str(intent: &TaskIntent) -> String {
-    match intent {
-        TaskIntent::FastAnswer => "FastAnswer".to_string(),
-        TaskIntent::Planning => "Planning".to_string(),
-        TaskIntent::WebNeeded => "WebNeeded".to_string(),
-        TaskIntent::CodeAction => "CodeAction".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent::TaskIntent;
 
     fn test_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("rem-cli-test-feedback-{}.json", name))
-    }
-
-    #[test]
-    fn record_correction_adds_entry() {
-        let path = test_path("adds_entry");
-        let _ = std::fs::remove_file(&path);
-        let mut tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-
-        tracker.record_correction("hello", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-        assert_eq!(tracker.store.total_corrections, 1);
-        assert_eq!(tracker.store.entries.len(), 1);
-        assert!(tracker.dirty);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn record_correction_increments_existing() {
-        let path = test_path("increments");
-        let _ = std::fs::remove_file(&path);
-        let mut tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-
-        tracker.record_correction("hello", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-        tracker.record_correction("hello", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-        assert_eq!(tracker.store.total_corrections, 2);
-        assert_eq!(tracker.store.entries.len(), 1);
-        assert_eq!(tracker.store.entries[0].count, 2);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn record_correction_distinct_inputs() {
-        let path = test_path("distinct_inputs");
-        let _ = std::fs::remove_file(&path);
-        let mut tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-
-        tracker.record_correction("hello", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-        tracker.record_correction("world", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-        assert_eq!(tracker.store.total_corrections, 2);
-        assert_eq!(tracker.store.entries.len(), 2);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn record_correction_distinct_intents() {
-        let path = test_path("distinct_intents");
-        let _ = std::fs::remove_file(&path);
-        let mut tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-
-        tracker.record_correction("hello", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-        tracker.record_correction("hello", &TaskIntent::FastAnswer, &TaskIntent::CodeAction);
-        assert_eq!(tracker.store.total_corrections, 2);
-        assert_eq!(tracker.store.entries.len(), 2);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn flush_writes_to_disk() {
-        let path = test_path("flush_write");
-        let _ = std::fs::remove_file(&path);
-        {
-            let mut tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-            tracker.record_correction("test", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-            tracker.flush();
-            assert!(!tracker.dirty);
-        }
-        assert!(path.exists());
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("FastAnswer"));
-        assert!(content.contains("Planning"));
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -250,54 +119,10 @@ mod tests {
     }
 
     #[test]
-    fn five_hundred_entry_cap_enforced() {
-        let path = test_path("cap_500");
-        let _ = std::fs::remove_file(&path);
-        let mut tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-
-        for i in 0..600 {
-            let input = format!("input_{}", i);
-            tracker.record_correction(&input, &TaskIntent::FastAnswer, &TaskIntent::Planning);
-        }
-        assert!(tracker.store.entries.len() <= 500);
-        assert_eq!(tracker.store.total_corrections, 600);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn drop_calls_flush() {
-        let path = test_path("drop_flush");
-        let _ = std::fs::remove_file(&path);
-        {
-            let mut tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-            tracker.record_correction("drop-test", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-        }
-        assert!(path.exists());
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn new_loads_existing_data() {
-        let path = test_path("load_existing");
-        let _ = std::fs::remove_file(&path);
-        {
-            let mut tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-            tracker.record_correction("existing", &TaskIntent::FastAnswer, &TaskIntent::Planning);
-            tracker.flush();
-        }
-        let tracker = FeedbackTracker::new_with_path("test-model", path.clone());
-        assert_eq!(tracker.store.total_corrections, 1);
-        assert_eq!(tracker.store.entries.len(), 1);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
     fn new_creates_default_when_no_file() {
         let path = std::env::temp_dir().join("rem-cli-test-feedback-nonexistent.json");
         let _ = std::fs::remove_file(&path);
         let tracker = FeedbackTracker::new_with_path("fresh-model", path.clone());
-        assert_eq!(tracker.store.total_corrections, 0);
-        assert!(tracker.store.entries.is_empty());
         assert_eq!(tracker.store.model, "fresh-model");
         let _ = std::fs::remove_file(&path);
     }

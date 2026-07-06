@@ -272,7 +272,11 @@ fn warn_missing_api_key(cfg: &AppConfig) {
         let has_key =
             cfg.api_key.as_ref().is_some_and(|k| !k.is_empty()) || std::env::var(env_var).is_ok_and(|k| !k.is_empty());
         if !has_key {
-            warn!("provider '{}' may need --api-key or {}", cfg.provider, env_var);
+            let t = ui::theme::active();
+            let warn_prefix = ui::theme::paint_warning(&t, "config warning:");
+            let msg = format!("provider '{}' may need --api-key or {}", cfg.provider, env_var);
+            warn!("{msg}");
+            eprintln!("  {} {msg}", warn_prefix);
         }
     }
 }
@@ -289,6 +293,9 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
         "bedrock",
         "openrouter",
     ];
+    let t = ui::theme::active();
+    let warn_prefix = ui::theme::paint_warning(&t, "config warning:");
+
     if !known_providers.contains(&cfg.provider.as_str()) {
         let msg = format!(
             "unknown provider '{}'. Known: {}",
@@ -296,57 +303,74 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
             known_providers.join(", ")
         );
         warn!("{}", msg);
+        eprintln!("  {} {msg}", warn_prefix);
     }
 
     warn_missing_api_key(cfg);
 
     let mode = cfg.mode.to_uppercase();
     if !["CHAT", "CODE", "PLAN"].contains(&mode.as_str()) {
-        warn!("unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.", cfg.mode);
+        let msg = format!("unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.", cfg.mode);
+        warn!("{msg}");
+        eprintln!("  {} {msg}", warn_prefix);
     }
 
     if cfg.timeout_s < 5 || cfg.timeout_s > 600 {
-        warn!("timeout_s={} seems unusual (expected 5-600)", cfg.timeout_s);
+        let msg = format!("timeout_s={} seems unusual (expected 5-600)", cfg.timeout_s);
+        warn!("{msg}");
+        eprintln!("  {} {msg}", warn_prefix);
     }
 
     if cfg.model_ctx < 512 {
-        warn!(
+        let msg = format!(
             "model_ctx={} is very low (< 512). Responses may be truncated.",
             cfg.model_ctx
         );
+        warn!("{msg}");
+        eprintln!("  {} {msg}", warn_prefix);
     }
 
     let url = cfg.ollama_url.trim();
     if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
-        warn!(
+        let msg = format!(
             "ollama_url '{}' does not look like a valid URL (expected http:// or https://)",
             url
         );
+        warn!("{msg}");
+        eprintln!("  {} {msg}", warn_prefix);
     }
 
     if let Some(ref effort) = cfg.reasoning_effort {
         let valid = ["low", "medium", "high"];
         if !valid.contains(&effort.to_lowercase().as_str()) {
-            warn!("unknown reasoning_effort '{}'. Expected low, medium, or high", effort);
+            let msg = format!("unknown reasoning_effort '{}'. Expected low, medium, or high", effort);
+            warn!("{msg}");
+            eprintln!("  {} {msg}", warn_prefix);
         }
     }
 
     if cfg.thinking_budget == Some(0) {
-        warn!("thinking_budget is 0 — it should be > 0 to have any effect");
+        let msg = "thinking_budget is 0 — it should be > 0 to have any effect";
+        warn!("{msg}");
+        eprintln!("  {} {msg}", warn_prefix);
     }
 
     let theme_name = cfg.theme.to_uppercase();
     let known_themes = ui::theme::list_names();
     if !known_themes.iter().any(|t| t.eq_ignore_ascii_case(&theme_name)) {
-        warn!(
+        let msg = format!(
             "unknown theme '{}'. Known themes: {}",
             cfg.theme,
             known_themes.join(", ")
         );
+        warn!("{msg}");
+        eprintln!("  {} {msg}", warn_prefix);
     }
 
     if cfg.provider.to_lowercase() == "ollama" && cfg.api_key.as_ref().is_some_and(|k| !k.is_empty()) {
-        warn!("api_key is set but provider is 'ollama' — Ollama does not need an API key");
+        let msg = "api_key is set but provider is 'ollama' — Ollama does not need an API key";
+        warn!("{msg}");
+        eprintln!("  {} {msg}", warn_prefix);
     }
 }
 

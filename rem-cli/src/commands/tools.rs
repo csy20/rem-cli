@@ -27,7 +27,7 @@ pub(crate) async fn handle_search(_client: &Provider, session: &mut ChatSession,
         cfg.search_api_key.as_deref().unwrap_or(""),
         cfg.search_cse_id.as_deref().unwrap_or(""),
     );
-    match perform_web_search(&crate::provider::HTTP_CLIENT.clone(), query, search_provider.as_ref()).await {
+    match perform_web_search(&crate::provider::HTTP_CLIENT, query, search_provider.as_ref()).await {
         Ok(results) => {
             if results.is_empty() {
                 println!("{} no results found for: {}", ui::theme::paint_warning(&t, "│"), query);

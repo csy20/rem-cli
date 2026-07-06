@@ -3,7 +3,7 @@
 //! calls the LLM provider, and manages the conversational workflow.
 
 use std::borrow::Cow;
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -24,7 +24,7 @@ use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskInte
 use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
-use crate::session_io::{build_prompt, language_specific_guidance, print_welcome, validate_chat_response};
+use crate::session_io::{build_prompt, language_specific_guidance, validate_chat_response};
 use crate::token_count::estimate_tokens;
 use crate::types::{extract_code_blocks_with_names, file_icon};
 use crate::ui;
@@ -52,7 +52,13 @@ fn initialize_session(client: &Provider, cfg: &mut AppConfig) -> Result<ChatSess
         _ => RunMode::Chat,
     };
     let t = ui::theme::active();
-    print_welcome(client);
+    // Pass actual session mode to the welcome banner instead of hardcoded "CHAT"
+    let mode_label = match session.mode {
+        RunMode::Code => "CODE",
+        RunMode::Plan => "PLAN",
+        _ => "CHAT",
+    };
+    crate::session_io::print_welcome_with_mode(client, mode_label);
     if let Some(ref wd) = workspace {
         ui::theme::println(&format!(
             "  {} {} {}",
@@ -121,7 +127,10 @@ fn needs_continuation(line: &str) -> bool {
             _ => {}
         }
     }
-    !opens.is_empty() || in_backtick
+    // Only check bracket balance — backtick state alone should NOT trigger
+    // continuation (triple-backtick code fences would otherwise trap the
+    // user in multi-line mode indefinitely).
+    !opens.is_empty()
 }
 
 /// Reads user input with multi-line support.
@@ -416,7 +425,16 @@ fn build_llm_prompt(session: &mut ChatSession, trimmed: &str, intent: &TaskInten
     let last_code_ctx = build_last_code_context(session, trimmed);
 
     let full_prompt = {
-        let mut p = instruction.to_string();
+        let estimated = instruction.len()
+            + memory_ctx.len()
+            + project_ctx.len()
+            + last_code_ctx.len()
+            + at_context.len()
+            + resolved_input.len()
+            + search_ctx.len()
+            + 64; // extra for newlines and separators
+        let mut p = String::with_capacity(estimated);
+        p.push_str(instruction);
         p.push('\n');
         if !memory_ctx.is_empty() {
             p.push_str(&memory_ctx);
@@ -531,11 +549,15 @@ fn handle_llm_response(
             ui::theme::paint_warning(t, "\u{258C}"),
             ui::theme::paint_dim(t, "(empty response)")
         );
+    } else if crate::provider::HAD_STREAMING_OUTPUT.load(std::sync::atomic::Ordering::SeqCst) {
+        // Content was already streamed to stdout line by line — skip re-display
     } else {
         display_text_output(&cleaned, t);
     }
 
-    display_performance_stats(client, session, elapsed, t);
+    if session.mode == RunMode::Plan || verbose {
+        display_performance_stats(client, session, elapsed, t);
+    }
 
     if !cleaned.is_empty() {
         session.history_mgr.push_turn(trimmed.to_string(), cleaned);
@@ -546,6 +568,11 @@ fn handle_llm_response(
         if session.history_mgr.messages_since_save >= crate::constants::AUTO_SAVE_INTERVAL {
             session.auto_save_session();
             session.history_mgr.messages_since_save = 0;
+            let rail = ui::theme::paint_rail_empty(t);
+            let saved = ui::theme::paint_dim(t, "session auto-saved");
+            println!("{rail}");
+            println!("{rail}  {saved}");
+            println!("{rail}");
         }
     }
 }
@@ -595,11 +622,15 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         if trimmed.starts_with('/') {
             // Check if it was actually a recognized command (not an unknown one)
             if !crate::commands::registry().is_command(trimmed) {
-                println!(
-                    "  {} unknown command: {}",
-                    ui::theme::paint_warning(&t, "!"),
-                    ui::theme::paint_dim(&t, trimmed)
-                );
+                let warning = ui::theme::paint_warning(&t, "!");
+                let unknown = ui::theme::paint_dim(&t, trimmed);
+                println!("  {warning} unknown command: {unknown}");
+                // Suggest closest match
+                if let Some(suggestion) = did_you_mean(trimmed) {
+                    let hint = ui::theme::paint(&t, "accent", &suggestion, false);
+                    let msg = ui::theme::paint_dim(&t, "did you mean?");
+                    println!("  {}   {msg} {hint}", ui::theme::paint_rail_empty(&t));
+                }
             }
             continue;
         }
@@ -680,27 +711,12 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             println!("{rail}");
         }
 
-        // Reset cancellation flag right before the LLM call
+        // Reset cancellation and streaming tracking flags right before the LLM call
         crate::provider::STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::provider::HAD_STREAMING_OUTPUT.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        // Frame-based spinner during LLM call (writes to stderr; tokens stream to stdout, no conflict)
-        let spinner_frames_raw = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let spinner_frames: Vec<String> = spinner_frames_raw
-            .iter()
-            .map(|c| ui::theme::paint(&t, "accent_dim", c, true))
-            .collect();
-        let thinking_label = ui::theme::paint_dim(&t, "thinking...");
-        let spinner_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let sd = spinner_done.clone();
-        let spinner_handle = tokio::spawn(async move {
-            let mut i = 0usize;
-            while !sd.load(std::sync::atomic::Ordering::SeqCst) {
-                eprint!("\r  {} {}", spinner_frames[i], thinking_label);
-                let _ = std::io::stderr().flush();
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                i = (i + 1) % spinner_frames.len();
-            }
-        });
+        // Spinner during LLM call (writes to stderr; tokens stream to stdout, no conflict)
+        let _spinner = crate::ui::output::SpinnerGuard::new("thinking...");
 
         crate::provider::STREAM_TOKENS.store(true, std::sync::atomic::Ordering::SeqCst);
         let result = client
@@ -708,11 +724,7 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             .await;
         crate::provider::STREAM_TOKENS.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        // Stop and clear the spinner
-        spinner_done.store(true, std::sync::atomic::Ordering::SeqCst);
-        spinner_handle.abort();
-        eprint!("\r{}\r", " ".repeat(35));
-        let _ = std::io::stderr().flush();
+        // Spinner stops automatically when _spinner is dropped
         let elapsed = start.elapsed();
         session.last_elapsed = elapsed;
 
@@ -779,19 +791,58 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
     }
 }
 
+/// Wraps text to a given max width at word boundaries.
+fn word_wrap(text: &str, max_width: usize) -> String {
+    let mut result = String::with_capacity(text.len());
+    for (i, line) in text.lines().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        if line.len() <= max_width {
+            result.push_str(line);
+        } else {
+            let mut remaining = line;
+            while remaining.len() > max_width {
+                let split = remaining[..max_width]
+                    .rfind(' ')
+                    .filter(|&pos| pos > 0)
+                    .unwrap_or(max_width);
+                result.push_str(&remaining[..split]);
+                result.push('\n');
+                remaining = remaining[split..].trim_start();
+            }
+            if !remaining.is_empty() {
+                result.push_str(remaining);
+            }
+        }
+    }
+    result
+}
+
+/// Detects terminal width via COLUMNS env var, falling back to 80.
+fn terminal_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(80usize)
+        .saturating_sub(4) // leave room for rail prefix + margin
+}
+
 /// Prints plain text output line by line, using pager for long output.
 fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
     let rail_chr = || ui::theme::paint(t, "accent", "\u{258C}", true);
-    let line_count = cleaned.lines().count();
+    let max_width = terminal_width();
+    let wrapped = word_wrap(cleaned, max_width);
+    let line_count = wrapped.lines().count();
     if line_count > 50 {
         let mut buf = String::new();
-        for line in cleaned.lines() {
+        for line in wrapped.lines() {
             buf.push_str(&format!("{} {}\n", rail_chr(), line));
         }
         maybe_page(&buf);
         return;
     }
-    for line in cleaned.lines() {
+    for line in wrapped.lines() {
         println!("{} {}", rail_chr(), line);
     }
 }
@@ -816,6 +867,49 @@ fn display_performance_stats(
     println!("{rail}");
     println!("{rail} {provider_tag} {dot} {dur} {dot} {speed}");
     println!("{rail}");
+}
+
+/// Simple Levenshtein distance for "did you mean?" suggestions.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_len = a.len();
+    let b_len = b.len();
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr: Vec<usize> = vec![0; b_len + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = std::cmp::min(std::cmp::min(curr[j] + 1, prev[j + 1] + 1), prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_len]
+}
+
+/// Suggests a close command name when an unknown `/command` is entered.
+fn did_you_mean(input: &str) -> Option<String> {
+    let cmd_name = input.split(' ').next().unwrap_or(input);
+    let names = crate::commands::registry().command_names();
+    let mut best_name: Option<String> = None;
+    let mut best_dist = usize::MAX;
+    for name in names {
+        let dist = levenshtein_distance(cmd_name, name);
+        if dist > 0 && dist < best_dist {
+            best_dist = dist;
+            best_name = Some(name.to_string());
+        }
+    }
+    if best_dist <= 2 {
+        best_name
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

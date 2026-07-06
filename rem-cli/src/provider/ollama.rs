@@ -62,6 +62,272 @@ pub struct OllamaToolCallFunction {
 
 pub(super) struct OllamaBackend;
 
+#[async_trait]
+impl ProviderBackend for OllamaBackend {
+    async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
+        let url = super::ollama_api_url(&ctx.base_url, "tags");
+        let resp = ctx.client.get(url).send().await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Ollama unreachable at {}", ctx.base_url));
+        }
+        let parsed: OllamaTagsResponse = resp.json().await.context("invalid tags response")?;
+        Ok(parsed.models.into_iter().map(|m| m.name).collect())
+    }
+
+    async fn complete_json(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<crate::ModelReply> {
+        let url = super::ollama_api_url(&ctx.base_url, "generate");
+        let final_prompt = format!("{system_prompt}\n\nUser request:\n{user_prompt}\n\nReturn JSON only.");
+        let payload = json!({
+            "model": ctx.model,
+            "prompt": final_prompt,
+            "stream": false,
+            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS },
+            "format": {
+                "type": "object",
+                "properties": {
+                    "explanation": {"type": "string"},
+                    "code": {"type": "string"},
+                    "files": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                            "required": ["path", "content"]
+                        }
+                    },
+                    "commands": {"type": "array", "items": {"type": "string"}},
+                    "checks": {"type": "array", "items": {"type": "string"}},
+                    "caution": {"type": "string"}
+                },
+                "required": ["explanation", "code", "commands", "checks", "caution"]
+            }
+        });
+
+        let resp = ctx
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Ollama")?;
+        if !resp.status().is_success() {
+            return Err(super::handle_ollama_error(resp, &url, &ctx.model).await);
+        }
+
+        let raw: OllamaJsonResponse = resp.json().await.context("invalid Ollama response")?;
+        super::parse_json_fallback(&raw.response)
+    }
+
+    async fn complete_chat_stream(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+        history: &str,
+    ) -> Result<String> {
+        let url = super::ollama_api_url(&ctx.base_url, "chat");
+        let messages = super::build_messages_from_history(history, user_prompt, Some(system_prompt));
+        let payload = json!({
+            "model": ctx.model,
+            "messages": messages,
+            "stream": true,
+            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
+        });
+        let resp = ctx
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Ollama")?;
+        if !resp.status().is_success() {
+            return Err(super::handle_ollama_error(resp, &url, &ctx.model).await);
+        }
+
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
+        super::stream_buf(resp, |trimmed| {
+            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
+                if let Some(ref msg) = obj.message {
+                    if let Some(ref content) = msg.content {
+                        full_text.push_str(content);
+                        super::emit_token(content);
+                    }
+                }
+                if obj.done == Some(true) {
+                    return Ok(false);
+                }
+            }
+            if full_text.len() > super::MAX_RESPONSE_BYTES {
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+            }
+            Ok(true)
+        })
+        .await?;
+        Ok(full_text)
+    }
+
+    async fn complete_chat_stream_with_vision(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+        history: &str,
+        mime_type: &str,
+        base64_data: &str,
+    ) -> Result<String> {
+        let url = super::ollama_api_url(&ctx.base_url, "chat");
+        // Build history messages via shared helper (without final user prompt — special for vision)
+        let mut messages = super::build_messages_from_history(history, "", None);
+        // Remove the empty placeholder and add the vision message
+        if !messages.is_empty() {
+            messages.pop();
+        }
+        messages.push(json!({
+            "role": "user",
+            "content": [
+                json!({"type": "text", "text": user_prompt}),
+                json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime_type, base64_data)}})
+            ]
+        }));
+        let payload = json!({
+            "model": ctx.model,
+            "system": system_prompt,
+            "messages": messages,
+            "stream": true,
+            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
+        });
+        let resp = ctx
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Ollama vision API")?;
+        if !resp.status().is_success() {
+            return Err(super::handle_ollama_error(resp, &url, &ctx.model).await);
+        }
+
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
+        super::stream_buf(resp, |trimmed| {
+            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
+                if let Some(ref msg) = obj.message {
+                    if let Some(ref content) = msg.content {
+                        full_text.push_str(content);
+                        super::emit_token(content);
+                    }
+                }
+                if obj.done == Some(true) {
+                    return Ok(false);
+                }
+            }
+            if full_text.len() > super::MAX_RESPONSE_BYTES {
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+            }
+            Ok(true)
+        })
+        .await?;
+        Ok(full_text)
+    }
+
+    async fn complete_chat_stream_with_tools(
+        &self,
+        ctx: &ProviderContext,
+        system_prompt: &str,
+        user_prompt: &str,
+        history: &str,
+        tool_specs: &[ToolSpec],
+    ) -> Result<ToolResponse> {
+        let url = super::ollama_api_url(&ctx.base_url, "chat");
+
+        let messages = super::build_messages_from_history(history, user_prompt, Some(system_prompt));
+
+        let tools_json: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
+
+        let mut payload = json!({
+            "model": ctx.model,
+            "messages": messages,
+            "stream": true,
+            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
+        });
+        if !tools_json.is_empty() {
+            payload["tools"] = json!(tools_json);
+        }
+
+        let resp = ctx
+            .client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .context("failed to call Ollama chat API")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            // Only fall back to non-tool chat on 404 (tool calling not supported by model)
+            if status == reqwest::StatusCode::NOT_FOUND {
+                let text = self
+                    .complete_chat_stream(ctx, system_prompt, user_prompt, history)
+                    .await?;
+                return Ok(ToolResponse::Text(text));
+            }
+            // Propagate all other errors (auth, server errors, etc.)
+            return Err(super::handle_ollama_error(resp, &url, &ctx.model).await);
+        }
+
+        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
+        let mut tool_calls: Vec<(i64, String, String, String)> = Vec::new();
+
+        super::stream_buf(resp, |trimmed| {
+            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
+                if let Some(ref msg) = obj.message {
+                    if let Some(ref content) = msg.content {
+                        full_text.push_str(content);
+                    }
+                    if let Some(ref calls) = msg.tool_calls {
+                        for tc in calls {
+                            let idx = tool_calls.len() as i64;
+                            let name = tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
+                            let args = tc
+                                .function
+                                .as_ref()
+                                .and_then(|f| f.arguments.as_ref().map(|a| a.to_string()))
+                                .unwrap_or_default();
+                            tool_calls.push((idx, String::new(), name, args));
+                        }
+                    }
+                }
+                if obj.done == Some(true) {
+                    return Ok(false);
+                }
+            }
+            if full_text.len() > super::MAX_RESPONSE_BYTES {
+                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+            }
+            Ok(true)
+        })
+        .await?;
+
+        if !tool_calls.is_empty() {
+            let calls: Vec<ToolCall> = tool_calls
+                .into_iter()
+                .map(|(_, id, name, args_str)| ToolCall {
+                    id,
+                    name,
+                    arguments: serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null),
+                })
+                .collect();
+            Ok(ToolResponse::ToolCalls(calls))
+        } else {
+            Ok(ToolResponse::Text(full_text))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,295 +410,5 @@ mod tests {
         let args = tc.function.as_ref().and_then(|f| f.arguments.as_ref());
         assert!(args.is_some());
         assert_eq!(args.unwrap().get("query").and_then(|v| v.as_str()), Some("TODO"));
-    }
-}
-
-#[async_trait]
-impl ProviderBackend for OllamaBackend {
-    async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
-        let url = super::ollama_api_url(&ctx.base_url, "tags");
-        let resp = ctx.client.get(url).send().await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("Ollama unreachable at {}", ctx.base_url));
-        }
-        let parsed: OllamaTagsResponse = resp.json().await.context("invalid tags response")?;
-        Ok(parsed.models.into_iter().map(|m| m.name).collect())
-    }
-
-    async fn complete_json(
-        &self,
-        ctx: &ProviderContext,
-        system_prompt: &str,
-        user_prompt: &str,
-    ) -> Result<crate::ModelReply> {
-        let url = super::ollama_api_url(&ctx.base_url, "generate");
-        let final_prompt = format!("{system_prompt}\n\nUser request:\n{user_prompt}\n\nReturn JSON only.");
-        let payload = json!({
-            "model": ctx.model,
-            "prompt": final_prompt,
-            "stream": false,
-            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS },
-            "format": {
-                "type": "object",
-                "properties": {
-                    "explanation": {"type": "string"},
-                    "code": {"type": "string"},
-                    "files": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-                            "required": ["path", "content"]
-                        }
-                    },
-                    "commands": {"type": "array", "items": {"type": "string"}},
-                    "checks": {"type": "array", "items": {"type": "string"}},
-                    "caution": {"type": "string"}
-                },
-                "required": ["explanation", "code", "commands", "checks", "caution"]
-            }
-        });
-
-        let resp = ctx
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .context("failed to call Ollama")?;
-        if !resp.status().is_success() {
-            let err = super::handle_ollama_error(resp, &url, &ctx.model).await;
-            return Err(err.unwrap_err());
-        }
-
-        let raw: OllamaJsonResponse = resp.json().await.context("invalid Ollama response")?;
-        super::parse_json_fallback(&raw.response)
-    }
-
-    async fn complete_chat_stream(
-        &self,
-        ctx: &ProviderContext,
-        system_prompt: &str,
-        user_prompt: &str,
-        history: &str,
-    ) -> Result<String> {
-        let url = super::ollama_api_url(&ctx.base_url, "chat");
-        let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
-        if !history.is_empty() {
-            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
-                messages.push(json!({"role": "user", "content": user_msg}));
-                if !assistant_msg.is_empty() {
-                    messages.push(json!({"role": "assistant", "content": assistant_msg}));
-                }
-            }
-        }
-        messages.push(json!({"role": "user", "content": user_prompt}));
-        let payload = json!({
-            "model": ctx.model,
-            "messages": messages,
-            "stream": true,
-            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
-        });
-        let resp = ctx
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .context("failed to call Ollama")?;
-        if !resp.status().is_success() {
-            return super::handle_ollama_error(resp, &url, &ctx.model).await;
-        }
-
-        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
-        super::stream_buf(resp, |trimmed| {
-            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
-                if let Some(ref msg) = obj.message {
-                    if let Some(ref content) = msg.content {
-                        full_text.push_str(content);
-                        super::emit_token(content);
-                    }
-                }
-                if obj.done == Some(true) {
-                    return Ok(false);
-                }
-            }
-            if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
-            }
-            Ok(true)
-        })
-        .await?;
-        Ok(full_text)
-    }
-
-    async fn complete_chat_stream_with_vision(
-        &self,
-        ctx: &ProviderContext,
-        system_prompt: &str,
-        user_prompt: &str,
-        history: &str,
-        mime_type: &str,
-        base64_data: &str,
-    ) -> Result<String> {
-        let url = super::ollama_api_url(&ctx.base_url, "chat");
-        let mut messages: Vec<serde_json::Value> = vec![];
-        if !history.is_empty() {
-            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
-                messages.push(json!({"role": "user", "content": user_msg}));
-                if !assistant_msg.is_empty() {
-                    messages.push(json!({"role": "assistant", "content": assistant_msg}));
-                }
-            }
-        }
-        messages.push(json!({
-            "role": "user",
-            "content": [
-                json!({"type": "text", "text": user_prompt}),
-                json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{}", mime_type, base64_data)}})
-            ]
-        }));
-        let payload = json!({
-            "model": ctx.model,
-            "system": system_prompt,
-            "messages": messages,
-            "stream": true,
-            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
-        });
-        let resp = ctx
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .context("failed to call Ollama vision API")?;
-        if !resp.status().is_success() {
-            return super::handle_ollama_error(resp, &url, &ctx.model).await;
-        }
-
-        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
-        super::stream_buf(resp, |trimmed| {
-            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
-                if let Some(ref msg) = obj.message {
-                    if let Some(ref content) = msg.content {
-                        full_text.push_str(content);
-                        super::emit_token(content);
-                    }
-                }
-                if obj.done == Some(true) {
-                    return Ok(false);
-                }
-            }
-            if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
-            }
-            Ok(true)
-        })
-        .await?;
-        Ok(full_text)
-    }
-
-    async fn complete_chat_stream_with_tools(
-        &self,
-        ctx: &ProviderContext,
-        system_prompt: &str,
-        user_prompt: &str,
-        history: &str,
-        tool_specs: &[ToolSpec],
-    ) -> Result<ToolResponse> {
-        let url = super::ollama_api_url(&ctx.base_url, "chat");
-
-        let mut messages: Vec<serde_json::Value> = vec![];
-        messages.push(json!({"role": "system", "content": system_prompt}));
-        if !history.is_empty() {
-            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
-                messages.push(json!({"role": "user", "content": user_msg}));
-                if !assistant_msg.is_empty() {
-                    messages.push(json!({"role": "assistant", "content": assistant_msg}));
-                }
-            }
-        }
-        messages.push(json!({"role": "user", "content": user_prompt}));
-
-        let tools_json: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
-
-        let mut payload = json!({
-            "model": ctx.model,
-            "messages": messages,
-            "stream": true,
-            "options": { "num_predict": crate::constants::DEFAULT_MAX_TOKENS, "num_ctx": ctx.model_ctx, "num_thread": *NUM_THREADS }
-        });
-        if !tools_json.is_empty() {
-            payload["tools"] = json!(tools_json);
-        }
-
-        let resp = ctx
-            .client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .context("failed to call Ollama chat API")?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            // Only fall back to non-tool chat on 404 (tool calling not supported by model)
-            if status == reqwest::StatusCode::NOT_FOUND {
-                let text = self
-                    .complete_chat_stream(ctx, system_prompt, user_prompt, history)
-                    .await?;
-                return Ok(ToolResponse::Text(text));
-            }
-            // Propagate all other errors (auth, server errors, etc.)
-            let err = super::handle_ollama_error(resp, &url, &ctx.model).await;
-            return Err(err.unwrap_err());
-        }
-
-        let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
-        let mut tool_calls: Vec<(i64, String, String, String)> = Vec::new();
-
-        super::stream_buf(resp, |trimmed| {
-            if let Ok(obj) = serde_json::from_str::<OllamaChatStreamLine>(trimmed) {
-                if let Some(ref msg) = obj.message {
-                    if let Some(ref content) = msg.content {
-                        full_text.push_str(content);
-                    }
-                    if let Some(ref calls) = msg.tool_calls {
-                        for tc in calls {
-                            let idx = tool_calls.len() as i64;
-                            let name = tc.function.as_ref().and_then(|f| f.name.clone()).unwrap_or_default();
-                            let args = tc
-                                .function
-                                .as_ref()
-                                .and_then(|f| f.arguments.as_ref().map(|a| a.to_string()))
-                                .unwrap_or_default();
-                            tool_calls.push((idx, String::new(), name, args));
-                        }
-                    }
-                }
-                if obj.done == Some(true) {
-                    return Ok(false);
-                }
-            }
-            if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
-            }
-            Ok(true)
-        })
-        .await?;
-
-        if !tool_calls.is_empty() {
-            let calls: Vec<ToolCall> = tool_calls
-                .into_iter()
-                .map(|(_, id, name, args_str)| ToolCall {
-                    id,
-                    name,
-                    arguments: serde_json::from_str(&args_str).unwrap_or(serde_json::Value::Null),
-                })
-                .collect();
-            Ok(ToolResponse::ToolCalls(calls))
-        } else {
-            Ok(ToolResponse::Text(full_text))
-        }
     }
 }

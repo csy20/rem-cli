@@ -70,3 +70,70 @@ fn print_direct(text: &str) {
     }
     let _ = std::io::stdout().flush();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pager_args_less() {
+        let args = pager_args("less");
+        assert_eq!(args, vec!["-R", "-F", "-X"]);
+    }
+
+    #[test]
+    fn pager_args_busybox() {
+        let args = pager_args("busybox");
+        assert_eq!(args, vec!["-R", "-F", "-X"]);
+    }
+
+    #[test]
+    fn pager_args_full_path_less() {
+        let args = pager_args("/usr/bin/less");
+        assert_eq!(args, vec!["-R", "-F", "-X"]);
+    }
+
+    #[test]
+    fn pager_args_more() {
+        let args = pager_args("more");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn pager_args_bat() {
+        let args = pager_args("bat");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn pager_args_custom_pager() {
+        let args = pager_args("/opt/bin/mypager");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn print_direct_ends_with_newline() {
+        print_direct("hello\n");
+    }
+
+    #[test]
+    fn print_direct_no_newline() {
+        print_direct("hello");
+    }
+
+    #[test]
+    fn maybe_page_short_text() {
+        maybe_page("short text under threshold\n");
+    }
+
+    #[test]
+    fn maybe_page_empty() {
+        maybe_page("");
+    }
+
+    #[test]
+    fn maybe_page_exact_threshold() {
+        let text = (0..49).map(|i| format!("line_{}", i)).collect::<Vec<_>>().join("\n");
+        maybe_page(&text);
+    }
+}

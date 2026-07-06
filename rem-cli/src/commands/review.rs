@@ -302,3 +302,50 @@ pub(crate) async fn handle_review(client: &Provider, session: &mut ChatSession) 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::ChatSession;
+    use crate::types::FileEntry;
+
+    fn empty_session() -> ChatSession {
+        ChatSession::new("test", None).expect("failed to create session")
+    }
+
+    #[test]
+    fn handle_diff_empty_session() {
+        let session = empty_session();
+        handle_diff(&session);
+    }
+
+    #[test]
+    fn handle_apply_empty_session() {
+        let mut session = empty_session();
+        handle_apply(&mut session);
+    }
+
+    #[test]
+    fn handle_diff_with_files_no_disk() {
+        let mut session = empty_session();
+        session.code_out.last_files.push(FileEntry {
+            path: "nonexistent.rs".into(),
+            content: "fn test() {}".into(),
+        });
+        handle_diff(&session);
+    }
+
+    #[test]
+    fn handle_diff_with_multiple_files() {
+        let mut session = empty_session();
+        session.code_out.last_files.push(FileEntry {
+            path: "src/main.rs".into(),
+            content: "fn main() {}".into(),
+        });
+        session.code_out.last_files.push(FileEntry {
+            path: "src/lib.rs".into(),
+            content: "pub fn helper() {}".into(),
+        });
+        handle_diff(&session);
+    }
+}

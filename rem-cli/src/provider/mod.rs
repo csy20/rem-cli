@@ -66,6 +66,10 @@ impl std::fmt::Display for LlmErrorBody {
 pub(crate) static STREAM_CANCELLED: AtomicBool = AtomicBool::new(false);
 pub(crate) static STREAM_TOKENS: AtomicBool = AtomicBool::new(false);
 
+/// Tracks whether any streaming tokens were actually emitted to stdout.
+/// Used by the REPL to avoid re-displaying content that was already shown.
+pub(crate) static HAD_STREAMING_OUTPUT: AtomicBool = AtomicBool::new(false);
+
 /// Reusable HTTP client with connection pooling (no hard timeout — individual
 /// requests use their own per-call timeouts via tokio::time::timeout).
 pub(crate) static HTTP_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
@@ -314,8 +318,12 @@ impl ProviderBackend for UnsupportedBackend {
 
 // ─── Provider implementation ─────────────────────────────────────────────
 
-fn build_client(_timeout_s: u64) -> Client {
-    HTTP_CLIENT.clone()
+fn build_client(timeout_s: u64) -> Client {
+    Client::builder()
+        .pool_max_idle_per_host(4)
+        .timeout(std::time::Duration::from_secs(timeout_s))
+        .build()
+        .unwrap_or_else(|_| HTTP_CLIENT.clone())
 }
 
 impl Provider {
@@ -534,6 +542,29 @@ fn parse_history_turns(history: &str) -> Vec<(String, String)> {
     turns
 }
 
+/// Builds a messages array from history and a user prompt.
+/// Shared across providers to eliminate 8+ duplications of the same pattern.
+pub(crate) fn build_messages_from_history(
+    history: &str,
+    user_prompt: &str,
+    system_prompt: Option<&str>,
+) -> Vec<serde_json::Value> {
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    if let Some(sp) = system_prompt {
+        messages.push(json!({"role": "system", "content": sp}));
+    }
+    if !history.is_empty() {
+        for (user_msg, assistant_msg) in parse_history_turns(history) {
+            messages.push(json!({"role": "user", "content": user_msg}));
+            if !assistant_msg.is_empty() {
+                messages.push(json!({"role": "assistant", "content": assistant_msg}));
+            }
+        }
+    }
+    messages.push(json!({"role": "user", "content": user_prompt}));
+    messages
+}
+
 // ─── Shared streaming / utility functions ────────────────────────────────
 
 pub fn openai_chat_url(base_url: &str, kind: ProviderKind, model: &str) -> String {
@@ -559,6 +590,7 @@ pub fn add_openai_auth(req: reqwest::RequestBuilder, api_key: &str, kind: Provid
 
 pub fn emit_token(text: &str) {
     if STREAM_TOKENS.load(Ordering::SeqCst) {
+        HAD_STREAMING_OUTPUT.store(true, Ordering::SeqCst);
         use std::io::Write;
         let _ = std::io::stdout().write(text.as_bytes());
         if text.contains('\n') {
@@ -586,7 +618,8 @@ where
             Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
         };
         if offset > 0 && buf.len() > crate::constants::INITIAL_BUF_CAPACITY * 2 {
-            buf.drain(..offset);
+            // split_off is O(1) — just adjusts length pointer without copying data
+            buf = buf.split_off(offset);
             offset = 0;
         }
         if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
@@ -724,38 +757,19 @@ pub(super) async fn stream_anthropic_sse(
     .await
 }
 
-pub(super) async fn handle_ollama_error(resp: reqwest::Response, url: &str, model: &str) -> Result<String> {
+pub(super) async fn handle_ollama_error(resp: reqwest::Response, url: &str, model: &str) -> anyhow::Error {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_else(|e| format!("(read error: {e})"));
     let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
         .map(|v| v.error.to_string())
         .unwrap_or_else(|_| body.clone());
     if status.as_u16() == 404 && err_msg.to_lowercase().contains("model") {
-        return Err(anyhow!("Model '{model}' not found. Pull it: `ollama pull {model}`"));
+        return anyhow!("Model '{model}' not found. Pull it: `ollama pull {model}`");
     }
     if status.as_u16() == 404 {
-        return Err(anyhow!("Endpoint not found (404 at {url}). Check --ollama-url"));
+        return anyhow!("Endpoint not found (404 at {url}). Check --ollama-url");
     }
-    Err(anyhow!("Ollama failed: {status} — {err_msg}"))
-}
-
-#[allow(dead_code)]
-/// Stream handler for the legacy `/api/generate` endpoint (vs `/api/chat`).
-/// Kept for reference in case non-chat Ollama endpoints are needed later.
-pub(super) async fn stream_ollama_response(resp: reqwest::Response) -> Result<String> {
-    stream_lines(resp, |trimmed, full| {
-        if let Ok(obj) = serde_json::from_str::<ollama::OllamaStreamLine>(trimmed) {
-            if let Some(token) = obj.response {
-                full.push_str(&token);
-                emit_token(&token);
-            }
-            if obj.done == Some(true) {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    })
-    .await
+    anyhow!("Ollama failed: {status} — {err_msg}")
 }
 
 pub(super) async fn stream_gemini_sse(resp: reqwest::Response) -> Result<String> {
@@ -851,16 +865,7 @@ pub(super) async fn openai_compat_chat_stream(
     history: &str,
 ) -> Result<String> {
     let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
-    let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
-    if !history.is_empty() {
-        for (user_msg, assistant_msg) in parse_history_turns(history) {
-            messages.push(json!({"role": "user", "content": user_msg}));
-            if !assistant_msg.is_empty() {
-                messages.push(json!({"role": "assistant", "content": assistant_msg}));
-            }
-        }
-    }
-    messages.push(json!({"role": "user", "content": user_prompt}));
+    let messages = build_messages_from_history(history, user_prompt, Some(system_prompt));
     let resp = add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), kind)
         .json(&json!({
             "model": ctx.model,
@@ -891,16 +896,10 @@ pub(super) async fn openai_compat_chat_stream_with_vision(
 ) -> Result<String> {
     let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
     let data_uri = format!("data:{mime_type};base64,{base64_data}");
-    let mut messages: Vec<serde_json::Value> = vec![];
-    messages.push(json!({"role": "system", "content": system_prompt}));
-    if !history.is_empty() {
-        for (user_msg, assistant_msg) in parse_history_turns(history) {
-            messages.push(json!({"role": "user", "content": user_msg}));
-            if !assistant_msg.is_empty() {
-                messages.push(json!({"role": "assistant", "content": assistant_msg}));
-            }
-        }
-    }
+    // Build history messages via shared helper (without the final user prompt, which is special for vision)
+    let mut messages = build_messages_from_history(history, "", Some(system_prompt));
+    // Replace the empty final user message with the vision content
+    messages.pop();
     messages.push(json!({
         "role": "user",
         "content": [
