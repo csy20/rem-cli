@@ -292,84 +292,11 @@ pub(crate) fn handle_find(session: &ChatSession, query: &str) {
     let show_limit = 50usize;
     let shown = report.matches.len().min(show_limit);
 
+    let find_body = format_find_matches(&t, &root, &report.matches, show_limit);
     if shown > 40 {
-        let mut buf = String::new();
-        let mut last_path: Option<String> = None;
-        for m in report.matches.iter().take(show_limit) {
-            let rel = m
-                .path
-                .strip_prefix(&root)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| m.path.display().to_string());
-            if last_path.as_deref() != Some(rel.as_str()) {
-                if last_path.is_some() {
-                    buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(&t)));
-                }
-                buf.push_str(&format!(
-                    "{} {}\n",
-                    ui::theme::paint(&t, "accent", "\u{258C}", true),
-                    ui::theme::paint(
-                        &t,
-                        "accent_info",
-                        &format!("\u{2500}\u{2500} {} \u{2500}\u{2500}", rel),
-                        true
-                    ),
-                ));
-                last_path = Some(rel);
-            }
-            let line_no_w = 4usize;
-            let col_w = 3usize;
-            buf.push_str(&format!(
-                "{} {}   {:>lw$}:{:<cw$}  {}\n",
-                ui::theme::paint(&t, "accent", "\u{258C}", true),
-                ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
-                m.line_no,
-                m.column,
-                ui::theme::paint_bright(&t, &trim_for_display(&m.line, 120)),
-                lw = line_no_w,
-                cw = col_w
-            ));
-        }
-        buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(&t)));
-        maybe_page(&buf);
+        maybe_page(&find_body);
     } else {
-        let mut last_path: Option<String> = None;
-        for m in report.matches.iter().take(show_limit) {
-            let rel = m
-                .path
-                .strip_prefix(&root)
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| m.path.display().to_string());
-            if last_path.as_deref() != Some(rel.as_str()) {
-                if last_path.is_some() {
-                    println!("{}", ui::theme::paint_rail_empty(&t));
-                }
-                println!(
-                    "{} {}",
-                    ui::theme::paint(&t, "accent", "\u{258C}", true),
-                    ui::theme::paint(
-                        &t,
-                        "accent_info",
-                        &format!("\u{2500}\u{2500} {} \u{2500}\u{2500}", rel),
-                        true
-                    ),
-                );
-                last_path = Some(rel);
-            }
-            let line_no_w = 4usize;
-            let col_w = 3usize;
-            println!(
-                "{} {}   {:>lw$}:{:<cw$}  {}",
-                ui::theme::paint(&t, "accent", "\u{258C}", true),
-                ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
-                m.line_no,
-                m.column,
-                ui::theme::paint_bright(&t, &trim_for_display(&m.line, 120)),
-                lw = line_no_w,
-                cw = col_w
-            );
-        }
-        println!("{}", ui::theme::paint_rail_empty(&t));
+        print!("{}", find_body);
     }
 
     let unique_files: std::collections::BTreeSet<String> = report
@@ -402,6 +329,54 @@ pub(crate) fn handle_find(session: &ChatSession, query: &str) {
     println!("{}", ui::theme::paint_rail_empty(&t));
     println!("{}", ui::theme::paint_success_label(&t, &summary));
     println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
+/// Formats find match results into a display string (deduplicates paths, formats line/col).
+fn format_find_matches(
+    t: &ui::theme::Theme,
+    root: &std::path::Path,
+    matches: &[crate::find::Match],
+    show_limit: usize,
+) -> String {
+    let mut buf = String::new();
+    let mut last_path: Option<String> = None;
+    for m in matches.iter().take(show_limit) {
+        let rel = m
+            .path
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| m.path.display().to_string());
+        if last_path.as_deref() != Some(rel.as_str()) {
+            if last_path.is_some() {
+                buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(t)));
+            }
+            buf.push_str(&format!(
+                "{} {}\n",
+                ui::theme::paint(t, "accent", "\u{258C}", true),
+                ui::theme::paint(
+                    t,
+                    "accent_info",
+                    &format!("\u{2500}\u{2500} {} \u{2500}\u{2500}", rel),
+                    true
+                ),
+            ));
+            last_path = Some(rel);
+        }
+        let line_no_w = 4usize;
+        let col_w = 3usize;
+        buf.push_str(&format!(
+            "{} {}   {:>lw$}:{:<cw$}  {}\n",
+            ui::theme::paint(t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(t, "\u{251c}\u{2500}\u{2500}"),
+            m.line_no,
+            m.column,
+            ui::theme::paint_bright(t, &trim_for_display(&m.line, 120)),
+            lw = line_no_w,
+            cw = col_w
+        ));
+    }
+    buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(t)));
+    buf
 }
 
 /// Truncates a string to a max number of characters for display.

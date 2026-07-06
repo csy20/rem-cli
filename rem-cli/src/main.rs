@@ -14,6 +14,7 @@ mod blocklist;
 mod chat;
 mod cli;
 mod commands;
+mod completion;
 mod config;
 mod constants;
 mod feedback;

@@ -161,7 +161,7 @@ pub(crate) fn handle_plan(session: &mut ChatSession, cfg: &mut AppConfig) {
 
 pub(crate) fn handle_clear(session: &mut ChatSession) {
     let t = ui::theme::active();
-    session.history_mgr.history.clear();
+    session.history_mgr.clear_turns();
     session.last_search.clear();
     session.last_tokens = 0;
     let rail = ui::theme::paint_rail_empty(&t);
@@ -173,7 +173,7 @@ pub(crate) fn handle_clear(session: &mut ChatSession) {
 
 pub(crate) fn handle_reset(session: &mut ChatSession) {
     let t = ui::theme::active();
-    session.history_mgr.history.clear();
+    session.history_mgr.clear_turns();
     session.last_search.clear();
     session.last_tokens = 0;
     session.code_out.last_code.clear();

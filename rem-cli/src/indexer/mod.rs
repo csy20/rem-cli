@@ -310,38 +310,22 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     }
 
     // Phase 2: Read files and chunk them (parallel only for large sets)
+    let process_entry = |we: &WalkEntry| -> Option<FileEntryToProcess> {
+        let text = std::fs::read_to_string(&we.path)
+            .ok()
+            .filter(|t| !t.trim().is_empty())?;
+        let line_count = text.lines().count().max(1);
+        Some(FileEntryToProcess {
+            rel_str: we.rel_str.clone(),
+            name: we.name.clone(),
+            content: text,
+            line_count,
+        })
+    };
     let file_entries: Vec<FileEntryToProcess> = if walk_entries.len() > 100 {
-        walk_entries
-            .par_iter()
-            .filter_map(|we| {
-                let text = std::fs::read_to_string(&we.path)
-                    .ok()
-                    .filter(|t| !t.trim().is_empty())?;
-                let line_count = text.lines().count().max(1);
-                Some(FileEntryToProcess {
-                    rel_str: we.rel_str.clone(),
-                    name: we.name.clone(),
-                    content: text,
-                    line_count,
-                })
-            })
-            .collect()
+        walk_entries.par_iter().filter_map(&process_entry).collect()
     } else {
-        walk_entries
-            .iter()
-            .filter_map(|we| {
-                let text = std::fs::read_to_string(&we.path)
-                    .ok()
-                    .filter(|t| !t.trim().is_empty())?;
-                let line_count = text.lines().count().max(1);
-                Some(FileEntryToProcess {
-                    rel_str: we.rel_str.clone(),
-                    name: we.name.clone(),
-                    content: text,
-                    line_count,
-                })
-            })
-            .collect()
+        walk_entries.iter().filter_map(process_entry).collect()
     };
 
     let mut chunks: Vec<IndexChunk> = if file_entries.len() > 100 {

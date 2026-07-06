@@ -72,18 +72,24 @@ pub fn retrieve_relevant_chunks<'a>(
         let mut score = 0.0f64;
         let dl = c.content.len() as f64;
 
-        // Tokenize chunk content once and build frequency map for all query words
-        let tokens: Vec<&str> = c
-            .content_lower
-            .split(|ch: char| !ch.is_alphanumeric())
-            .filter(|t| t.len() > 1)
-            .collect();
+        // Build token frequency map once per chunk (avoids O(q_words × tokens) scan)
+        let token_counts: std::collections::HashMap<&str, usize> = {
+            let mut map = std::collections::HashMap::new();
+            for t in c
+                .content_lower
+                .split(|ch: char| !ch.is_alphanumeric())
+                .filter(|t| t.len() > 1)
+            {
+                *map.entry(t).or_insert(0) += 1;
+            }
+            map
+        };
         let has_name_or_path_match = q_words
             .iter()
             .any(|w| c.name_lower.contains(w) || c.path_lower.contains(w));
 
         for w in &q_words {
-            let tf_val = tokens.iter().filter(|&&t| t == w).count();
+            let tf_val = token_counts.get(w.as_str()).copied().unwrap_or(0);
             if tf_val == 0 {
                 continue;
             }

@@ -16,7 +16,7 @@ use crate::commands::{
     handle_list_files, handle_memory, handle_memory_set, handle_mode, handle_model, handle_plan, handle_provider,
     handle_reasoning, handle_refactor, handle_reset, handle_resume_session, handle_review, handle_save_session,
     handle_search, handle_test, handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why,
-    handle_write, print_chat_help, print_last_files, prompt_for_path,
+    handle_write, print_chat_help, print_command_help, print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
@@ -228,7 +228,11 @@ async fn dispatch_slash_command(
     // Sync commands
     match name {
         "/help" | "help" => {
-            print_chat_help();
+            if args.is_empty() {
+                print_chat_help();
+            } else {
+                print_command_help(args);
+            }
             return false;
         }
         "/theme" => {
@@ -561,9 +565,6 @@ fn handle_llm_response(
 
     if !cleaned.is_empty() {
         session.history_mgr.push_turn(trimmed.to_string(), cleaned);
-        if session.history_mgr.history.len() > crate::constants::MAX_HISTORY_TURNS {
-            session.history_mgr.history.remove(0);
-        }
         session.history_mgr.messages_since_save += 1;
         if session.history_mgr.messages_since_save >= crate::constants::AUTO_SAVE_INTERVAL {
             session.auto_save_session();
@@ -792,6 +793,7 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
 }
 
 /// Wraps text to a given max width at word boundaries.
+/// Uses char-boundary-safe slicing to avoid panicking on multi-byte characters.
 fn word_wrap(text: &str, max_width: usize) -> String {
     let mut result = String::with_capacity(text.len());
     for (i, line) in text.lines().enumerate() {
@@ -803,10 +805,11 @@ fn word_wrap(text: &str, max_width: usize) -> String {
         } else {
             let mut remaining = line;
             while remaining.len() > max_width {
-                let split = remaining[..max_width]
+                let safe_max = remaining.floor_char_boundary(max_width);
+                let split = remaining[..safe_max]
                     .rfind(' ')
                     .filter(|&pos| pos > 0)
-                    .unwrap_or(max_width);
+                    .unwrap_or(safe_max);
                 result.push_str(&remaining[..split]);
                 result.push('\n');
                 remaining = remaining[split..].trim_start();
@@ -895,7 +898,8 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 /// Suggests a close command name when an unknown `/command` is entered.
 fn did_you_mean(input: &str) -> Option<String> {
     let cmd_name = input.split(' ').next().unwrap_or(input);
-    let names = crate::commands::registry().command_names();
+    let reg = crate::commands::registry();
+    let names = reg.command_names();
     let mut best_name: Option<String> = None;
     let mut best_dist = usize::MAX;
     for name in names {

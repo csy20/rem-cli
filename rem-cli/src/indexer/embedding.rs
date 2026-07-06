@@ -25,10 +25,7 @@ pub async fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
         for chunk in batch.iter() {
             let byte_len = chunk.content.len();
             let cutoff = if byte_len > 8000 {
-                (0..=8000)
-                    .rev()
-                    .find(|&i| chunk.content.is_char_boundary(i))
-                    .unwrap_or(0)
+                chunk.content.floor_char_boundary(8000)
             } else {
                 byte_len
             };

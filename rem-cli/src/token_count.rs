@@ -1,9 +1,13 @@
+use std::sync::LazyLock;
+
+static BPE: LazyLock<Option<tiktoken_rs::CoreBPE>> = LazyLock::new(|| tiktoken_rs::cl100k_base().ok());
+
 /// Estimates token count, using tiktoken-rs if available, falling back to heuristic.
 pub fn estimate_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    if let Ok(bpe) = tiktoken_rs::cl100k_base() {
+    if let Some(ref bpe) = *BPE {
         let tokens = bpe.encode_with_special_tokens(text);
         return tokens.len().max(1);
     }

@@ -1,6 +1,5 @@
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -34,6 +33,11 @@ pub(crate) async fn execute_tool_call(
         "web_search" => execute_web_search(tool_call).await,
         "list_files" => execute_list_files(tool_call, project_dir),
         "run_command" => execute_run_command(tool_call, project_dir, approve_fn).await,
+        "edit_file" => execute_edit_file(tool_call, project_dir, tracked_writes),
+        "git_status" => execute_git_command("status", None, project_dir),
+        "git_diff" => execute_git_diff(tool_call, project_dir),
+        "git_log" => execute_git_log(tool_call, project_dir),
+        "ask_user" => execute_ask_user(tool_call).await,
         name => ToolCallResult {
             call_id: tool_call.id.clone(),
             name: name.to_string(),
@@ -269,29 +273,47 @@ async fn execute_run_command(
         return err_result(tool_call, "shell command execution denied by user");
     }
 
-    let cmd = command.clone();
-    let args_clone = args.clone();
     let dir = project_dir.to_path_buf();
+    let mut child = match tokio::process::Command::new(&command)
+        .args(&args)
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return err_result(tool_call, &format!("failed to spawn command: {}", e)),
+    };
     let result = timeout(
         Duration::from_secs(crate::constants::TOOL_COMMAND_TIMEOUT.as_secs()),
-        tokio::task::spawn_blocking(move || Command::new(&cmd).args(&args_clone).current_dir(&dir).output()),
+        child.wait(),
     )
     .await;
 
     match result {
-        Ok(Ok(Ok(output))) => {
-            let stdout_max = output.stdout.len().min(crate::constants::TOOL_COMMAND_STDOUT_MAX);
-            let stderr_max = output.stderr.len().min(crate::constants::TOOL_COMMAND_STDERR_MAX);
-            let stdout_end = match std::str::from_utf8(&output.stdout[..stdout_max]) {
+        Ok(Ok(status)) => {
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+            if let Some(ref mut out) = child.stdout {
+                use tokio::io::AsyncReadExt;
+                let _ = out.read_to_end(&mut stdout_buf).await;
+            }
+            if let Some(ref mut err) = child.stderr {
+                use tokio::io::AsyncReadExt;
+                let _ = err.read_to_end(&mut stderr_buf).await;
+            }
+            let stdout_max = stdout_buf.len().min(crate::constants::TOOL_COMMAND_STDOUT_MAX);
+            let stderr_max = stderr_buf.len().min(crate::constants::TOOL_COMMAND_STDERR_MAX);
+            let stdout_end = match std::str::from_utf8(&stdout_buf[..stdout_max]) {
                 Ok(s) => s.len(),
                 Err(e) => e.valid_up_to(),
             };
-            let stderr_end = match std::str::from_utf8(&output.stderr[..stderr_max]) {
+            let stderr_end = match std::str::from_utf8(&stderr_buf[..stderr_max]) {
                 Ok(s) => s.len(),
                 Err(e) => e.valid_up_to(),
             };
-            let stdout = String::from_utf8_lossy(&output.stdout[..stdout_end]).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr[..stderr_end]).into_owned();
+            let stdout = String::from_utf8_lossy(&stdout_buf[..stdout_end]).into_owned();
+            let stderr = String::from_utf8_lossy(&stderr_buf[..stderr_end]).into_owned();
             let mut content = String::new();
             if !stdout.is_empty() {
                 content.push_str(&format!("stdout:\n{}\n", stdout));
@@ -303,15 +325,142 @@ async fn execute_run_command(
                 call_id: tool_call.id.clone(),
                 name: "run_command".into(),
                 content,
-                is_error: !output.status.success(),
+                is_error: !status.success(),
             }
         }
-        Ok(Ok(Err(e))) => err_result(tool_call, &format!("command failed: {}", e)),
-        Ok(Err(_)) => err_result(tool_call, "command thread panicked"),
-        Err(_) => err_result(
-            tool_call,
-            &format!("command timed out after {:?}", crate::constants::TOOL_COMMAND_TIMEOUT),
-        ),
+        Ok(Err(e)) => err_result(tool_call, &format!("command wait failed: {}", e)),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            err_result(
+                tool_call,
+                &format!("command timed out after {:?}", crate::constants::TOOL_COMMAND_TIMEOUT),
+            )
+        }
+    }
+}
+
+fn execute_edit_file(
+    tool_call: &ToolCall,
+    project_dir: &std::path::Path,
+    tracked_writes: &Mutex<Vec<String>>,
+) -> ToolCallResult {
+    let file_path = match extract_arg(tool_call, "file_path") {
+        Some(p) => p,
+        None => return err_result(tool_call, "missing 'file_path' argument"),
+    };
+    let old_string = match extract_arg(tool_call, "old_string") {
+        Some(s) => s,
+        None => return err_result(tool_call, "missing 'old_string' argument"),
+    };
+    let new_string = match extract_arg(tool_call, "new_string") {
+        Some(s) => s,
+        None => return err_result(tool_call, "missing 'new_string' argument"),
+    };
+    let path = match resolve_path(project_dir, &file_path) {
+        Some(p) => p,
+        None => return err_result(tool_call, &format!("path traversal blocked: {}", file_path)),
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => return err_result(tool_call, &format!("failed to read {}: {}", path.display(), e)),
+    };
+    let Some(pos) = content.find(&old_string) else {
+        return err_result(tool_call, &format!("old_string not found in {}", path.display()));
+    };
+    let new_content = format!(
+        "{}{}{}",
+        &content[..pos],
+        new_string,
+        &content[pos + old_string.len()..]
+    );
+    if let Err(e) = std::fs::write(&path, &new_content) {
+        return err_result(tool_call, &format!("failed to write {}: {}", path.display(), e));
+    }
+    if let Ok(mut writes) = tracked_writes.lock() {
+        writes.push(file_path.clone());
+    }
+    ToolCallResult {
+        call_id: tool_call.id.clone(),
+        name: "edit_file".into(),
+        content: format!("Edited {}: replaced {} with {}", file_path, old_string, new_string),
+        is_error: false,
+    }
+}
+
+fn execute_git_command(name: &str, extra_args: Option<&[&str]>, project_dir: &std::path::Path) -> ToolCallResult {
+    let output = std::process::Command::new("git")
+        .args(extra_args.unwrap_or(&[]))
+        .current_dir(project_dir)
+        .output();
+    match output {
+        Ok(out) => {
+            let mut content = String::new();
+            if !out.stdout.is_empty() {
+                content.push_str(&String::from_utf8_lossy(&out.stdout));
+            }
+            if !out.stderr.is_empty() {
+                content.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            ToolCallResult {
+                call_id: String::new(),
+                name: name.into(),
+                content,
+                is_error: !out.status.success(),
+            }
+        }
+        Err(e) => ToolCallResult {
+            call_id: String::new(),
+            name: name.into(),
+            content: format!("git {} failed: {}", name, e),
+            is_error: true,
+        },
+    }
+}
+
+fn execute_git_diff(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+    let path = extract_arg(tool_call, "path");
+    let mut args = vec!["diff"];
+    if let Some(ref p) = path {
+        args.push(p);
+    }
+    execute_git_command("diff", Some(&args), project_dir)
+}
+
+fn execute_git_log(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+    let max_count = tool_call
+        .arguments
+        .get("max_count")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(10);
+    let count_arg = format!("-{}", max_count);
+    execute_git_command("log", Some(&["--oneline", &count_arg]), project_dir)
+}
+
+async fn execute_ask_user(tool_call: &ToolCall) -> ToolCallResult {
+    let question = match extract_arg(tool_call, "question") {
+        Some(q) => q,
+        None => return err_result(tool_call, "missing 'question' argument"),
+    };
+    println!("\n  ! REM asks: {}", question);
+    print!("  > ");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    match std::io::stdin().read_line(&mut answer) {
+        Ok(_) => {
+            let answer = answer.trim().to_string();
+            ToolCallResult {
+                call_id: tool_call.id.clone(),
+                name: "ask_user".into(),
+                content: if answer.is_empty() {
+                    "User provided no input".into()
+                } else {
+                    format!("User response: {}", answer)
+                },
+                is_error: false,
+            }
+        }
+        Err(e) => err_result(tool_call, &format!("failed to read user input: {}", e)),
     }
 }
 

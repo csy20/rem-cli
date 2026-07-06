@@ -186,6 +186,79 @@ pub fn builtin_tools() -> Vec<ToolSpec> {
                 "required": ["command"]
             }),
         },
+        ToolSpec {
+            name: "edit_file".into(),
+            description: "Edit a file by replacing the first occurrence of old_string with new_string. Prefer this over write_file for targeted changes.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to edit"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "Text to search for (must be unique in the file)"
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "Replacement text"
+                    }
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            }),
+        },
+        ToolSpec {
+            name: "git_status".into(),
+            description: "Show the working tree status (git status)".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolSpec {
+            name: "git_diff".into(),
+            description: "Show changes in the working tree (git diff)".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Optional file path to restrict diff to"
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolSpec {
+            name: "git_log".into(),
+            description: "Show recent commit history (git log)".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "max_count": {
+                        "type": "integer",
+                        "description": "Number of recent commits to show (default 10)"
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolSpec {
+            name: "ask_user".into(),
+            description: "Ask the user a question and wait for their response. Use this to clarify intent or get approval.".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "Question to ask the user"
+                    }
+                },
+                "required": ["question"]
+            }),
+        },
     ]
 }
 
@@ -209,7 +282,7 @@ mod tests {
     #[test]
     fn builtin_tools_count() {
         let tools = builtin_tools();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 13);
     }
 
     #[test]
@@ -224,6 +297,11 @@ mod tests {
         assert!(names.contains(&"web_search"));
         assert!(names.contains(&"list_files"));
         assert!(names.contains(&"run_command"));
+        assert!(names.contains(&"edit_file"));
+        assert!(names.contains(&"git_status"));
+        assert!(names.contains(&"git_diff"));
+        assert!(names.contains(&"git_log"));
+        assert!(names.contains(&"ask_user"));
     }
 
     #[test]
@@ -239,7 +317,19 @@ mod tests {
             let params = tool.parameters.as_object().expect("parameters should be an object");
             let required = params.get("required").and_then(|r| r.as_array());
             assert!(required.is_some(), "tool {} has no required field", tool.name);
-            assert!(!required.unwrap().is_empty(), "tool {} has empty required", tool.name);
+            // Tools with no required params (git_status, git_diff, git_log) have empty required
+            match tool.name.as_str() {
+                "git_status" | "git_diff" | "git_log" => {
+                    assert!(
+                        required.unwrap().is_empty(),
+                        "tool {} should have empty required",
+                        tool.name
+                    );
+                }
+                _ => {
+                    assert!(!required.unwrap().is_empty(), "tool {} has empty required", tool.name);
+                }
+            }
         }
     }
 

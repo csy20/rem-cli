@@ -2,6 +2,7 @@
 //! Provides [`ChatSession`] which tracks conversation state, resolves `@` file
 //! references, builds system prompts with project context, and manages modes.
 
+use crate::completion::RemHelper;
 use crate::feedback::FeedbackTracker;
 use crate::indexer::{build_retrieved_context, load_codebase_index, retrieve_relevant_chunks, CodebaseIndex};
 use crate::intent::TaskIntent;
@@ -12,7 +13,8 @@ use crate::token_count::estimate_tokens;
 use crate::types::{FileEntry, RE_AT_REF};
 use anyhow::{Context, Result};
 use rustyline::config::Configurer;
-use rustyline::DefaultEditor;
+use rustyline::history::DefaultHistory;
+use rustyline::{Cmd, Editor, KeyEvent};
 use std::borrow::Cow;
 use std::fs;
 use std::io::{self};
@@ -37,7 +39,7 @@ impl ProjectListingCache {
 
 /// Readline and conversation history management.
 pub(crate) struct HistoryManager {
-    pub(crate) rl: DefaultEditor,
+    pub(crate) rl: Editor<RemHelper, DefaultHistory>,
     pub(crate) history: Vec<(String, String)>,
     pub(crate) messages_since_save: usize,
     assistant_token_cache: Vec<usize>,
@@ -51,10 +53,11 @@ impl HistoryManager {
     }
 
     pub(crate) fn new() -> Result<Self> {
-        let mut rl = DefaultEditor::new().context("failed to start line editor")?;
+        let mut rl = Editor::<RemHelper, DefaultHistory>::new().context("failed to start line editor")?;
         let history_path = Self::history_path();
         let _ = rl.load_history(&history_path);
         rl.set_max_history_size(crate::constants::MAX_HISTORY_ENTRIES).ok();
+        let _ = rl.bind_sequence(KeyEvent::ctrl('l'), Cmd::ClearScreen);
         Ok(Self {
             rl,
             history: Vec::new(),
@@ -67,6 +70,10 @@ impl HistoryManager {
         let tokens = crate::token_count::estimate_tokens(&assistant);
         self.assistant_token_cache.push(tokens);
         self.history.push((user, assistant));
+        if self.history.len() > crate::constants::MAX_HISTORY_TURNS {
+            self.history.remove(0);
+            self.assistant_token_cache.remove(0);
+        }
     }
 
     pub(crate) fn save_history(&mut self) {
@@ -78,11 +85,20 @@ impl HistoryManager {
     }
 
     pub(crate) fn readline(&mut self, prompt: &str) -> io::Result<String> {
-        self.rl.readline(prompt).map_err(io::Error::other)
+        self.rl.readline(prompt).map_err(|e| match e {
+            rustyline::error::ReadlineError::Eof => io::Error::new(io::ErrorKind::UnexpectedEof, "eof"),
+            rustyline::error::ReadlineError::Interrupted => io::Error::new(io::ErrorKind::Interrupted, "interrupted"),
+            e => io::Error::other(e),
+        })
     }
 
     pub(crate) fn add_history(&mut self, line: &str) {
         let _ = self.rl.add_history_entry(line);
+    }
+
+    pub(crate) fn clear_turns(&mut self) {
+        self.history.clear();
+        self.assistant_token_cache.clear();
     }
 
     pub(crate) fn build_chat_history(&self) -> String {
