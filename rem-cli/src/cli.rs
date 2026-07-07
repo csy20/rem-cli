@@ -167,6 +167,12 @@ pub struct AppConfig {
     pub search_api_key: Option<String>,
     #[serde(default)]
     pub search_cse_id: Option<String>,
+    #[serde(default = "default_page_threshold")]
+    pub page_threshold: usize,
+}
+
+fn default_page_threshold() -> usize {
+    50
 }
 
 fn default_theme_name() -> String {
@@ -203,6 +209,7 @@ impl Default for AppConfig {
             search_provider: "ddg".to_string(),
             search_api_key: None,
             search_cse_id: None,
+            page_threshold: default_page_threshold(),
         }
     }
 }
@@ -231,6 +238,7 @@ pub struct PartialConfig {
     pub search_provider: Option<String>,
     pub search_api_key: Option<String>,
     pub search_cse_id: Option<String>,
+    pub page_threshold: Option<usize>,
 }
 
 impl AppConfig {
@@ -290,6 +298,9 @@ impl AppConfig {
         if let Some(v) = part.search_cse_id {
             self.search_cse_id = Some(v);
         }
+        if let Some(v) = part.page_threshold {
+            self.page_threshold = v;
+        }
     }
 }
 
@@ -346,6 +357,7 @@ mod tests {
             search_provider: Some("sp".to_string()),
             search_api_key: Some("sak".to_string()),
             search_cse_id: Some("sci".to_string()),
+            page_threshold: Some(75),
         };
         config.apply_partial(partial);
         assert_eq!(config.model, "m1");
@@ -366,6 +378,7 @@ mod tests {
         assert_eq!(config.search_provider, "sp");
         assert_eq!(config.search_api_key, Some("sak".to_string()));
         assert_eq!(config.search_cse_id, Some("sci".to_string()));
+        assert_eq!(config.page_threshold, 75);
     }
 
     #[test]

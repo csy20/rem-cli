@@ -42,6 +42,7 @@ pub(crate) fn truncate_to_lines(s: &str, max_lines: usize) -> String {
 }
 
 /// Converts a Unix day count to a year, returning the year and remaining days.
+/// Uses arithmetic with 400-year cycle blocks for O(1) performance.
 fn days_to_year(days: i64) -> (i64, i64) {
     let mut y = 1970i64;
     let mut d = days;
@@ -51,7 +52,7 @@ fn days_to_year(days: i64) -> (i64, i64) {
         y += blocks * 400;
         d -= blocks * DAYS_IN_400_YEARS;
     }
-    loop {
+    while d >= 365 {
         let year_days = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
             366
         } else {

@@ -746,6 +746,118 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
     }
 }
 
+/// Exports the current session to a file (`/session export <path>`).
+pub(crate) fn handle_export_session(session: &ChatSession, path: &str) {
+    let t = ui::theme::active();
+    let out_path = PathBuf::from(path);
+    let json = serde_json::to_string_pretty(&session.to_session_json()).unwrap_or_default();
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    if let Err(e) = encoder.write_all(json.as_bytes()) {
+        println!(
+            "{} compression failed: {}",
+            ui::theme::paint_error_label(&t, "\u{2717}"),
+            e
+        );
+        return;
+    }
+    let compressed = match encoder.finish() {
+        Ok(c) => c,
+        Err(e) => {
+            println!(
+                "{} compression failed: {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                e
+            );
+            return;
+        }
+    };
+    match fs::write(&out_path, &compressed) {
+        Ok(()) => println!(
+            "{} session exported to {} ({} bytes)",
+            ui::theme::paint_success_label(&t, "\u{2713}"),
+            out_path.display(),
+            compressed.len(),
+        ),
+        Err(e) => println!(
+            "{} failed to export session: {}",
+            ui::theme::paint_error_label(&t, "\u{2717}"),
+            e
+        ),
+    }
+}
+
+/// Imports a session from a file and merges into the current session (`/session import <path>`).
+pub(crate) fn handle_import_session(session: &mut ChatSession, path: &str) {
+    let t = ui::theme::active();
+    let in_path = PathBuf::from(path);
+    if !in_path.exists() {
+        println!(
+            "{} file not found: {}",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            in_path.display()
+        );
+        return;
+    }
+    match read_maybe_gzip(&in_path) {
+        Ok(content) => {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
+                let mut restored = 0;
+                if let Some(history) = data["history"].as_array() {
+                    for entry in history {
+                        if let (Some(u), Some(a)) = (entry["user"].as_str(), entry["assistant"].as_str()) {
+                            session.history_mgr.push_turn(u.to_string(), a.to_string());
+                            restored += 1;
+                        }
+                    }
+                }
+                if let Some(m) = data["mode"].as_str() {
+                    session.mode = match m {
+                        "Code" => crate::chat::RunMode::Code,
+                        "Plan" => crate::chat::RunMode::Plan,
+                        _ => crate::chat::RunMode::Chat,
+                    };
+                }
+                if let Some(code) = data["last_code"].as_str() {
+                    if !code.is_empty() {
+                        session.code_out.last_code = code.to_string();
+                    }
+                }
+                if let Some(files) = data["last_files"].as_array() {
+                    let imported_files: Vec<FileEntry> = files
+                        .iter()
+                        .filter_map(|f| {
+                            Some(FileEntry {
+                                path: f["path"].as_str()?.to_string(),
+                                content: f["content"].as_str()?.to_string(),
+                            })
+                        })
+                        .collect();
+                    if !imported_files.is_empty() {
+                        session.code_out.last_files = imported_files;
+                    }
+                }
+                println!(
+                    "{} session imported from {} ({} turns restored)",
+                    ui::theme::paint_success_label(&t, "\u{2713}"),
+                    in_path.display(),
+                    restored,
+                );
+            } else {
+                println!(
+                    "{} invalid session file: {}",
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
+                    in_path.display()
+                );
+            }
+        }
+        Err(e) => println!(
+            "{} failed to read session: {}",
+            ui::theme::paint_error_label(&t, "\u{2717}"),
+            e
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

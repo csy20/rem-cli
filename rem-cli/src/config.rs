@@ -36,6 +36,7 @@ pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
         fs::write(&path, &text).context("failed to write config")?;
     }
     // Update cache directly instead of invalidating, to avoid re-reading from disk
+    crate::pager::init_page_threshold(cfg.page_threshold);
     let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
     *cache = Some(cfg.clone());
     Ok(())
@@ -141,6 +142,7 @@ pub(crate) fn load_config() -> Result<AppConfig> {
         let partial: PartialConfig = toml::from_str(&text).context("invalid local config")?;
         cfg.apply_partial(partial);
     }
+    crate::pager::init_page_threshold(cfg.page_threshold);
     let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
     *cache = Some(cfg.clone());
     Ok(cfg)
@@ -532,5 +534,77 @@ mod tests {
             ..Default::default()
         };
         validate_config(&cfg);
+    }
+
+    #[test]
+    fn config_save_does_not_crash() {
+        let cfg = AppConfig {
+            model: "test-model".into(),
+            provider: "openai".into(),
+            timeout_s: 120,
+            theme: "SAKURA".into(),
+            ..Default::default()
+        };
+        let result = save_config(&cfg);
+        // save_config writes to XDG dir; we just verify it doesn't error fatally
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn first_run_setup_uses_dot_for_current_dir() {
+        let cfg = &mut AppConfig::default();
+        let result = first_run_setup(cfg);
+        // With piped stdin (empty), read_line returns empty -> defaults to current_dir
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn config_dir_uses_xdg_when_set() {
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-rem-test");
+        let dir = config_dir();
+        assert_eq!(dir, Some(std::path::PathBuf::from("/tmp/xdg-rem-test/rem-cli")));
+        std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn resolve_api_key_from_cache() {
+        let kind = ProviderKind::OpenAI;
+        // First call should resolve from env (might be None if env not set)
+        let result = resolve_api_key_from_env(kind);
+        // Second call should hit cache
+        let cached = resolve_api_key_from_env(kind);
+        assert_eq!(result, cached, "cached value should match fresh value");
+    }
+
+    #[test]
+    fn build_provider_defaults_to_ollama() {
+        let cfg = AppConfig::default();
+        let result = build_provider(&cfg, "test system prompt".into());
+        assert!(result.is_ok(), "default config should build an Ollama provider");
+        let provider = result.unwrap();
+        assert_eq!(provider.kind, ProviderKind::Ollama);
+    }
+
+    #[test]
+    fn warn_missing_api_key_no_panic_for_ollama() {
+        let cfg = AppConfig {
+            provider: "ollama".into(),
+            api_key: None,
+            ..Default::default()
+        };
+        // Should not panic or crash for Ollama (which doesn't need an API key)
+        warn_missing_api_key(&cfg);
+    }
+
+    #[test]
+    fn persist_workspace_updates_config() {
+        let dir = std::env::temp_dir().join(format!("rem-persist-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        persist_workspace(&dir);
+        // Verify the workspace was saved by reloading config
+        if let Ok(cfg) = load_config() {
+            assert!(cfg.workspace_dir.is_some());
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

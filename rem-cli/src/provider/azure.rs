@@ -14,7 +14,10 @@ impl ProviderBackend for AzureBackend {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("Azure OpenAI API unreachable at {}", ctx.base_url));
+            return Err(anyhow!(super::ProviderError::Other(format!(
+                "Azure OpenAI API unreachable at {}",
+                ctx.base_url
+            ))));
         }
         Ok(vec![ctx.model.clone()])
     }

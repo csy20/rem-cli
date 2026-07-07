@@ -257,6 +257,9 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
                     _lower_buf = raw_line.to_lowercase().into_bytes();
                     haystack = &_lower_buf;
                 }
+                // SAFETY: haystack borrows from _lower_buf in the same scope —
+                // both are declared inside the for-loop iteration and cannot
+                // outlive each other. The borrow checker guarantees this.
                 while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {
                     let column = byte_to_column(&haystack[..search_from + pos]);
                     report.matches.push(Match {
@@ -494,5 +497,89 @@ mod tests {
     fn byte_to_column_counts_chars_not_bytes() {
         let prefix = "héllo ";
         assert_eq!(byte_to_column(prefix.as_bytes()), 6);
+    }
+
+    #[test]
+    fn case_sensitive_does_not_match_wrong_case() {
+        let root = make_tree();
+        let opts = FindOptions {
+            case_sensitive: true,
+            ..Default::default()
+        };
+        let report = find_matches(&root, "HANDLE_LINT", &opts);
+        assert!(
+            report.matches.is_empty(),
+            "case-sensitive search should not find lowercase match"
+        );
+    }
+
+    #[test]
+    fn binary_file_safe_to_search() {
+        let root = make_tree();
+        // Searching for a text string that exists in binary.bin bytes (0, 1, 2, 3)
+        // should NOT crash. The binary file contains these bytes.
+        let report = find_matches(&root, "", &FindOptions::default());
+        // empty query should return no matches regardless of binary content
+        assert!(report.matches.is_empty());
+    }
+
+    #[test]
+    fn query_short_fragment_finds_in_multiple_files() {
+        let root = make_tree();
+        let opts = FindOptions::default();
+        let report = find_matches(&root, "red", &opts);
+        assert!(
+            report.matches.iter().any(|m| m.path.ends_with("style.css")),
+            "'red' should be found in style.css"
+        );
+        assert!(
+            report.matches.iter().any(|m| m.path.ends_with("script.js")),
+            "'red' should be found in script.js"
+        );
+    }
+
+    #[test]
+    fn override_default_with_glob_respects_case() {
+        let root = make_tree();
+        let opts = FindOptions {
+            case_sensitive: true,
+            use_regex: true,
+            ..Default::default()
+        };
+        let report = find_matches(&root, r"Handle_Lint", &opts);
+        assert!(
+            report.matches.is_empty(),
+            "regex + case-sensitive should not match different case"
+        );
+    }
+
+    #[test]
+    fn both_case_modes_with_unicode_content() {
+        let root = make_tree();
+        // Add a file with unicode content
+        fs::write(root.join("unicode.txt"), "café résumé\n").unwrap();
+        let opts = FindOptions::default();
+        let report = find_matches(&root, "café", &opts);
+        assert!(
+            report.matches.iter().any(|m| m.path.ends_with("unicode.txt")),
+            "case-insensitive search should find unicode match"
+        );
+    }
+
+    #[test]
+    fn max_file_bytes_skips_large_files() {
+        let root = make_tree();
+        // Add a file that exceeds the max_file_bytes limit
+        let large = "x".repeat(10_000);
+        fs::write(root.join("large.txt"), &large).unwrap();
+        let opts = FindOptions {
+            max_file_bytes: 512,
+            ..Default::default()
+        };
+        let report = find_matches(&root, &"x".repeat(100), &opts);
+        assert!(
+            !report.matches.iter().any(|m| m.path.ends_with("large.txt")),
+            "large file should be skipped"
+        );
     }
 }

@@ -131,10 +131,16 @@ impl ProviderBackend for BedrockBackend {
                 }
                 Ok(Some(_)) => {}
                 Ok(None) => break,
-                Err(e) => return Err(anyhow!("Bedrock stream error: {}", e)),
+                Err(e) => {
+                    return Err(anyhow!(super::ProviderError::Other(format!(
+                        "Bedrock stream error: {e}"
+                    ))))
+                }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+                return Err(anyhow!(super::ProviderError::ResponseTooLarge(
+                    super::MAX_RESPONSE_BYTES as u64
+                )));
             }
         }
         Ok(full_text)
@@ -149,7 +155,9 @@ impl ProviderBackend for BedrockBackend {
         _mime_type: &str,
         _base64_data: &str,
     ) -> Result<String> {
-        Err(anyhow!("Vision not yet supported for AWS Bedrock"))
+        Err(anyhow!(super::ProviderError::Other(
+            "Vision not yet supported for AWS Bedrock".into()
+        )))
     }
 
     async fn complete_chat_stream_with_tools(
@@ -160,6 +168,8 @@ impl ProviderBackend for BedrockBackend {
         _history: &str,
         _tool_specs: &[ToolSpec],
     ) -> Result<ToolResponse> {
-        Err(anyhow!("Tool calling not yet supported for AWS Bedrock"))
+        Err(anyhow!(super::ProviderError::Other(
+            "Tool calling not yet supported for AWS Bedrock".into()
+        )))
     }
 }

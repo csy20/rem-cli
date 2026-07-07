@@ -183,10 +183,8 @@ pub fn classify_intent(input: &str) -> TaskIntent {
 
 // ── Heuristic implementation ────────────────────────────────────────────────
 
-fn classify_intent_heuristic(input: &str) -> TaskIntent {
-    let lower = input.to_lowercase();
-
-    let web_explicit = lower.contains("search the web")
+fn detect_web_intent(lower: &str) -> bool {
+    lower.contains("search the web")
         || lower.contains("search online")
         || lower.contains("latest version")
         || lower.contains("latest release")
@@ -199,15 +197,11 @@ fn classify_intent_heuristic(input: &str) -> TaskIntent {
         || lower.contains("browse http")
         || lower.contains("stack overflow")
         || lower.contains("look up the")
-        || lower.contains("on the internet");
+        || lower.contains("on the internet")
+}
 
-    if web_explicit {
-        return TaskIntent::WebNeeded;
-    }
-
-    let is_question = has_question_prefix_lower(&lower);
-
-    let plan_indicators = lower.contains("suggest an approach")
+fn detect_planning_intent(lower: &str) -> bool {
+    lower.contains("suggest an approach")
         || lower.contains("how should i")
         || lower.contains("what's the best way")
         || lower.contains("what is the best way")
@@ -220,21 +214,11 @@ fn classify_intent_heuristic(input: &str) -> TaskIntent {
         || (lower.contains("how to") && lower.contains("implement"))
         || (lower.contains("how to") && lower.contains("architect"))
         || (lower.contains("how to") && lower.contains("design"))
-        || (lower.contains("how to") && lower.contains("structure"));
+        || (lower.contains("how to") && lower.contains("structure"))
+}
 
-    if plan_indicators && !has_creation_intent_lower(&lower) {
-        return TaskIntent::Planning;
-    }
-
-    let has_create = has_creation_intent_lower(&lower);
-
-    if has_create {
-        // has_creation_intent_lower already excludes question prefixes,
-        // so only direct creation statements reach here.
-        return TaskIntent::CodeAction;
-    }
-
-    let fix_indicators = lower.starts_with("fix the ")
+fn detect_fix_intent(lower: &str) -> bool {
+    lower.starts_with("fix the ")
         || lower.starts_with("fix my ")
         || lower.starts_with("fix this ")
         || lower.starts_with("refactor the ")
@@ -244,9 +228,27 @@ fn classify_intent_heuristic(input: &str) -> TaskIntent {
         || lower.starts_with("remove the ")
         || lower.starts_with("optimize the ")
         || lower.starts_with("update the ")
-        || lower.starts_with("update my ");
+        || lower.starts_with("update my ")
+}
 
-    if fix_indicators && !is_question {
+fn classify_intent_heuristic(input: &str) -> TaskIntent {
+    let lower = input.to_lowercase();
+
+    if detect_web_intent(&lower) {
+        return TaskIntent::WebNeeded;
+    }
+
+    let is_question = has_question_prefix_lower(&lower);
+
+    if detect_planning_intent(&lower) && !has_creation_intent_lower(&lower) {
+        return TaskIntent::Planning;
+    }
+
+    if has_creation_intent_lower(&lower) {
+        return TaskIntent::CodeAction;
+    }
+
+    if detect_fix_intent(&lower) && !is_question {
         return TaskIntent::CodeAction;
     }
 

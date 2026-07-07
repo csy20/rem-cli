@@ -68,10 +68,12 @@ pub fn requires_non_streaming(model: &str) -> bool {
     lower == "o1-preview" || lower == "o1-mini"
 }
 
-/// Checks if a model does NOT support system prompts (o1/o3).
+/// Checks if a model does NOT support system prompts.
+/// Only o1-preview and o1-mini lack system prompt support;
+/// newer o1 models (e.g. o1-2024-12-17) and o3-mini support it.
 pub fn system_prompt_not_supported(model: &str) -> bool {
     let lower = model.to_lowercase();
-    lower == "o1" || lower.starts_with("o1-") || lower.starts_with("o3-")
+    lower == "o1-preview" || lower == "o1-mini"
 }
 
 #[cfg(test)]
@@ -89,6 +91,10 @@ mod tests {
         assert!(!is_reasoning_model("claude-sonnet-4-20250514"));
         assert!(is_reasoning_model("claude-sonnet-4-20250514-thinking"));
         assert!(!is_reasoning_model("unthinking-v1"));
+        assert!(
+            is_reasoning_model("o1-2024-12-17"),
+            "newer o1 models are still reasoning models"
+        );
     }
 
     #[test]
@@ -102,8 +108,16 @@ mod tests {
     #[test]
     fn test_system_prompt_not_supported() {
         assert!(system_prompt_not_supported("o1-preview"));
-        assert!(system_prompt_not_supported("o3-mini"));
+        assert!(system_prompt_not_supported("o1-mini"));
+        assert!(
+            !system_prompt_not_supported("o3-mini"),
+            "o3-mini supports system prompts"
+        );
         assert!(!system_prompt_not_supported("gpt-4o"));
+        assert!(
+            !system_prompt_not_supported("o1-2024-12-17"),
+            "newer o1 models support system prompts"
+        );
     }
 
     #[test]

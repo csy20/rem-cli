@@ -214,18 +214,23 @@ pub(crate) fn file_icon(path: &str) -> String {
 }
 
 fn file_icon_for(path: &str) -> &'static str {
-    let lower = path.to_lowercase();
-    if lower.ends_with(".html") || lower.ends_with(".htm") {
+    if path.ends_with(".html") || path.ends_with(".htm") || path.ends_with(".HTML") || path.ends_with(".HTM") {
         "\u{1F310}"
-    } else if lower.ends_with(".css") {
+    } else if path.ends_with(".css") || path.ends_with(".CSS") {
         "\u{1F3A8}"
-    } else if lower.ends_with(".js") || lower.ends_with(".ts") || lower.ends_with(".mjs") {
+    } else if path.ends_with(".js")
+        || path.ends_with(".JS")
+        || path.ends_with(".ts")
+        || path.ends_with(".TS")
+        || path.ends_with(".mjs")
+        || path.ends_with(".MJS")
+    {
         "\u{26A1}"
-    } else if lower.ends_with(".json") {
+    } else if path.ends_with(".json") || path.ends_with(".JSON") {
         "\u{1F4CB}"
-    } else if lower.ends_with(".md") || lower.ends_with(".txt") {
+    } else if path.ends_with(".md") || path.ends_with(".MD") || path.ends_with(".txt") || path.ends_with(".TXT") {
         "\u{1F4C4}"
-    } else if lower.ends_with(".py") {
+    } else if path.ends_with(".py") || path.ends_with(".PY") {
         "\u{1F40D}"
     } else {
         "\u{1F4C4}"

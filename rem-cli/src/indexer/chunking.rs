@@ -29,6 +29,13 @@ pub(crate) fn split_content_into_chunks(text: &str, target: usize) -> Vec<(usize
         while start < big.len() {
             let mut end = (start + target).min(big.len());
             end = big.floor_char_boundary(end);
+            if end == start {
+                end = (start + 1).min(big.len());
+                end = big.floor_char_boundary(end);
+                if end == start {
+                    break;
+                }
+            }
             // Adjust end to nearest newline boundary to avoid mid-line split
             if end < big.len() {
                 if let Some(newline_pos) = big[start..end].rfind('\n') {
@@ -316,5 +323,62 @@ mod tests {
             assert!(*start <= *end);
             prev_end = *end + 1;
         }
+    }
+
+    #[test]
+    fn split_content_multibyte_no_infinite_loop() {
+        // String starting with a multi-byte character and a small target.
+        // Before the floor_char_boundary fix, this caused an infinite loop.
+        let text = "éabc".to_string();
+        let result = split_content_into_chunks(&text, 1);
+        // Degenerate case: target=1 with multi-byte text may produce 0 chunks
+        // (the important thing is it doesn't infinite-loop)
+        for (_, _, chunk) in &result {
+            assert!(!chunk.is_empty(), "no chunk should be empty");
+        }
+    }
+
+    #[test]
+    fn split_content_null_bytes_handled() {
+        let text = "abc\0def\nghi";
+        let result = split_content_into_chunks(text, 100);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].2.contains('\0'), "null bytes should be preserved");
+    }
+
+    #[test]
+    fn split_content_single_char_file() {
+        let result = split_content_into_chunks("X", 100);
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn guess_chunk_type_c_sharp_falls_back() {
+        // .cs isn't in the current type classifier
+        assert_eq!(guess_chunk_type("Program.cs", "class Program {}"), "file");
+    }
+
+    #[test]
+    fn guess_chunk_type_ruby_falls_back() {
+        // .rb isn't in the current type classifier
+        assert_eq!(guess_chunk_type("app.rb", "def hello"), "file");
+    }
+
+    #[test]
+    fn guess_chunk_type_php_falls_back() {
+        // .php isn't in the current type classifier
+        assert_eq!(guess_chunk_type("index.php", "function foo()"), "file");
+    }
+
+    #[test]
+    fn guess_chunk_type_swift_falls_back() {
+        // .swift isn't in the current type classifier
+        assert_eq!(guess_chunk_type("main.swift", "func foo()"), "file");
+    }
+
+    #[test]
+    fn guess_chunk_type_sh_falls_back() {
+        // .sh isn't in the current type classifier
+        assert_eq!(guess_chunk_type("build.sh", "#!/bin/bash"), "file");
     }
 }

@@ -23,6 +23,30 @@ pub mod tools;
 #[cfg(test)]
 mod tests;
 
+/// Structured error type for LLM provider operations.
+/// Each variant carries a human-readable description and supports
+/// downcast-based inspection in retry logic and error reporting.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ProviderError {
+    #[error("authentication failed: {0}")]
+    Auth(String),
+    #[error("rate limited: {0}")]
+    RateLimit(String),
+    #[error("request timed out: {0}")]
+    Timeout(String),
+    #[error("server error: {0}")]
+    ServerError(String),
+    #[allow(dead_code)]
+    #[error("parse error: {0}")]
+    ParseError(String),
+    #[error("cancelled by user")]
+    Cancelled,
+    #[error("response too large ({0} bytes)")]
+    ResponseTooLarge(u64),
+    #[error("{0}")]
+    Other(String),
+}
+
 #[derive(Debug, Deserialize)]
 struct LlmErrorResponse {
     #[serde(default)]
@@ -386,6 +410,13 @@ impl Provider {
 
     fn is_transient_error(e: &anyhow::Error) -> bool {
         let err_str = e.to_string();
+        // Check for ProviderError variants
+        if let Some(pe) = e.downcast_ref::<ProviderError>() {
+            return matches!(
+                pe,
+                ProviderError::Timeout(_) | ProviderError::RateLimit(_) | ProviderError::ServerError(_)
+            );
+        }
         if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
             return true;
         }
@@ -400,7 +431,11 @@ impl Provider {
                 }
             }
         }
-        err_str.contains("connection refused") || err_str.contains("connection reset") || err_str.contains("timed out")
+        err_str.contains("connection refused")
+            || err_str.contains("connection reset")
+            || err_str.contains("timed out")
+            || err_str.contains("429")
+            || err_str.contains(" 5")
     }
 
     async fn with_retry<F, Fut, T>(f: F) -> Result<T>
@@ -410,13 +445,13 @@ impl Provider {
     {
         // If stream was cancelled (e.g. Ctrl+C), don't retry
         if STREAM_CANCELLED.load(Ordering::SeqCst) {
-            return Err(anyhow!("request cancelled by user"));
+            return Err(anyhow!(ProviderError::Cancelled));
         }
         let mut last_err = None;
         for attempt in 0..crate::constants::LLM_RETRY_MAX_ATTEMPTS as usize {
             // Check cancellation before each retry attempt
             if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                return Err(anyhow!("request cancelled by user"));
+                return Err(anyhow!(ProviderError::Cancelled));
             }
             match f().await {
                 Ok(v) => return Ok(v),
@@ -433,7 +468,7 @@ impl Provider {
                     let mut remaining = delay;
                     while remaining > Duration::ZERO {
                         if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                            return Err(anyhow!("cancelled during retry backoff"));
+                            return Err(anyhow!(ProviderError::Cancelled));
                         }
                         let step = remaining.min(poll_interval);
                         sleep(step).await;
@@ -442,20 +477,23 @@ impl Provider {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("retry exhausted")))
+        Err(last_err.unwrap_or_else(|| anyhow!(ProviderError::Other("retry exhausted".into()))))
     }
 
     // ─── Public API ─────────────────────────────────────────────────────
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
+        STREAM_CANCELLED.store(false, Ordering::SeqCst);
         Self::with_retry(|| self.backend.list_models(&self.ctx)).await
     }
 
     pub async fn complete_json(&self, user_prompt: &str) -> Result<crate::ModelReply> {
+        STREAM_CANCELLED.store(false, Ordering::SeqCst);
         Self::with_retry(|| self.backend.complete_json(&self.ctx, &self.system_prompt, user_prompt)).await
     }
 
     pub async fn complete_chat_stream(&self, user_prompt: &str, system_prompt: &str, history: &str) -> Result<String> {
+        STREAM_CANCELLED.store(false, Ordering::SeqCst);
         let ctx = self.build_ctx();
         Self::with_retry(|| {
             self.backend
@@ -472,6 +510,7 @@ impl Provider {
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
+        STREAM_CANCELLED.store(false, Ordering::SeqCst);
         let ctx = self.build_ctx();
         Self::with_retry(|| {
             self.backend.complete_chat_stream_with_vision(
@@ -493,6 +532,7 @@ impl Provider {
         history: &str,
         tool_specs: &[tools::ToolSpec],
     ) -> Result<tools::ToolResponse> {
+        STREAM_CANCELLED.store(false, Ordering::SeqCst);
         let ctx = self.build_ctx();
         Self::with_retry(|| {
             self.backend
@@ -609,13 +649,17 @@ where
 
     loop {
         if STREAM_CANCELLED.load(Ordering::SeqCst) {
-            return Err(anyhow!("stream cancelled by user"));
+            return Err(anyhow!(ProviderError::Cancelled));
         }
         let chunk = match timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
             Ok(Some(Ok(c))) => c,
-            Ok(Some(Err(e))) => return Err(anyhow!("stream read error: {e}")),
+            Ok(Some(Err(e))) => return Err(anyhow!(ProviderError::Other(format!("stream read error: {e}")))),
             Ok(None) => break,
-            Err(_) => return Err(anyhow!("stream timed out (no data for 60s)")),
+            Err(_) => {
+                return Err(anyhow!(ProviderError::Timeout(
+                    "stream timed out (no data for 60s)".into()
+                )))
+            }
         };
         if offset > 0 && buf.len() > crate::constants::INITIAL_BUF_CAPACITY * 2 {
             // split_off is O(1) — just adjusts length pointer without copying data
@@ -623,10 +667,7 @@ where
             offset = 0;
         }
         if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
-            return Err(anyhow!(
-                "stream buffer exceeded max size ({} bytes)",
-                MAX_RESPONSE_BYTES
-            ));
+            return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
         }
         buf.extend_from_slice(&chunk);
         loop {
@@ -676,7 +717,7 @@ pub(super) async fn stream_sse_response(resp: reqwest::Response) -> Result<Strin
                         full.push_str(content);
                         emit_token(content);
                         if full.len() > MAX_RESPONSE_BYTES {
-                            return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
+                            return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
                         }
                     }
                 }
@@ -748,7 +789,7 @@ pub(super) async fn stream_anthropic_sse(
                     _ => {}
                 }
                 if full.len() > MAX_RESPONSE_BYTES {
-                    return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
+                    return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
                 }
             }
         }
@@ -763,13 +804,28 @@ pub(super) async fn handle_ollama_error(resp: reqwest::Response, url: &str, mode
     let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
         .map(|v| v.error.to_string())
         .unwrap_or_else(|_| body.clone());
-    if status.as_u16() == 404 && err_msg.to_lowercase().contains("model") {
-        return anyhow!("Model '{model}' not found. Pull it: `ollama pull {model}`");
+    let code = status.as_u16();
+    if code == 404 && err_msg.to_lowercase().contains("model") {
+        return anyhow!(ProviderError::Other(format!(
+            "Model '{model}' not found. Pull it: `ollama pull {model}`"
+        )));
     }
-    if status.as_u16() == 404 {
-        return anyhow!("Endpoint not found (404 at {url}). Check --ollama-url");
+    if code == 404 {
+        return anyhow!(ProviderError::Other(format!(
+            "Endpoint not found (404 at {url}). Check --ollama-url"
+        )));
     }
-    anyhow!("Ollama failed: {status} — {err_msg}")
+    if code == 429 {
+        return anyhow!(ProviderError::RateLimit(format!(
+            "Ollama rate limited ({code}): {err_msg}"
+        )));
+    }
+    if (500..=504).contains(&code) {
+        return anyhow!(ProviderError::ServerError(format!(
+            "Ollama server error ({code}): {err_msg}"
+        )));
+    }
+    anyhow!(ProviderError::Other(format!("Ollama failed: {status} — {err_msg}")))
 }
 
 pub(super) async fn stream_gemini_sse(resp: reqwest::Response) -> Result<String> {
@@ -790,7 +846,7 @@ pub(super) async fn stream_gemini_sse(resp: reqwest::Response) -> Result<String>
                     full.push_str(&text);
                     emit_token(&text);
                     if full.len() > MAX_RESPONSE_BYTES {
-                        return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
+                        return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
                     }
                 }
             }
@@ -816,7 +872,21 @@ pub(super) async fn parse_api_error(provider_name: &str, resp: reqwest::Response
     let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
         .map(|v| v.error.to_string())
         .unwrap_or_else(|_| body.chars().take(crate::constants::API_ERROR_BODY_MAX_CHARS).collect());
-    anyhow!("{provider_name} API failed ({status}): {err_msg}")
+    let code = status.as_u16();
+    match code {
+        429 => anyhow!(ProviderError::RateLimit(format!(
+            "{provider_name} rate limited ({code}): {err_msg}"
+        ))),
+        401 | 403 => anyhow!(ProviderError::Auth(format!(
+            "{provider_name} auth failed ({code}): {err_msg}"
+        ))),
+        500..=504 => anyhow!(ProviderError::ServerError(format!(
+            "{provider_name} server error ({code}): {err_msg}"
+        ))),
+        _ => anyhow!(ProviderError::Other(format!(
+            "{provider_name} API failed ({status}): {err_msg}"
+        ))),
+    }
 }
 
 pub(super) async fn openai_compat_complete_json(
@@ -988,7 +1058,7 @@ pub(crate) async fn stream_openai_tool_response(resp: reqwest::Response) -> Resu
             }
         }
         if full_text.len() > MAX_RESPONSE_BYTES {
-            return Err(anyhow!("response too large ({} bytes)", MAX_RESPONSE_BYTES));
+            return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
         }
         Ok(true)
     })

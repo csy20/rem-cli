@@ -717,3 +717,166 @@ fn is_transient_rejects_400() {
     let err = anyhow::anyhow!("HTTP 400 Bad Request");
     assert!(!Provider::is_transient_error(&err));
 }
+
+// ── Shared utility tests ──────────────────────────────────────────────
+
+#[test]
+fn parse_history_turns_empty() {
+    let turns = parse_history_turns("");
+    assert!(turns.is_empty(), "empty history should yield no turns");
+}
+
+#[test]
+fn parse_history_turns_single_pair() {
+    let input = "User: hello\nREM: Hi there!";
+    let turns = parse_history_turns(input);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].0, "hello");
+    assert_eq!(turns[0].1, "Hi there!");
+}
+
+#[test]
+fn parse_history_turns_multiple_pairs() {
+    let input = "User: first\nREM: answer1\n\nUser: second\nREM: answer2";
+    let turns = parse_history_turns(input);
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].0, "first");
+    assert_eq!(turns[0].1, "answer1");
+    assert_eq!(turns[1].0, "second");
+    assert_eq!(turns[1].1, "answer2");
+}
+
+#[test]
+fn parse_history_turns_no_assistant() {
+    let input = "User: only user message\nREM: ";
+    let turns = parse_history_turns(input);
+    assert_eq!(turns.len(), 1);
+    // The user part strips "User: " prefix
+    assert!(
+        turns[0].0.contains("only user message"),
+        "user content should contain the message"
+    );
+    assert!(
+        turns[0].1.is_empty() || turns[0].1.trim().is_empty(),
+        "assistant content should be empty or whitespace"
+    );
+}
+
+#[test]
+fn parse_history_turns_with_newline_escaping() {
+    let input = "User: line1\\nline2\nREM: response";
+    let turns = parse_history_turns(input);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].0, "line1\nline2", "escaped newlines should be unescaped");
+}
+
+#[test]
+fn build_messages_from_history_empty() {
+    let messages = build_messages_from_history("", "user prompt", Some("system prompt"));
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], "system prompt");
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "user prompt");
+}
+
+#[test]
+fn build_messages_from_history_with_turns() {
+    let messages = build_messages_from_history("User: prev user\nREM: prev asst", "new prompt", None);
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"], "prev user");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"], "prev asst");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"], "new prompt");
+}
+
+#[test]
+fn is_transient_error_429() {
+    let err = anyhow::anyhow!("HTTP 429 Too Many Requests");
+    assert!(Provider::is_transient_error(&err), "429 should be transient");
+}
+
+#[test]
+fn is_transient_error_500() {
+    let err = anyhow::anyhow!("HTTP 500 Internal Server Error");
+    assert!(Provider::is_transient_error(&err), "5xx should be transient");
+}
+
+#[test]
+fn openai_chat_url_basic() {
+    let url = openai_chat_url("https://api.openai.com/v1", ProviderKind::OpenAI, "gpt-4");
+    assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+}
+
+#[test]
+fn openai_chat_url_azure() {
+    let url = openai_chat_url("https://my-azure.openai.azure.com", ProviderKind::Azure, "gpt-4");
+    assert!(url.contains("gpt-4"));
+    assert!(url.contains("api-version=2024-02-15-preview"));
+}
+
+#[test]
+fn openai_models_url_basic() {
+    let url = openai_models_url("https://api.openai.com/v1");
+    assert_eq!(url, "https://api.openai.com/v1/models");
+}
+
+#[test]
+fn default_base_url_ollama() {
+    let url = default_base_url(ProviderKind::Ollama);
+    assert_eq!(url, "http://localhost:11434");
+}
+
+#[test]
+fn default_base_url_openai() {
+    let url = default_base_url(ProviderKind::OpenAI);
+    assert_eq!(url, "https://api.openai.com/v1");
+}
+
+#[test]
+fn default_base_url_unknown_fallback() {
+    let url = default_base_url(ProviderKind::Bedrock);
+    assert_eq!(url, "", "Bedrock has no default base URL");
+}
+
+#[test]
+fn api_key_env_var_lookup() {
+    assert_eq!(api_key_env_var(ProviderKind::OpenAI), Some("OPENAI_API_KEY"));
+    assert_eq!(api_key_env_var(ProviderKind::Anthropic), Some("ANTHROPIC_API_KEY"));
+    assert_eq!(
+        api_key_env_var(ProviderKind::Ollama),
+        None,
+        "Ollama has no API key env var"
+    );
+}
+
+#[test]
+fn provider_label_format() {
+    use crate::config::build_provider;
+    let cfg = crate::cli::AppConfig::default();
+    if let Ok(provider) = build_provider(&cfg, String::new()) {
+        let label = provider.provider_label();
+        assert!(label.contains("ollama"), "default provider label should mention ollama");
+    }
+}
+
+#[test]
+fn parse_json_fallback_valid() {
+    let json = r#"{"explanation":"valid","code":"fn main(){}","files":[],"commands":[],"checks":[],"caution":""}"#;
+    let result = parse_json_fallback(json).unwrap();
+    assert_eq!(result.explanation, "valid");
+}
+
+#[test]
+fn parse_json_fallback_invalid() {
+    let result = parse_json_fallback("not json at all").unwrap();
+    assert_eq!(result.explanation, "not json at all", "fallback should use raw text");
+}
+
+#[test]
+fn ollama_api_url_trailing_slash_base() {
+    let url = ollama_api_url("http://localhost:11434/", "tags");
+    assert_eq!(url, "http://localhost:11434/api/tags");
+}

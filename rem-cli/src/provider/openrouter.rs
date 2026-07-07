@@ -14,7 +14,10 @@ impl ProviderBackend for OpenRouterBackend {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("OpenRouter API unreachable at {}", ctx.base_url));
+            return Err(anyhow!(super::ProviderError::Other(format!(
+                "OpenRouter API unreachable at {}",
+                ctx.base_url
+            ))));
         }
         let parsed: super::openai::OpenAIModelsResponse =
             resp.json().await.context("invalid OpenRouter models response")?;

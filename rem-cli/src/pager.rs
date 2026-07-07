@@ -1,15 +1,24 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::LazyLock;
+use std::sync::RwLock;
 
 /// Threshold for auto-paging (lines). Output shorter than this is printed directly.
-const PAGE_THRESHOLD: usize = 50;
+/// Initialized to 50 by default; can be overridden via config or `init_page_threshold`.
+static PAGE_THRESHOLD: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(50));
+
+/// Initialize the page threshold from config. Should be called at startup.
+pub fn init_page_threshold(threshold: usize) {
+    let mut t = PAGE_THRESHOLD.write().unwrap_or_else(|e| e.into_inner());
+    *t = threshold;
+}
 
 /// Prints text to stdout, optionally piping through `less` if it's long
 /// and a pager is available.
 pub fn maybe_page(text: &str) {
+    let threshold = *PAGE_THRESHOLD.read().unwrap_or_else(|e| e.into_inner());
     let line_count = text.lines().count();
-    if line_count < PAGE_THRESHOLD || !*PAGER_AVAILABLE {
+    if line_count < threshold || !*PAGER_AVAILABLE {
         print_direct(text);
         return;
     }

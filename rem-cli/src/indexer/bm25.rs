@@ -257,4 +257,90 @@ mod tests {
         assert_eq!(doc_freqs.get("there"), Some(&1));
         assert_eq!(inverted.get("hello").unwrap().len(), 2);
     }
+
+    #[test]
+    fn tokenize_null_bytes_ignored() {
+        let result = tokenize("hello\0world");
+        assert!(result.contains(&"hello".to_string()));
+        assert!(result.contains(&"world".to_string()));
+    }
+
+    #[test]
+    fn tokenize_numbers_kept() {
+        let result = tokenize("abc123 def456");
+        assert!(result.contains(&"abc123".to_string()));
+        assert!(result.contains(&"def456".to_string()));
+    }
+
+    #[test]
+    fn tokenize_single_chars_filtered() {
+        let result = tokenize("x y z abc");
+        assert_eq!(result, vec!["abc"]);
+    }
+
+    fn make_index(chunks: Vec<IndexChunk>) -> CodebaseIndex {
+        let mut doc_freqs = HashMap::new();
+        let inverted_index = build_inverted_index(&chunks, &mut doc_freqs);
+        let num_chunks = chunks.len();
+        let avg_dl = if num_chunks > 0 {
+            chunks.iter().map(|c| c.content.len() as f64).sum::<f64>() / num_chunks as f64
+        } else {
+            1.0
+        };
+        CodebaseIndex {
+            version: 2,
+            generated_at: String::new(),
+            file_mtimes: HashMap::new(),
+            chunks,
+            inverted_index,
+            doc_freqs,
+            num_chunks,
+            avg_dl,
+        }
+    }
+
+    #[test]
+    fn retrieve_relevant_empty_chunks_list() {
+        let index = make_index(vec![]);
+        let result = retrieve_relevant_chunks(&index, "hello", 5, 1000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn retrieve_relevant_empty_query() {
+        let chunk = IndexChunk {
+            path: "test.rs".into(),
+            name: "test.rs".into(),
+            chunk_type: "file".into(),
+            content: "hello world".into(),
+            content_lower: "hello world".into(),
+            name_lower: "test.rs".into(),
+            path_lower: "test.rs".into(),
+            start_line: 1,
+            end_line: 1,
+            embedding: None,
+        };
+        let index = make_index(vec![chunk]);
+        let result = retrieve_relevant_chunks(&index, "", 5, 1000);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn retrieve_relevant_query_does_not_match_name_or_path() {
+        let chunk = IndexChunk {
+            path: "test.rs".into(),
+            name: "test.rs".into(),
+            chunk_type: "file".into(),
+            content: "some code here".into(),
+            content_lower: "some code here".into(),
+            name_lower: "test.rs".into(),
+            path_lower: "test.rs".into(),
+            start_line: 1,
+            end_line: 1,
+            embedding: None,
+        };
+        let index = make_index(vec![chunk]);
+        let result = retrieve_relevant_chunks(&index, "nonexistent_token", 5, 1000);
+        assert!(result.is_empty(), "unrelated query should return no results");
+    }
 }

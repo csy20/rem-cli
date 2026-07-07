@@ -436,6 +436,14 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/session",
+            CommandInfo {
+                description: "Export or import a session",
+                usage: "/session export <path> | /session import <path>",
+                long_description: "",
+            },
+        ),
+        (
             "/search",
             CommandInfo {
                 description: "Search the web",
@@ -520,8 +528,9 @@ pub(crate) use repl::{
 };
 pub(crate) use review::{handle_apply, handle_diff, handle_review};
 pub(crate) use session::{
-    handle_compact, handle_config, handle_config_set, handle_dir, handle_init, handle_list_files, handle_memory,
-    handle_memory_set, handle_resume_session, handle_save_session, handle_tokens,
+    handle_compact, handle_config, handle_config_set, handle_dir, handle_export_session, handle_import_session,
+    handle_init, handle_list_files, handle_memory, handle_memory_set, handle_resume_session, handle_save_session,
+    handle_tokens,
 };
 pub(crate) use tools::{
     handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_test,

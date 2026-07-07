@@ -132,7 +132,10 @@ impl ProviderBackend for OpenAIBackend {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("OpenAI API unreachable at {}", ctx.base_url));
+            return Err(anyhow!(super::ProviderError::Other(format!(
+                "OpenAI API unreachable at {}",
+                ctx.base_url
+            ))));
         }
         let parsed: OpenAIModelsResponse = resp.json().await.context("invalid models response")?;
         Ok(parsed.data.into_iter().map(|m| m.id).collect())

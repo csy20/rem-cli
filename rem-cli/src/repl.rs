@@ -12,11 +12,12 @@ use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
 use crate::commands::{
     auto_write_files, handle_apply, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy,
-    handle_diff, handle_dir, handle_explain, handle_find, handle_goal, handle_init, handle_lint_with_fallback,
-    handle_list_files, handle_memory, handle_memory_set, handle_mode, handle_model, handle_plan, handle_provider,
-    handle_reasoning, handle_refactor, handle_reset, handle_resume_session, handle_review, handle_save_session,
-    handle_search, handle_test, handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why,
-    handle_write, print_chat_help, print_command_help, print_last_files, prompt_for_path,
+    handle_diff, handle_dir, handle_explain, handle_export_session, handle_find, handle_goal, handle_import_session,
+    handle_init, handle_lint_with_fallback, handle_list_files, handle_memory, handle_memory_set, handle_mode,
+    handle_model, handle_plan, handle_provider, handle_reasoning, handle_refactor, handle_reset, handle_resume_session,
+    handle_review, handle_save_session, handle_search, handle_test, handle_theme, handle_tokens, handle_undo,
+    handle_vision, handle_watch, handle_why, handle_write, print_chat_help, print_command_help, print_last_files,
+    prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
@@ -336,6 +337,21 @@ async fn dispatch_slash_command(
         }
         "/resume" => {
             handle_resume_session(session);
+            return false;
+        }
+        "/session" => {
+            let sub = args.trim();
+            if let Some(export_path) = sub.strip_prefix("export ") {
+                handle_export_session(session, export_path.trim());
+            } else if let Some(import_path) = sub.strip_prefix("import ") {
+                handle_import_session(session, import_path.trim());
+            } else {
+                let t = ui::theme::active();
+                println!(
+                    "{} usage: /session export <path> | /session import <path>",
+                    ui::theme::paint_warning(&t, "\u{258C}")
+                );
+            }
             return false;
         }
         "/copy" => {

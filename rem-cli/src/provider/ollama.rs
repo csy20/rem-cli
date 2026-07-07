@@ -29,6 +29,8 @@ pub struct OllamaJsonResponse {
     pub response: String,
 }
 
+/// Non-chat API stream line variant — kept for future use of the
+/// /api/generate endpoint (currently we use /api/chat).
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct OllamaStreamLine {
@@ -68,7 +70,10 @@ impl ProviderBackend for OllamaBackend {
         let url = super::ollama_api_url(&ctx.base_url, "tags");
         let resp = ctx.client.get(url).send().await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("Ollama unreachable at {}", ctx.base_url));
+            return Err(anyhow!(super::ProviderError::Other(format!(
+                "Ollama unreachable at {}",
+                ctx.base_url
+            ))));
         }
         let parsed: OllamaTagsResponse = resp.json().await.context("invalid tags response")?;
         Ok(parsed.models.into_iter().map(|m| m.name).collect())
@@ -163,7 +168,9 @@ impl ProviderBackend for OllamaBackend {
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+                return Err(anyhow!(super::ProviderError::ResponseTooLarge(
+                    super::MAX_RESPONSE_BYTES as u64
+                )));
             }
             Ok(true)
         })
@@ -183,9 +190,13 @@ impl ProviderBackend for OllamaBackend {
         let url = super::ollama_api_url(&ctx.base_url, "chat");
         // Build history messages via shared helper (without final user prompt — special for vision)
         let mut messages = super::build_messages_from_history(history, "", None);
-        // Remove the empty placeholder and add the vision message
-        if !messages.is_empty() {
-            messages.pop();
+        // Verify and remove the empty user placeholder before adding the vision message
+        if let Some(last) = messages.last() {
+            if last.get("role").and_then(|r| r.as_str()) == Some("user")
+                && last.get("content").and_then(|c| c.as_str()) == Some("")
+            {
+                messages.pop();
+            }
         }
         messages.push(json!({
             "role": "user",
@@ -226,7 +237,9 @@ impl ProviderBackend for OllamaBackend {
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+                return Err(anyhow!(super::ProviderError::ResponseTooLarge(
+                    super::MAX_RESPONSE_BYTES as u64
+                )));
             }
             Ok(true)
         })
@@ -306,7 +319,9 @@ impl ProviderBackend for OllamaBackend {
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+                return Err(anyhow!(super::ProviderError::ResponseTooLarge(
+                    super::MAX_RESPONSE_BYTES as u64
+                )));
             }
             Ok(true)
         })

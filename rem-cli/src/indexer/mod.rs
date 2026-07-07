@@ -328,7 +328,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
         walk_entries.iter().filter_map(process_entry).collect()
     };
 
-    let mut chunks: Vec<IndexChunk> = if file_entries.len() > 100 {
+    let mut new_chunks: Vec<IndexChunk> = if file_entries.len() > 100 {
         file_entries
             .into_par_iter()
             .flat_map(|fe| chunk_file_entry(fe, target_chunk))
@@ -340,8 +340,26 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
             .collect()
     };
 
-    chunks.par_sort_by(|a, b| a.path.cmp(&b.path).then(a.start_line.cmp(&b.start_line)));
-    Ok((chunks, file_mtimes))
+    // Incremental merge: preserve unchanged chunks from the old index
+    let changed_paths: HashSet<&str> = walk_entries.iter().map(|e| e.rel_str.as_str()).collect();
+    if !existing_mtimes.is_empty() {
+        if let Some(old) = load_codebase_index(root) {
+            let unchanged: Vec<IndexChunk> = old
+                .chunks
+                .into_iter()
+                .filter(|c| {
+                    // Keep chunks for files that (a) still exist in the current walk
+                    // and (b) were not re-processed (mtime unchanged)
+                    file_mtimes.contains_key(&c.path) && !changed_paths.contains(c.path.as_str())
+                })
+                .collect();
+            // Prepend unchanged chunks so they appear before new ones
+            new_chunks.splice(0..0, unchanged);
+        }
+    }
+
+    new_chunks.par_sort_by(|a, b| a.path.cmp(&b.path).then(a.start_line.cmp(&b.start_line)));
+    Ok((new_chunks, file_mtimes))
 }
 
 fn chunk_file_entry(fe: FileEntryToProcess, target_chunk: usize) -> Vec<IndexChunk> {
@@ -438,20 +456,24 @@ pub fn write_codebase_index(root: &Path, chunks: Vec<IndexChunk>, file_mtimes: H
     Ok(())
 }
 
-/// Returns the mtime of a file, or 0 if unavailable.
+/// Returns the mtime of a file in milliseconds since epoch, or 0 if unavailable.
+/// Millisecond precision avoids false-positive changes in rapid save scenarios
+/// (e.g., file watcher or `rem index` called twice within one second).
 fn file_mtime(path: &Path) -> u64 {
     path.metadata()
         .and_then(|m| {
             m.modified().map(|t| {
                 t.duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0) as u64
             })
         })
         .unwrap_or(0)
 }
 
 /// Loads existing file mtimes from a previous index, if available.
+/// Automatically converts second-precision values (from older index versions)
+/// to millisecond precision for correct comparison.
 fn load_existing_mtimes(root: &Path) -> HashMap<String, u64> {
     let candidates = [
         root.join(".rem/codebase_index.json"),
@@ -461,7 +483,14 @@ fn load_existing_mtimes(root: &Path) -> HashMap<String, u64> {
         if p.exists() {
             if let Ok(text) = fs::read_to_string(p) {
                 if let Ok(index) = serde_json::from_str::<CodebaseIndex>(&text) {
-                    return index.file_mtimes;
+                    let mtimes = index.file_mtimes;
+                    // Detect second-precision values (< 10B, timestamp in seconds before ~2286)
+                    // and convert to millisecond precision
+                    let is_seconds = mtimes.values().all(|v| *v < 10_000_000_000);
+                    if is_seconds {
+                        return mtimes.into_iter().map(|(k, v)| (k, v * 1000)).collect();
+                    }
+                    return mtimes;
                 }
             }
         }
@@ -695,5 +724,85 @@ mod tests {
             "splitting 10k lines took {}ms (expected <1000ms)",
             elapsed.as_millis()
         );
+    }
+
+    #[test]
+    fn incremental_index_merge_unchanged_chunks() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("rem-incr-idx-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("stable.rs"), "fn stable() {}").unwrap();
+        fs::write(root.join("changing.rs"), "fn old_version() {}").unwrap();
+        fs::write(root.join("README.md"), "# Initial").unwrap();
+
+        // First index — all files
+        let (chunks1, mtimes1) = generate_codebase_index(&root).unwrap();
+        write_codebase_index(&root, chunks1, mtimes1).unwrap();
+        let stable_count = load_codebase_index(&root).unwrap().chunks.len();
+
+        // Second index — no changes, should recycle
+        let (chunks2, _) = generate_codebase_index(&root).unwrap();
+        assert_eq!(chunks2.len(), stable_count, "unchanged index should recycle all chunks");
+
+        // Modify one file
+        fs::write(root.join("changing.rs"), "fn new_version() {}").unwrap();
+        // Also create a new file
+        fs::write(root.join("new.rs"), "fn new() {}").unwrap();
+
+        // Third index — only changed/new files re-processed, stable ones merged
+        let (chunks3, mtimes3) = generate_codebase_index(&root).unwrap();
+        assert!(
+            chunks3.len() > stable_count,
+            "should have more chunks after adding a file"
+        );
+        let paths3: HashSet<&str> = chunks3.iter().map(|c| c.path.as_str()).collect();
+        assert!(paths3.contains("stable.rs"), "stable.rs must still be present");
+        assert!(paths3.contains("new.rs"), "new.rs must be present");
+        assert!(paths3.contains("changing.rs"), "changing.rs must be present");
+        // The content of changing.rs should reflect the new version
+        assert!(chunks3
+            .iter()
+            .any(|c| c.path == "changing.rs" && c.content.contains("new_version")));
+
+        // Write and reload — verify persistency
+        write_codebase_index(&root, chunks3, mtimes3).unwrap();
+        let loaded = load_codebase_index(&root).unwrap();
+        assert!(loaded.chunks.iter().any(|c| c.path == "new.rs"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn full_index_cycle_walk_build_retrieve() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("rem-idx-cycle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("main.rs"), "fn hello() { println!(\"hello world\"); }").unwrap();
+        fs::write(root.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
+        fs::write(root.join("README.md"), "# Test Project").unwrap();
+        // Ignored dirs should be excluded
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "ignored").unwrap();
+
+        // Generate index (walks + chunks)
+        let (chunks, mtimes) = generate_codebase_index(&root).unwrap();
+        assert!(chunks.len() >= 3, "should produce at least 3 chunks");
+
+        // Write index
+        write_codebase_index(&root, chunks.clone(), mtimes).unwrap();
+        assert!(root.join(".rem/codebase_index.json").exists());
+
+        // Load index back
+        let loaded = load_codebase_index(&root).unwrap();
+        assert_eq!(loaded.chunks.len(), chunks.len());
+
+        // Retrieve relevant
+        let retrieved = retrieve_relevant_chunks(&loaded, "hello", 5, 2000);
+        assert!(!retrieved.is_empty(), "should find 'hello'-related chunks");
+
+        // Cleanup
+        fs::remove_dir_all(&root).ok();
     }
 }

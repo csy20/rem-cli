@@ -79,7 +79,7 @@ impl ProviderBackend for GeminiBackend {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("Gemini API unreachable"));
+            return Err(anyhow!(super::ProviderError::Other("Gemini API unreachable".into())));
         }
         let parsed: GeminiModelsResponse = resp.json().await.context("invalid Gemini response")?;
         Ok(parsed
@@ -326,7 +326,9 @@ impl ProviderBackend for GeminiBackend {
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+                return Err(anyhow!(super::ProviderError::ResponseTooLarge(
+                    super::MAX_RESPONSE_BYTES as u64
+                )));
             }
             Ok(true)
         })

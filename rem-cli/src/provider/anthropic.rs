@@ -69,6 +69,8 @@ pub struct AnthropicDelta {
     pub delta_type: Option<String>,
     #[serde(default)]
     pub partial_json: Option<String>,
+    /// Extended thinking content — may be populated by future API versions.
+    /// Currently, thinking deltas arrive via `delta.text` with `delta_type: "thinking_delta"`.
     #[serde(default)]
     #[allow(dead_code)]
     pub thinking: Option<String>,
@@ -108,7 +110,7 @@ impl ProviderBackend for AnthropicBackend {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("Anthropic API unreachable"));
+            return Err(anyhow!(super::ProviderError::Other("Anthropic API unreachable".into())));
         }
         let parsed: AnthropicModelsResponse = resp.json().await.context("invalid Anthropic response")?;
         Ok(parsed
@@ -399,7 +401,9 @@ impl ProviderBackend for AnthropicBackend {
                 }
             }
             if full_text.len() > super::MAX_RESPONSE_BYTES {
-                return Err(anyhow!("response too large ({} bytes)", super::MAX_RESPONSE_BYTES));
+                return Err(anyhow!(super::ProviderError::ResponseTooLarge(
+                    super::MAX_RESPONSE_BYTES as u64
+                )));
             }
             Ok(true)
         })

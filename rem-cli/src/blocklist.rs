@@ -4,22 +4,30 @@
 use std::collections::BTreeMap;
 
 /// Normalizes a command string to catch obfuscation attempts.
-/// Strips extra whitespace, shell escapes, and common tricks.
+/// Strips control characters, backslashes, and collapses whitespace in a single pass.
 fn normalize_cmd(cmd: &str) -> String {
-    let mut s = cmd
-        .chars()
-        .filter(|c| !c.is_control() && *c != '\\')
-        .collect::<String>();
-    let mut prev = String::new();
-    loop {
-        let next = s.split_whitespace().collect::<Vec<_>>().join(" ");
-        if next == prev {
-            break;
+    let mut out = String::with_capacity(cmd.len());
+    let mut in_space = true;
+    for c in cmd.chars() {
+        if c.is_control() || c == '\\' {
+            continue;
         }
-        prev = next.clone();
-        s = next;
+        if c.is_whitespace() {
+            if !in_space {
+                out.push(' ');
+                in_space = true;
+            }
+        } else {
+            for lc in c.to_lowercase() {
+                out.push(lc);
+            }
+            in_space = false;
+        }
     }
-    s.to_lowercase()
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
 }
 
 pub(crate) fn is_command_blocked(cmd: &str) -> bool {
