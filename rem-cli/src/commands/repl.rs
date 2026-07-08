@@ -311,6 +311,119 @@ pub(crate) fn handle_watch(session: &ChatSession) {
     }
 }
 
+/// Lists available models from the active provider (`/models` command).
+pub(crate) async fn handle_list_models(client: &Provider) {
+    let t = ui::theme::active();
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "fetching available models...")
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    match client.list_models().await {
+        Ok(models) => {
+            println!(
+                "{}",
+                ui::theme::paint_rail_header(&t, &format!("MODELS ({})", models.len()))
+            );
+            for m in &models {
+                let active = if *m == client.ctx.model { " (active)" } else { "" };
+                println!(
+                    "{}   {} {}",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_dim(&t, m),
+                    ui::theme::paint_success_label(&t, active),
+                );
+            }
+            println!("{}", ui::theme::paint_rail_empty(&t));
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "use /model <name> to switch")
+            );
+            println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+        }
+        Err(e) => {
+            println!(
+                "{} {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                ui::theme::paint(&t, "error", &format!("failed to list models: {e}"), false)
+            );
+            println!("{}", ui::theme::paint_rail_empty(&t));
+        }
+    }
+}
+
+/// Pulls a model from Ollama (`/pull <model>` command).
+pub(crate) async fn handle_pull_model(client: &Provider, model_name: &str) {
+    let t = ui::theme::active();
+    if client.kind != crate::provider::ProviderKind::Ollama {
+        println!(
+            "{} {}",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            ui::theme::paint(&t, "error", "/pull is only supported with Ollama provider", false)
+        );
+        return;
+    }
+    let model_name = model_name.trim();
+    if model_name.is_empty() {
+        println!(
+            "{} {}",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            ui::theme::paint_bright(&t, "usage: /pull <model-name>")
+        );
+        println!(
+            "{} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "example: /pull llama3.2:3b")
+        );
+        return;
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {} {}...",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "pulling"),
+        ui::theme::paint_dim(&t, model_name)
+    );
+    let url = crate::provider::ollama_api_url(&client.ctx.base_url, "pull");
+    let payload = serde_json::json!({"name": model_name, "stream": false});
+    match client.ctx.client.post(&url).json(&payload).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                println!(
+                    "{} {} {}",
+                    ui::theme::paint_success_label(&t, "\u{2713}"),
+                    ui::theme::paint_bright(&t, "model pulled:"),
+                    ui::theme::paint_dim(&t, model_name)
+                );
+                println!(
+                    "{} {} {}",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_dim(&t, "activate with:"),
+                    ui::theme::paint_bright(&t, &format!("/model {}", model_name))
+                );
+            } else {
+                let body = resp.text().await.unwrap_or_default();
+                println!(
+                    "{} {}",
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
+                    ui::theme::paint(&t, "error", &format!("pull failed: {body}"), false)
+                );
+            }
+        }
+        Err(e) => {
+            println!(
+                "{} {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                ui::theme::paint(&t, "error", &format!("pull failed: {e}"), false)
+            );
+        }
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
 pub(crate) fn handle_why(session: &ChatSession) {
     let t = ui::theme::active();
     let intent_name = match session.last_intent {

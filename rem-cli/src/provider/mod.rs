@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -461,8 +462,13 @@ impl Provider {
                         return Err(e);
                     }
                     last_err = Some(e);
-                    let delay =
-                        Duration::from_millis(crate::constants::LLM_RETRY_BASE_DELAY_MS * 2u64.pow(attempt as u32));
+                    let base_delay_ms = crate::constants::LLM_RETRY_BASE_DELAY_MS * 2u64.pow(attempt as u32);
+                    // Simple jitter: hash attempt to get a multiplier in [0.5, 1.0)
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    std::hash::Hash::hash(&attempt, &mut hasher);
+                    let jitter = (hasher.finish() % 100) as f64 / 200.0; // 0.0..0.495
+                    let delay_ms = (base_delay_ms as f64 * (0.5 + jitter)) as u64;
+                    let delay = Duration::from_millis(delay_ms.max(100));
                     // Poll STREAM_CANCELLED during backoff sleep (avoids redundant signal listener)
                     let poll_interval = Duration::from_millis(100);
                     let mut remaining = delay;
@@ -874,12 +880,18 @@ pub(super) async fn parse_api_error(provider_name: &str, resp: reqwest::Response
         .unwrap_or_else(|_| body.chars().take(crate::constants::API_ERROR_BODY_MAX_CHARS).collect());
     let code = status.as_u16();
     match code {
-        429 => anyhow!(ProviderError::RateLimit(format!(
-            "{provider_name} rate limited ({code}): {err_msg}"
-        ))),
-        401 | 403 => anyhow!(ProviderError::Auth(format!(
-            "{provider_name} auth failed ({code}): {err_msg}"
-        ))),
+        429 => {
+            let hint = " — try waiting and retrying";
+            anyhow!(ProviderError::RateLimit(format!(
+                "{provider_name} rate limited ({code}): {err_msg}{hint}"
+            )))
+        }
+        401 | 403 => {
+            let hint = " — check your API key in ~/.config/rem-cli/config.toml or the REMOTE_API_KEY env var";
+            anyhow!(ProviderError::Auth(format!(
+                "{provider_name} auth failed ({code}): {err_msg}{hint}"
+            )))
+        }
         500..=504 => anyhow!(ProviderError::ServerError(format!(
             "{provider_name} server error ({code}): {err_msg}"
         ))),
@@ -1003,16 +1015,7 @@ pub(super) async fn openai_compat_chat_stream_with_tools(
     tool_specs: &[tools::ToolSpec],
 ) -> Result<tools::ToolResponse> {
     let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
-    let mut messages: Vec<serde_json::Value> = vec![json!({"role": "system", "content": system_prompt})];
-    if !history.is_empty() {
-        for (user_msg, assistant_msg) in parse_history_turns(history) {
-            messages.push(json!({"role": "user", "content": user_msg}));
-            if !assistant_msg.is_empty() {
-                messages.push(json!({"role": "assistant", "content": assistant_msg}));
-            }
-        }
-    }
-    messages.push(json!({"role": "user", "content": user_prompt}));
+    let messages = build_messages_from_history(history, user_prompt, Some(system_prompt));
     let tools_json: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
     let mut payload = json!({
         "model": ctx.model,

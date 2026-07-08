@@ -35,6 +35,9 @@ pub const JSON_MAX_TOKENS: u32 = 512;
 /// Max chars of API error body to include in error messages.
 pub const API_ERROR_BODY_MAX_CHARS: usize = 300;
 
+/// Max bytes to read from piped stdin input.
+pub const PIPE_INPUT_MAX_BYTES: usize = 512 * 1024; // 512 KB
+
 /// Initial capacity for response string buffers.
 pub const INITIAL_BUF_CAPACITY: usize = 4096;
 
@@ -188,6 +191,8 @@ pub const DEFAULT_MODE: &str = "CHAT";
 #[allow(dead_code)]
 pub const DEFAULT_SEARCH_PROVIDER: &str = "ddg";
 pub const SEARCH_MAX_RESULTS: usize = 8;
+
+pub(crate) const TOKEN_BUDGET_PER_TURN: usize = 500;
 
 // ── System Prompts ─────────────────────────────────────────────────────────
 

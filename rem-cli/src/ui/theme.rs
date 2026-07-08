@@ -159,6 +159,14 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
             "#cc3333", "#66aa44", "#0e0c08",
         ),
     );
+    t.insert(
+        "CONTRAST",
+        Theme::build(
+            "CONTRAST", "#ffffff", "#f0f0f0", "#d0d0d0", "#000000", "#333333", "#0055aa", "#666666", "#999999",
+            "#e8e8e8", "#cccccc", "#000000", "#ffffff", "#d0d0d0", "#666666", "#e0e0e0", "#000000", "#000000",
+            "#cc0000", "#008800", "#f8f8f8", "#f0f0f0",
+        ),
+    );
     t
 });
 
@@ -571,13 +579,14 @@ mod tests {
     }
 
     #[test]
-    fn list_names_has_six() {
+    fn list_names_has_seven() {
         let names = list_names();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7);
         assert!(names.contains(&"GHOST".to_string()));
         assert!(names.contains(&"PAPER".to_string()));
         assert!(names.contains(&"SAKURA".to_string()));
         assert!(names.contains(&"EMBER".to_string()));
+        assert!(names.contains(&"CONTRAST".to_string()));
     }
 
     #[test]

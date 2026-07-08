@@ -3,7 +3,6 @@
 //! references, builds system prompts with project context, and manages modes.
 
 use crate::completion::RemHelper;
-use crate::feedback::FeedbackTracker;
 use crate::indexer::{build_retrieved_context, load_codebase_index, retrieve_relevant_chunks, CodebaseIndex};
 use crate::intent::TaskIntent;
 use crate::memory::ProjectMemory;
@@ -16,6 +15,7 @@ use rustyline::config::Configurer;
 use rustyline::history::DefaultHistory;
 use rustyline::{Cmd, Editor, KeyEvent};
 use std::borrow::Cow;
+use std::fmt::Write;
 use std::fs;
 use std::io::{self};
 use std::path::{Path, PathBuf};
@@ -105,7 +105,6 @@ impl HistoryManager {
         if self.history.is_empty() {
             return String::new();
         }
-        const TOKEN_BUDGET_PER_TURN: usize = 500;
         let mut out = String::from("[Previous conversation — keep context in mind]:\n\n");
         let len = self.history.len();
         let start_idx = len.saturating_sub(6);
@@ -117,22 +116,37 @@ impl HistoryManager {
                 .get(i)
                 .copied()
                 .unwrap_or_else(|| estimate_tokens(assistant));
-            let truncated_assistant: Cow<'_, str> = if tokens > TOKEN_BUDGET_PER_TURN {
-                let estimated_len = (assistant.len() * TOKEN_BUDGET_PER_TURN) / tokens.max(1);
+            let truncated_assistant: Cow<'_, str> = if tokens > crate::constants::TOKEN_BUDGET_PER_TURN {
+                let estimated_len = (assistant.len() * crate::constants::TOKEN_BUDGET_PER_TURN) / tokens.max(1);
                 let cutoff = estimated_len.min(assistant.len());
                 let cutoff = assistant.floor_char_boundary(cutoff);
                 let truncated = assistant[..cutoff].to_string();
                 Cow::Owned(format!(
                     "{}...\n[truncated to ~{} tokens]",
-                    truncated, TOKEN_BUDGET_PER_TURN
+                    truncated,
+                    crate::constants::TOKEN_BUDGET_PER_TURN
                 ))
             } else {
                 Cow::Borrowed(assistant)
             };
-            // Escape internal newlines to avoid breaking the \n\n turn separator
-            let safe_user = user.replace('\n', "\\n");
-            let safe_assistant = truncated_assistant.replace('\n', "\\n");
-            out.push_str(&format!("User: {}\nREM: {}\n\n", safe_user, safe_assistant));
+
+            let _ = write!(out, "User: ");
+            for c in user.chars() {
+                if c == '\n' {
+                    out.push_str("\\n");
+                } else {
+                    out.push(c);
+                }
+            }
+            let _ = write!(out, "\nREM: ");
+            for c in truncated_assistant.chars() {
+                if c == '\n' {
+                    out.push_str("\\n");
+                } else {
+                    out.push(c);
+                }
+            }
+            out.push_str("\n\n");
         }
         out
     }
@@ -274,7 +288,6 @@ pub(crate) struct ChatSession {
     pub(crate) last_search: Vec<SearchResult>,
     pub(crate) last_intent: TaskIntent,
     pub(crate) last_user_input: String,
-    pub(crate) feedback: FeedbackTracker,
     pub(crate) mode: RunMode,
     pub(crate) last_tokens: u32,
     pub(crate) last_elapsed: std::time::Duration,
@@ -282,7 +295,7 @@ pub(crate) struct ChatSession {
 
 impl ChatSession {
     /// Creates a new chat session with the given model and optional workspace.
-    pub(crate) fn new(model: &str, workspace: Option<PathBuf>) -> Result<Self> {
+    pub(crate) fn new(_model: &str, workspace: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
             history_mgr: HistoryManager::new()?,
             code_out: CodeOutput::new(),
@@ -290,7 +303,6 @@ impl ChatSession {
             last_search: Vec::new(),
             last_intent: TaskIntent::FastAnswer,
             last_user_input: String::new(),
-            feedback: FeedbackTracker::new(model),
             mode: RunMode::Chat,
             last_tokens: 0,
             last_elapsed: std::time::Duration::from_secs(0),
@@ -378,28 +390,53 @@ impl ChatSession {
         let session_file = dir.join(".rem/session.json.gz");
         if let Err(e) = std::fs::create_dir_all(dir.join(".rem")) {
             tracing::warn!("failed to create session dir: {}", e);
+            let t = crate::ui::theme::active();
+            eprintln!(
+                "{} auto-save: failed to create session dir",
+                crate::ui::theme::paint_warning(&t, "!")
+            );
         }
         let json = match serde_json::to_string_pretty(&self.to_session_json()) {
             Ok(j) => j,
             Err(e) => {
                 tracing::warn!("failed to serialize session: {}", e);
+                let t = crate::ui::theme::active();
+                eprintln!(
+                    "{} auto-save: failed to serialize session",
+                    crate::ui::theme::paint_warning(&t, "!")
+                );
                 return;
             }
         };
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
         if let Err(e) = encoder.write_all(json.as_bytes()) {
             tracing::warn!("failed to compress session: {}", e);
+            let t = crate::ui::theme::active();
+            eprintln!(
+                "{} auto-save: compression failed",
+                crate::ui::theme::paint_warning(&t, "!")
+            );
             return;
         }
         let compressed = match encoder.finish() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("failed to finish session compression: {}", e);
+                let t = crate::ui::theme::active();
+                eprintln!(
+                    "{} auto-save: compression failed",
+                    crate::ui::theme::paint_warning(&t, "!")
+                );
                 return;
             }
         };
         if let Err(e) = std::fs::write(&session_file, &compressed) {
             tracing::warn!("failed to auto-save session: {}", e);
+            let t = crate::ui::theme::active();
+            eprintln!(
+                "{} auto-save: failed to write session file",
+                crate::ui::theme::paint_warning(&t, "!")
+            );
         }
     }
 

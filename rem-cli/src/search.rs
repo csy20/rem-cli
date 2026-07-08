@@ -2,8 +2,11 @@
 //! When an API key is configured for Google or Bing, uses the proper search API;
 //! otherwise falls back to DuckDuckGo HTML scraping.
 
+use std::sync::LazyLock;
+
 use crate::ui;
 use anyhow::{Context, Result};
+use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
 
@@ -106,19 +109,69 @@ async fn search_ddg(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
         .send()
         .await
         .context("web search request failed")?;
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!("DuckDuckGo returned HTTP {}", resp.status()));
+    }
     let html = resp.text().await.context("failed to read search response")?;
     Ok(parse_ddg_html(&html))
+}
+
+/// Simple percent-decoding for URL-encoded strings (no external dep needed).
+fn url_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex: String = chars.by_ref().take(2).collect();
+            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                out.push(byte as char);
+            } else {
+                out.push('%');
+                out.push_str(&hex);
+            }
+        } else if c == '+' {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Extracts the actual destination URL from a DuckDuckGo redirect URL.
+/// DDG wraps result links in `//duckduckgo.com/l/?uddg=<encoded_url>&rut=...`
+fn resolve_ddg_url(href: &str) -> String {
+    if href.contains("uddg=") {
+        static RE_UDDG: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"[?&]uddg=([^&]+)").expect("invalid uddg regex"));
+        if let Some(caps) = RE_UDDG.captures(href) {
+            if let Some(encoded) = caps.get(1) {
+                return url_decode(encoded.as_str());
+            }
+        }
+    }
+    href.to_string()
+}
+
+fn ddg_selectors() -> (&'static Selector, &'static Selector, &'static Selector) {
+    static RESULT: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".result").expect("invalid selector"));
+    static TITLE: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse(".result__title a, .result__a").expect("invalid selector"));
+    static SNIPPET: LazyLock<Selector> =
+        LazyLock::new(|| Selector::parse(".result__snippet").expect("invalid selector"));
+    (&RESULT, &TITLE, &SNIPPET)
 }
 
 fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
     let document = Html::parse_document(html);
 
-    let result_selector = Selector::parse(".result").ok();
-    let title_selector = Selector::parse(".result__title a, .result__a").ok();
-    let snippet_selector = Selector::parse(".result__snippet").ok();
+    let (result_selector, title_selector, snippet_selector) = ddg_selectors();
+    let result_selector = Some(result_selector);
+    let title_selector = Some(title_selector);
+    let snippet_selector = Some(snippet_selector);
 
     let result_elements = match result_selector {
-        Some(ref sel) => document.select(sel).collect::<Vec<_>>(),
+        Some(sel) => document.select(sel).collect::<Vec<_>>(),
         None => return Vec::new(),
     };
 
@@ -136,6 +189,7 @@ fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
             .and_then(|el| el.value().attr("href"))
             .unwrap_or("")
             .to_string();
+        let url = resolve_ddg_url(&url);
 
         let snippet = snippet_selector
             .as_ref()
@@ -157,6 +211,12 @@ pub fn print_search_results(results: &[SearchResult]) {
         println!("{}", ui::theme::paint_warning(&t, "  no results found"));
         return;
     }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &format!("{} result(s) found", results.len())),
+    );
     println!("{}", ui::theme::paint_rail_empty(&t));
     for (i, r) in results.iter().enumerate() {
         println!(

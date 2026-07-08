@@ -197,24 +197,6 @@ impl ProviderBackend for OpenAIBackend {
             payload.insert("stream".into(), json!(true));
         }
 
-        if no_stream {
-            let resp = super::add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), ctx.kind)
-                .json(&payload)
-                .send()
-                .await
-                .context("failed to call OpenAI API")?;
-            if !resp.status().is_success() {
-                return Err(super::parse_api_error("OpenAI", resp).await);
-            }
-            let parsed: OpenAIResponse = resp.json().await.context("invalid OpenAI response")?;
-            let content = parsed
-                .choices
-                .first()
-                .and_then(|c| c.message.content.as_deref())
-                .unwrap_or("");
-            return Ok(content.to_string());
-        }
-
         let resp = super::add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), ctx.kind)
             .json(&payload)
             .send()
@@ -225,7 +207,17 @@ impl ProviderBackend for OpenAIBackend {
             return Err(super::parse_api_error("OpenAI", resp).await);
         }
 
-        super::stream_sse_response(resp).await
+        if no_stream {
+            let parsed: OpenAIResponse = resp.json().await.context("invalid OpenAI response")?;
+            let content = parsed
+                .choices
+                .first()
+                .and_then(|c| c.message.content.as_deref())
+                .unwrap_or("");
+            Ok(content.to_string())
+        } else {
+            super::stream_sse_response(resp).await
+        }
     }
 
     async fn complete_chat_stream_with_vision(

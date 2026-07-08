@@ -1,11 +1,14 @@
 //! Goal-driven autonomous loop (`/goal`).
 //! Iteratively generates code, runs lint/tests, and feeds results back to
 //! the LLM until the goal is achieved or max iterations are reached.
+//! Supports checkpointing for multi-turn resume after interruption.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
 
 use crate::agentic::{
     build_agentic_prompt, build_tool_context, extract_goal_signal, format_tool_output, run_lint, run_test, ToolOutput,
@@ -20,6 +23,54 @@ use crate::ui;
 
 const MAX_TOOL_OUTPUT_LEN: usize = crate::constants::GOAL_TOOL_OUTPUT_MAX_CHARS;
 const ITERATION_TIMEOUT: Duration = crate::constants::GOAL_ITERATION_TIMEOUT;
+
+/// Checkpoint state for multi-turn goal resume.
+#[derive(Debug, Serialize, Deserialize)]
+struct GoalCheckpoint {
+    condition: String,
+    iteration: usize,
+    last_tool_output: String,
+    last_response_hash: u64,
+    last_tool_hash: u64,
+    last_written_files: Vec<String>,
+}
+
+fn checkpoint_path(session: &ChatSession) -> PathBuf {
+    let dir = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    dir.join(".rem/goal_checkpoint.json")
+}
+
+fn save_checkpoint(session: &ChatSession, cp: &GoalCheckpoint) {
+    let path = checkpoint_path(session);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(cp) {
+        if let Err(e) = std::fs::write(&path, &json) {
+            tracing::warn!("failed to save goal checkpoint: {}", e);
+        }
+    }
+}
+
+fn load_checkpoint(session: &ChatSession) -> Option<GoalCheckpoint> {
+    let path = checkpoint_path(session);
+    if path.exists() {
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<GoalCheckpoint>(&s).ok())
+    } else {
+        None
+    }
+}
+
+fn clear_checkpoint(session: &ChatSession) {
+    let path = checkpoint_path(session);
+    let _ = std::fs::remove_file(&path);
+}
 
 fn circuit_breaker_hash(output: &str, iteration: usize) -> u64 {
     let mut hasher = DefaultHasher::new();
@@ -72,6 +123,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         .await;
         match result {
             Ok((text, writes)) => {
+                clear_checkpoint(session);
                 println!("\n{}", text);
                 println!("{}", ui::theme::paint_rail_empty(&t));
                 println!(
@@ -94,6 +146,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                 session.history_mgr.push_turn(format!("/goal {}", condition), text);
             }
             Err(e) => {
+                clear_checkpoint(session);
                 println!(
                     "{} {} tool loop failed: {}",
                     ui::theme::paint_error_label(&t, "\u{258C}"),
@@ -104,6 +157,67 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         }
         println!("{}", ui::theme::paint_rail_empty(&t));
         return;
+    }
+
+    let max_iter = crate::constants::GOAL_MAX_ITERATIONS;
+    let mut last_tool_output = String::new();
+    let mut last_tool_hash: u64 = 0;
+    let mut last_response_hash: u64 = 0;
+    let mut last_written_files: Vec<String> = Vec::new();
+    let mut final_iteration_text: Option<String> = None;
+    let mut consecutive_empty_plans: u32 = 0;
+    let mut start_iteration = 0usize;
+
+    // Check for existing checkpoint and offer resume
+    if let Some(cp) = load_checkpoint(session) {
+        if cp.condition == condition {
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_bright(&t, "found checkpoint from previous /goal session")
+            );
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "resume from where we left off? [Y/n]")
+            );
+            let should_resume =
+                match session.readline(&format!("{}   ", ui::theme::paint(&t, "accent", "\u{258C}", true))) {
+                    Ok(line) => {
+                        let trimmed = line.trim().to_lowercase();
+                        trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
+                    }
+                    Err(_) => true,
+                };
+            if should_resume {
+                start_iteration = cp.iteration;
+                last_tool_output = cp.last_tool_output;
+                last_response_hash = cp.last_response_hash;
+                last_tool_hash = cp.last_tool_hash;
+                last_written_files = cp.last_written_files;
+                println!(
+                    "{} {} iteration {}",
+                    ui::theme::paint_success_label(&t, "\u{2713}"),
+                    ui::theme::paint_dim(&t, "resuming from"),
+                    start_iteration + 1
+                );
+            } else {
+                clear_checkpoint(session);
+                println!(
+                    "{} {}",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_dim(&t, "starting fresh")
+                );
+            }
+        } else {
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "checkpoint has different goal \u{2014} starting fresh")
+            );
+            clear_checkpoint(session);
+        }
+        println!("{}", ui::theme::paint_rail_empty(&t));
     }
 
     let goal_prompt_text = format!(
@@ -117,15 +231,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         condition
     );
 
-    let max_iter = crate::constants::GOAL_MAX_ITERATIONS;
-    let mut last_tool_output = String::new();
-    let mut last_tool_hash: u64 = 0;
-    let mut last_response_hash: u64 = 0;
-    let mut last_written_files: Vec<String> = Vec::new();
-    let mut final_iteration_text: Option<String> = None;
-    let mut consecutive_empty_plans: u32 = 0;
-
-    for i in 0..max_iter {
+    for i in start_iteration..max_iter {
         if i > 0 {
             println!("{}", ui::theme::paint_rail_empty(&t));
         }
@@ -210,6 +316,7 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         }
 
         if let Some((achieved, msg)) = extract_goal_signal(&cleaned) {
+            clear_checkpoint(session);
             if achieved {
                 println!(
                     "{} {} goal achieved! {}",
@@ -243,11 +350,10 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         let mut tool_results = String::new();
         if !last_written_files.is_empty() {
             for file_path in &last_written_files {
-                let is_test_file = file_path.contains("test")
-                    || file_path.contains("spec")
-                    || file_path.ends_with("_test.rs")
-                    || file_path.ends_with("_test.py")
-                    || file_path.ends_with("_spec.js");
+                let p = std::path::Path::new(file_path);
+                let stem = p.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default();
+                let is_test_file =
+                    stem.ends_with("_test") || stem.ends_with("_spec") || stem == "test" || stem == "spec";
 
                 let (lint_result, test_result) = tokio::join!(run_lint(file_path), async {
                     if is_test_file {
@@ -294,7 +400,22 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
             tool_results.push_str("\n... [truncated]");
         }
         last_tool_output = tool_results;
+
+        // Save checkpoint for multi-turn resume
+        save_checkpoint(
+            session,
+            &GoalCheckpoint {
+                condition: condition.to_string(),
+                iteration: i + 1,
+                last_tool_output: last_tool_output.clone(),
+                last_response_hash,
+                last_tool_hash,
+                last_written_files: last_written_files.clone(),
+            },
+        );
     }
+    // Clear checkpoint on any exit (completed, stuck, or max iterations)
+    clear_checkpoint(session);
     if let Some(final_text) = final_iteration_text {
         session
             .history_mgr

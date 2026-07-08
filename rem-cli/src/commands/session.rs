@@ -304,7 +304,10 @@ pub(crate) fn handle_config_set(session: &mut ChatSession, client: &Provider, ar
                 ui::theme::paint_warning(&t, "\u{258C}"),
                 other
             );
-            println!("{} available: model, workspace", ui::theme::paint_rail_empty(&t));
+            println!(
+                "{} usage: /config workspace <path>  (use /model to change models)",
+                ui::theme::paint_rail_empty(&t)
+            );
         }
     }
 }
@@ -420,6 +423,55 @@ pub(crate) fn handle_tokens(session: &ChatSession, client: &Provider) {
     println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
+/// Reloads config from disk and re-scans project context (`/reload` command).
+pub(crate) fn handle_reload(session: &mut ChatSession, cfg: &mut crate::cli::AppConfig) {
+    use crate::config::{invalidate_config_cache, load_config};
+    let t = ui::theme::active();
+    invalidate_config_cache();
+    match load_config() {
+        Ok(new_cfg) => {
+            let old_workspace = cfg.workspace_dir.clone();
+            let old_theme = cfg.theme.clone();
+            *cfg = new_cfg;
+            // Preserve runtime state that shouldn't be overwritten
+            if cfg.workspace_dir.is_none() {
+                cfg.workspace_dir = old_workspace;
+            }
+            if old_theme != cfg.theme {
+                ui::theme::set_active(&cfg.theme);
+            }
+            crate::pager::init_page_threshold(cfg.page_threshold);
+            // Re-scan project context
+            session.ctx.invalidate_caches();
+            if let Some(ref dir) = cfg.workspace_dir {
+                let path = std::path::PathBuf::from(dir);
+                if path.exists() {
+                    session.ctx.project_dir = Some(path);
+                    session.ctx.project_memory = crate::memory::ProjectMemory::load(
+                        session
+                            .ctx
+                            .project_dir
+                            .as_deref()
+                            .unwrap_or_else(|| std::path::Path::new(".")),
+                    );
+                }
+            }
+            println!(
+                "{} {}",
+                ui::theme::paint_success_label(&t, "\u{2713}"),
+                ui::theme::paint_dim(&t, "config reloaded from disk")
+            );
+        }
+        Err(e) => {
+            println!(
+                "{} {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                ui::theme::paint(&t, "error", &format!("failed to reload config: {e}"), false)
+            );
+        }
+    }
+}
+
 /// Displays the project memory (`/memory` command).
 pub(crate) fn handle_memory(session: &ChatSession) {
     let t = ui::theme::active();
@@ -532,6 +584,62 @@ pub(crate) fn handle_init(session: &mut ChatSession) {
     println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
+/// Dry-run preview of compaction (`/compact-dry-run`).
+/// Shows what would be summarized without calling the LLM.
+pub(crate) fn handle_compact_dry_run(session: &ChatSession) {
+    let t = ui::theme::active();
+    if session.history_mgr.history.is_empty() {
+        println!(
+            "{} nothing to compact — history is empty",
+            ui::theme::paint_warning(&t, "\u{258C}")
+        );
+        return;
+    }
+    println!("{}", ui::theme::paint_rail_header(&t, "COMPACT DRY-RUN"));
+    let turn_count = session.history_mgr.history.len();
+    let total_chars: usize = session.history_mgr.history.iter().map(|(u, a)| u.len() + a.len()).sum();
+    println!(
+        "{}   turns: {} | total size: {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &turn_count.to_string()),
+        ui::theme::paint_dim(&t, &crate::text_util::human_size(total_chars as u64))
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    for (i, (user, assistant)) in session.history_mgr.history.iter().enumerate() {
+        let user_preview = user.lines().next().unwrap_or(user);
+        let user_preview = if user_preview.len() > 60 {
+            format!("{}...", &user_preview[..57])
+        } else {
+            user_preview.to_string()
+        };
+        let assistant_preview = assistant.lines().next().unwrap_or(assistant);
+        let assistant_preview = if assistant_preview.len() > 60 {
+            format!("{}...", &assistant_preview[..57])
+        } else {
+            assistant_preview.to_string()
+        };
+        println!(
+            "{}   {} user: {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, &format!("#{}", i + 1)),
+            ui::theme::paint_bright(&t, &user_preview)
+        );
+        println!(
+            "{}   {} assistant: {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "   "),
+            ui::theme::paint_dim(&t, &assistant_preview)
+        );
+        println!("{}", ui::theme::paint_rail_empty(&t));
+    }
+    println!(
+        "{}   {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "LLM was NOT called — run /compact to actually compact")
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
 /// Compacts conversation history via LLM summarization (`/compact`).
 pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession) {
     let t = ui::theme::active();
@@ -541,6 +649,31 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
             ui::theme::paint_warning(&t, "│")
         );
         return;
+    }
+    // Confirm before destructive compact
+    match session.readline(&format!(
+        "{} Are you sure? [y/N] ",
+        ui::theme::paint_warning(&t, "\u{258C}")
+    )) {
+        Ok(line) => {
+            let trimmed = line.trim().to_lowercase();
+            if trimmed != "y" && trimmed != "yes" {
+                println!(
+                    "{} {}",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_dim(&t, "compact cancelled")
+                );
+                return;
+            }
+        }
+        Err(_) => {
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "compact cancelled")
+            );
+            return;
+        }
     }
     let history_text = session.build_chat_history();
     let compact_prompt = format!(
@@ -553,6 +686,22 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
         session.history_mgr.history.len()
     );
     let saved_history = session.history_mgr.history.clone();
+    // Persist backup before compacting (for /compact --undo)
+    let dir = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let backup_path = dir.join(".rem/compact_backup.json.gz");
+    let _ = std::fs::create_dir_all(dir.join(".rem"));
+    if let Ok(json) = serde_json::to_string_pretty(&saved_history) {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        if encoder.write_all(json.as_bytes()).is_ok() {
+            if let Ok(compressed) = encoder.finish() {
+                let _ = std::fs::write(&backup_path, &compressed);
+            }
+        }
+    }
     match client
         .complete_chat_stream(
             &compact_prompt,
@@ -575,6 +724,11 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
                 old_count,
                 session.history_mgr.history.len()
             );
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "use /session compact-undo to restore original history")
+            );
         }
         Err(e) => {
             session.history_mgr.history = saved_history;
@@ -583,6 +737,51 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
                 ui::theme::paint(&t, "accent", "\u{258C}", true),
                 ui::theme::paint_error_label(&t, "✗"),
                 e
+            );
+        }
+    }
+}
+
+/// Restores history from the compact backup (`/session compact-undo`).
+pub(crate) fn handle_compact_undo(session: &mut ChatSession) {
+    let t = ui::theme::active();
+    let dir = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let backup_path = dir.join(".rem/compact_backup.json.gz");
+    if !backup_path.exists() {
+        println!(
+            "{} {}",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            ui::theme::paint_dim(&t, "no compact backup found")
+        );
+        return;
+    }
+    match read_maybe_gzip(&backup_path) {
+        Ok(content) => {
+            if let Ok(history) = serde_json::from_str::<Vec<(String, String)>>(&content) {
+                session.history_mgr.history = history;
+                println!(
+                    "{} {}",
+                    ui::theme::paint_success_label(&t, "\u{2713}"),
+                    ui::theme::paint_dim(&t, "history restored from compact backup")
+                );
+                let _ = std::fs::remove_file(&backup_path);
+            } else {
+                println!(
+                    "{} {}",
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
+                    ui::theme::paint(&t, "error", "invalid backup format", false)
+                );
+            }
+        }
+        Err(e) => {
+            println!(
+                "{} {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                ui::theme::paint(&t, "error", &format!("failed to read backup: {e}"), false)
             );
         }
     }
@@ -612,7 +811,18 @@ pub(crate) fn handle_save_session(session: &ChatSession) {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
     let session_file = dir.join(".rem/session.json.gz");
     let _ = fs::create_dir_all(dir.join(".rem"));
-    let json = serde_json::to_string_pretty(&session.to_session_json()).unwrap_or_default();
+    let json = match serde_json::to_string_pretty(&session.to_session_json()) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("session serialization failed: {}", e);
+            println!(
+                "{} {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                ui::theme::paint(&t, "error", "failed to serialize session", false)
+            );
+            return;
+        }
+    };
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     if let Err(e) = encoder.write_all(json.as_bytes()) {
         tracing::warn!("gzip write failed: {}", e);
@@ -749,8 +959,33 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
 /// Exports the current session to a file (`/session export <path>`).
 pub(crate) fn handle_export_session(session: &ChatSession, path: &str) {
     let t = ui::theme::active();
-    let out_path = PathBuf::from(path);
-    let json = serde_json::to_string_pretty(&session.to_session_json()).unwrap_or_default();
+    let base = session
+        .ctx
+        .project_dir
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let out_path = match crate::types::resolve_safe_path(base, path) {
+        Some(p) => p,
+        None => {
+            println!(
+                "  {} path traversal blocked",
+                ui::theme::paint_error_label(&t, "\u{2717}")
+            );
+            return;
+        }
+    };
+    let json = match serde_json::to_string_pretty(&session.to_session_json()) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("session serialization failed: {}", e);
+            println!(
+                "{} {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                ui::theme::paint(&t, "error", "failed to serialize session", false)
+            );
+            return;
+        }
+    };
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     if let Err(e) = encoder.write_all(json.as_bytes()) {
         println!(
@@ -786,10 +1021,177 @@ pub(crate) fn handle_export_session(session: &ChatSession, path: &str) {
     }
 }
 
+/// Generates and displays a session summary via the LLM (`/summary` command).
+pub(crate) async fn handle_summary(client: &Provider, session: &mut ChatSession, save_path: Option<&str>) {
+    let t = ui::theme::active();
+    if session.history_mgr.history.is_empty() {
+        println!(
+            "{} {}",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            ui::theme::paint_dim(&t, "nothing to summarize \u{2014} history is empty")
+        );
+        return;
+    }
+    let history_text = session.build_chat_history();
+    let summary_prompt = format!(
+        "[SYSTEM] Summarize this conversation concisely covering: key decisions made, \
+         code/files generated, bugs fixed, commands used, and next actions. \
+         Use bullet points. Be specific about file paths and changes.\n\n{}",
+        history_text
+    );
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "generating session summary...")
+    );
+    match client
+        .complete_chat_stream(
+            &summary_prompt,
+            "You are a summarizer. Output only a concise bullet-point summary. No preamble, no code fences.",
+            "",
+        )
+        .await
+    {
+        Ok(summary) => {
+            let summary = summary.trim().to_string();
+            println!("{}", ui::theme::paint_rail_header(&t, "SESSION SUMMARY"));
+            for line in summary.lines() {
+                println!(
+                    "{} {}",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_dim(&t, line)
+                );
+            }
+            println!("{}", ui::theme::paint_rail_empty(&t));
+
+            if let Some(path) = save_path {
+                let base = session
+                    .ctx
+                    .project_dir
+                    .clone()
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                let out_path = match crate::types::resolve_safe_path(&base, path.trim()) {
+                    Some(p) => p,
+                    None => {
+                        println!(
+                            "{} {}",
+                            ui::theme::paint_error_label(&t, "\u{2717}"),
+                            ui::theme::paint(&t, "error", "invalid path", false)
+                        );
+                        println!("{}", ui::theme::paint_rail_empty(&t));
+                        return;
+                    }
+                };
+                match std::fs::write(&out_path, &summary) {
+                    Ok(()) => println!(
+                        "{} {} {}",
+                        ui::theme::paint_success_label(&t, "\u{2713}"),
+                        ui::theme::paint_dim(&t, "summary saved to"),
+                        ui::theme::paint_bright(&t, &out_path.display().to_string())
+                    ),
+                    Err(e) => println!(
+                        "{} {}",
+                        ui::theme::paint_error_label(&t, "\u{2717}"),
+                        ui::theme::paint(&t, "error", &format!("failed to save summary: {e}"), false)
+                    ),
+                }
+                println!("{}", ui::theme::paint_rail_empty(&t));
+            } else {
+                println!(
+                    "{} {}",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_dim(&t, "use /summary <path> to save to a file")
+                );
+                println!("{}", ui::theme::paint(&t, "accent", "\u{258C}", true));
+            }
+        }
+        Err(e) => {
+            println!(
+                "{} {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                ui::theme::paint(&t, "error", &format!("summary failed: {e}"), false)
+            );
+            println!("{}", ui::theme::paint_rail_empty(&t));
+        }
+    }
+}
+
+/// Lists saved session files in `.rem/` (`/session list`).
+pub(crate) fn handle_list_sessions(session: &ChatSession) {
+    let t = ui::theme::active();
+    let dir = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let rem_dir = dir.join(".rem");
+    if !rem_dir.exists() {
+        println!(
+            "{} {}",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            ui::theme::paint_dim(&t, "no .rem directory found — no saved sessions")
+        );
+        return;
+    }
+    let mut sessions: Vec<(String, u64)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&rem_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("gz")
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.ends_with(".json"))
+            {
+                if let Ok(meta) = entry.metadata() {
+                    let size = meta.len();
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    sessions.push((name, size));
+                }
+            }
+        }
+    }
+    if sessions.is_empty() {
+        println!(
+            "{} {}",
+            ui::theme::paint_warning(&t, "\u{258C}"),
+            ui::theme::paint_dim(&t, "no session files found in .rem/")
+        );
+        return;
+    }
+    sessions.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("{}", ui::theme::paint_rail_header(&t, "SAVED SESSIONS"));
+    for (name, size) in &sessions {
+        let icon = file_icon(name);
+        println!(
+            "{} {} {} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            icon,
+            ui::theme::paint_bright(&t, name),
+            ui::theme::paint_dim(&t, &format!("({})", human_size(*size)))
+        );
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
 /// Imports a session from a file and merges into the current session (`/session import <path>`).
 pub(crate) fn handle_import_session(session: &mut ChatSession, path: &str) {
     let t = ui::theme::active();
-    let in_path = PathBuf::from(path);
+    let base = session
+        .ctx
+        .project_dir
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let in_path = match crate::types::resolve_safe_path(base, path) {
+        Some(p) => p,
+        None => {
+            println!(
+                "  {} path traversal blocked",
+                ui::theme::paint_error_label(&t, "\u{2717}")
+            );
+            return;
+        }
+    };
     if !in_path.exists() {
         println!(
             "{} file not found: {}",
@@ -870,6 +1272,46 @@ mod tests {
 
         handle_dir(&mut session, tmp.to_str().unwrap());
         assert_eq!(session.ctx.project_dir, Some(tmp.clone()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_export_session_blocks_path_traversal() {
+        let tmp = std::env::temp_dir().join(format!("rem-test-export-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
+
+        // Attempt to export with path traversal — should not crash
+        handle_export_session(&session, "../escape.gz");
+
+        // Verify the escape file was NOT created outside the project dir
+        let parent = tmp.parent().unwrap();
+        assert!(!parent.join("escape.gz").exists(), "path traversal should be blocked");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_import_session_blocks_path_traversal() {
+        let tmp = std::env::temp_dir().join(format!("rem-test-import-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
+
+        // Attempt to import with path traversal — should not crash
+        handle_import_session(&mut session, "../escape.gz");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_compact_undo_no_backup_does_not_panic() {
+        let tmp = std::env::temp_dir().join(format!("rem-test-compact-undo-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
+
+        // No backup exists — should print message but not panic
+        handle_compact_undo(&mut session);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

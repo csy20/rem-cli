@@ -310,7 +310,7 @@ impl ProviderBackend for OllamaBackend {
                                 .as_ref()
                                 .and_then(|f| f.arguments.as_ref().map(|a| a.to_string()))
                                 .unwrap_or_default();
-                            tool_calls.push((idx, String::new(), name, args));
+                            tool_calls.push((idx, format!("call_{}", idx), name, args));
                         }
                     }
                 }

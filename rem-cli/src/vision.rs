@@ -116,13 +116,17 @@ pub(crate) fn encode_image(path: &Path) -> Result<(String, String), String> {
 /// Returns the MIME type for common image extensions.
 fn detect_mime_type(path: &Path) -> String {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "png" => "image/png".to_string(),
-        "jpg" | "jpeg" => "image/jpeg".to_string(),
-        "gif" => "image/gif".to_string(),
-        "webp" => "image/webp".to_string(),
-        "svg" => "image/svg+xml".to_string(),
-        ext => format!("image/{}", ext),
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "tiff" | "tif" => "image/tiff",
+        _ => return "application/octet-stream".to_string(),
     }
+    .to_string()
 }
 
 /// Returns true if a file path looks like an image.

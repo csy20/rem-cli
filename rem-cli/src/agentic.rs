@@ -107,12 +107,14 @@ pub async fn run_lint(path: &str) -> ToolOutput {
     let target = LintTarget::detect(path);
 
     let (name, cmd, args): (&str, &str, Vec<&str>) = match target {
-        LintTarget::Rust => ("rustfmt", "rustfmt", vec!["--check", path]),
+        LintTarget::Rust => ("clippy", "cargo", vec!["clippy", "--quiet", "--", "-D", "warnings"]),
         LintTarget::Python => ("ruff", "ruff", vec!["check", path]),
         LintTarget::Go => ("gofmt", "gofmt", vec!["-d", path]),
-        LintTarget::JavaScript | LintTarget::TypeScript => {
-            ("eslint", "npx", vec!["eslint", path, "--format", "compact"])
-        }
+        LintTarget::JavaScript | LintTarget::TypeScript => (
+            "eslint",
+            "npx",
+            vec!["--no-install", "eslint", path, "--format", "compact"],
+        ),
         LintTarget::Css => ("stylelint", "npx", vec!["stylelint", path]),
         LintTarget::Html => ("htmlhint", "npx", vec!["--no-install", "htmlhint", path]),
         LintTarget::Unknown => {
@@ -139,7 +141,7 @@ pub async fn run_test(path: &str) -> ToolOutput {
     let target = LintTarget::detect(path);
 
     let (cmd, args): (&str, Vec<&str>) = match target {
-        LintTarget::Rust => ("cargo", vec!["test", "--quiet"]),
+        LintTarget::Rust => ("cargo", vec!["test", "--quiet", "--lib"]),
         LintTarget::Python => ("python3", vec!["-m", "pytest", path, "-q"]),
         LintTarget::Go => ("go", vec!["test", "./..."]),
         LintTarget::JavaScript | LintTarget::TypeScript => ("npx", vec!["jest", path, "--no-coverage"]),

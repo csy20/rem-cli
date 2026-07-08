@@ -19,12 +19,6 @@ static RE_CSS_PROP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^(\s*)([a-zA-Z-]+)(\s*:)").expect("invalid regex literal"));
 static RE_CSS_VAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(:\s*)([^;}{]+)").expect("invalid regex literal"));
 static RE_CSS_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(/\*.*?\*/)").expect("invalid regex literal"));
-static RE_JS_KW: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(const|let|var|function|return|if|else|for|while|class|import|export|from|async|await|try|catch|new|this|document|console|window)\b").expect("invalid regex literal")
-});
-static RE_JS_STR: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"('[^']*'|"[^"]*"|`[^`]*`)"#).expect("invalid regex literal"));
-static RE_JS_COMMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(//.*)").expect("invalid regex literal"));
 
 /// Applies ANSI syntax highlighting to code based on language hint.
 pub fn highlight_code(content: &str, lang_hint: &str) -> String {
@@ -35,6 +29,8 @@ pub fn highlight_code(content: &str, lang_hint: &str) -> String {
         highlight_css(content)
     } else if lang.contains("js") || lang.contains("javascript") || lang.contains("ts") || lang.contains("typescript") {
         highlight_js(content)
+    } else if lang.contains("rust") || lang.contains("rs") {
+        highlight_rust(content)
     } else {
         highlight_generic(content)
     }
@@ -85,21 +81,42 @@ fn highlight_css(code: &str) -> String {
 
 fn highlight_js(code: &str) -> String {
     let t = ui::theme::active();
-    let mut out = code.to_string();
-    out = RE_JS_COMMENT
-        .replace_all(&out, |caps: &regex::Captures| ui::theme::paint_dim(&t, &caps[1]))
-        .to_string();
-    out = RE_JS_KW
-        .replace_all(&out, |caps: &regex::Captures| {
-            ui::theme::paint(&t, "accent_info", &caps[1], true)
+    static RE_JS_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(//[^\n]*)|(\b(?:const|let|var|function|return|if|else|for|while|class|import|export|from|async|await|try|catch|new|this|document|console|window)\b)|('[^']*'|"[^"]*"|`[^`]*`)"#).expect("invalid js all regex")
+    });
+    RE_JS_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
         })
-        .to_string();
-    out = RE_JS_STR
-        .replace_all(&out, |caps: &regex::Captures| {
-            ui::theme::paint_success_label(&t, &caps[1])
+        .to_string()
+}
+
+fn highlight_rust(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_RUST_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(//[^\n]*)|(\b(?:fn|let|mut|pub|use|mod|struct|enum|trait|impl|match|if|else|for|while|loop|return|async|await|ref|where|type|const|static|unsafe|dyn|self|super|crate|true|false|Some|None|Ok|Err|Result|Option|Box|String|Vec|HashMap)\b)|("[^"]*"|'[^']*')"#).expect("invalid rust all regex")
+    });
+    RE_RUST_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
         })
-        .to_string();
-    out
+        .to_string()
 }
 
 fn highlight_generic(code: &str) -> String {

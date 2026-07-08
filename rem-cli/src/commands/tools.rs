@@ -81,12 +81,23 @@ pub(crate) async fn handle_explain(client: &Provider, session: &mut ChatSession,
 /// Generates tests for a file (`/test` command).
 pub(crate) async fn handle_test(client: &Provider, session: &mut ChatSession, path: &str) {
     let t = ui::theme::active();
-    let file_path = Path::new(path.trim());
+    let base = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let file_path = match crate::types::resolve_safe_path(&base, path.trim()) {
+        Some(p) => p,
+        None => {
+            println!("{} invalid path: {}", ui::theme::paint_warning(&t, "│"), path);
+            return;
+        }
+    };
     if !file_path.exists() {
         println!("{} file not found: {}", ui::theme::paint_warning(&t, "│"), path);
         return;
     }
-    let content = match fs::read_to_string(file_path) {
+    let content = match fs::read_to_string(&file_path) {
         Ok(c) => c,
         Err(e) => {
             println!("{} cannot read file: {}", ui::theme::paint_error_label(&t, "│"), e);
@@ -131,12 +142,23 @@ pub(crate) async fn handle_test(client: &Provider, session: &mut ChatSession, pa
 /// Suggests refactoring for a file (`/refactor` command).
 pub(crate) async fn handle_refactor(client: &Provider, session: &mut ChatSession, path: &str) {
     let t = ui::theme::active();
-    let file_path = Path::new(path.trim());
+    let base = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let file_path = match crate::types::resolve_safe_path(&base, path.trim()) {
+        Some(p) => p,
+        None => {
+            println!("{} invalid path: {}", ui::theme::paint_warning(&t, "│"), path);
+            return;
+        }
+    };
     if !file_path.exists() {
         println!("{} file not found: {}", ui::theme::paint_warning(&t, "│"), path);
         return;
     }
-    let content = match fs::read_to_string(file_path) {
+    let content = match fs::read_to_string(&file_path) {
         Ok(c) => c,
         Err(e) => {
             println!("{} cannot read file: {}", ui::theme::paint_error_label(&t, "│"), e);

@@ -25,8 +25,8 @@ pub(crate) fn build_inverted_index(
         for w in tokenize(&chunk.content_lower) {
             if seen_in_chunk.insert(w.clone()) {
                 *doc_freqs.entry(w.clone()).or_insert(0) += 1;
+                inverted.entry(w).or_default().push(i);
             }
-            inverted.entry(w).or_default().push(i);
         }
     }
     inverted
@@ -68,6 +68,9 @@ pub fn retrieve_relevant_chunks<'a>(
 
     // BM25 scoring only on candidate chunks (those containing query terms in content)
     for &idx in &candidate_indices {
+        if idx >= index.chunks.len() {
+            continue;
+        }
         let c = &index.chunks[idx];
         let mut score = 0.0f64;
         let dl = c.content.len() as f64;

@@ -5,22 +5,25 @@
 use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use anyhow::Result;
 
 use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
 use crate::commands::{
-    auto_write_files, handle_apply, handle_clear, handle_compact, handle_config, handle_config_set, handle_copy,
-    handle_diff, handle_dir, handle_explain, handle_export_session, handle_find, handle_goal, handle_import_session,
-    handle_init, handle_lint_with_fallback, handle_list_files, handle_memory, handle_memory_set, handle_mode,
-    handle_model, handle_plan, handle_provider, handle_reasoning, handle_refactor, handle_reset, handle_resume_session,
-    handle_review, handle_save_session, handle_search, handle_test, handle_theme, handle_tokens, handle_undo,
-    handle_vision, handle_watch, handle_why, handle_write, print_chat_help, print_command_help, print_last_files,
-    prompt_for_path,
+    auto_write_files, handle_apply, handle_clear, handle_commit, handle_compact, handle_compact_dry_run,
+    handle_compact_undo, handle_config, handle_config_set, handle_copy, handle_diff, handle_dir, handle_explain,
+    handle_export_session, handle_find, handle_goal, handle_import_session, handle_init, handle_lint_with_fallback,
+    handle_list_files, handle_list_models, handle_list_sessions, handle_memory, handle_memory_set, handle_mode,
+    handle_model, handle_plan, handle_provider, handle_pull_model, handle_reasoning, handle_refactor, handle_reload,
+    handle_reset, handle_resume_session, handle_review, handle_save_session, handle_search, handle_summary,
+    handle_test, handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why, handle_write,
+    print_chat_help, print_command_help, print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
+use crate::highlight::{detect_language_from_content, highlight_code};
 use crate::intent::{classify_intent, has_file_path, intent_instruction, TaskIntent};
 use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
@@ -60,6 +63,20 @@ fn initialize_session(client: &Provider, cfg: &mut AppConfig) -> Result<ChatSess
         _ => "CHAT",
     };
     crate::session_io::print_welcome_with_mode(client, mode_label);
+    if let Some(ref cfg_dir) = crate::config::config_dir() {
+        let cfg_path = cfg_dir.join("config.toml");
+        let exists = if cfg_path.exists() { "" } else { " (not yet created)" };
+        ui::theme::println(&format!(
+            "  {} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint(
+                &t,
+                "text_faint",
+                &format!("config \u{2192} {}{}", cfg_path.display(), exists),
+                false
+            )
+        ));
+    }
     if let Some(ref wd) = workspace {
         ui::theme::println(&format!(
             "  {} {} {}",
@@ -138,12 +155,18 @@ fn needs_continuation(line: &str) -> bool {
 fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme::Theme) -> Option<String> {
     let mut error_count = 0u8;
     let mut lines: Vec<String> = Vec::new();
+    let mut combined = String::new();
 
     loop {
         let current_prompt = if lines.is_empty() {
             prompt.to_string()
         } else {
-            format!("\x01{}\x02...> \x01\x1b[0m\x02", ui::theme::paint_dim(t, "\u{2502}"))
+            let line_count = lines.len() + 1;
+            format!(
+                "\x01{}\x02│...{}> \x01\x1b[0m\x02",
+                ui::theme::paint_dim(t, "\u{2502}"),
+                ui::theme::paint_dim(t, &format!("{}", line_count)),
+            )
         };
 
         let line = session.readline(&current_prompt);
@@ -156,14 +179,19 @@ fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme
                     return Some(trimmed);
                 }
 
+                if !lines.is_empty() {
+                    combined.push('\n');
+                }
+                combined.push_str(&trimmed);
                 lines.push(trimmed);
 
                 // Check if we need more input
-                let combined = lines.join("\n");
                 if needs_continuation(&combined) {
                     continue;
                 }
 
+                // Save multi-line assembled input to readline history
+                session.add_history(&combined);
                 return Some(combined);
             }
             Err(e) => {
@@ -171,7 +199,6 @@ fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme
                     let count = crate::CTRL_C_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     if count >= 2 || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
                         println!("  {} Ctrl+C pressed twice -- bye!", ui::theme::paint_dim(t, "!"));
-                        session.feedback.flush();
                         session.save_history();
                         session.auto_save_session();
                         return None;
@@ -220,7 +247,6 @@ async fn dispatch_slash_command(
     // Handle exit/quit specially
     if name == "exit" || name == "quit" {
         println!("  {}", ui::theme::paint_dim(t, "bye!"));
-        session.feedback.flush();
         session.save_history();
         session.auto_save_session();
         return true;
@@ -341,14 +367,18 @@ async fn dispatch_slash_command(
         }
         "/session" => {
             let sub = args.trim();
-            if let Some(export_path) = sub.strip_prefix("export ") {
+            if sub == "compact-undo" {
+                handle_compact_undo(session);
+            } else if sub == "list" {
+                handle_list_sessions(session);
+            } else if let Some(export_path) = sub.strip_prefix("export ") {
                 handle_export_session(session, export_path.trim());
             } else if let Some(import_path) = sub.strip_prefix("import ") {
                 handle_import_session(session, import_path.trim());
             } else {
                 let t = ui::theme::active();
                 println!(
-                    "{} usage: /session export <path> | /session import <path>",
+                    "{} usage: /session compact-undo | list | export <path> | import <path>",
                     ui::theme::paint_warning(&t, "\u{258C}")
                 );
             }
@@ -410,12 +440,36 @@ async fn dispatch_slash_command(
             handle_compact(client, session).await;
             false
         }
+        "/compact-dry-run" => {
+            handle_compact_dry_run(session);
+            false
+        }
         "/goal" => {
             handle_goal(client, session, args).await;
             false
         }
+        "/reload" => {
+            handle_reload(session, cfg);
+            false
+        }
         "/vision" => {
             handle_vision(client, session, args).await;
+            false
+        }
+        "/models" => {
+            handle_list_models(client).await;
+            false
+        }
+        "/pull" => {
+            handle_pull_model(client, args).await;
+            false
+        }
+        "/commit" => {
+            handle_commit(session, args).await;
+            false
+        }
+        "/summary" => {
+            handle_summary(client, session, if args.is_empty() { None } else { Some(args) }).await;
             false
         }
         _ => false,
@@ -501,7 +555,11 @@ fn build_last_code_context(session: &ChatSession, trimmed: &str) -> String {
     ];
     let lower_in = trimmed.to_lowercase();
     let words: Vec<&str> = lower_in.split_whitespace().collect();
-    let has_trigger = mod_triggers.iter().any(|t| words.contains(t));
+    let has_trigger = mod_triggers.iter().any(|t| {
+        words
+            .iter()
+            .any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == *t)
+    });
     let has_qualifier = words.contains(&"also") || words.contains(&"more") || lower_in.contains("and then");
     if !has_trigger && !has_qualifier {
         return String::new();
@@ -611,7 +669,6 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         let line = match read_user_input(&mut session, &prompt, &t) {
             Some(l) => l,
             None => {
-                session.feedback.flush();
                 crate::REPL_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
                 return Ok(());
             }
@@ -767,7 +824,6 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             break;
         }
     }
-    session.feedback.flush();
     crate::REPL_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
@@ -838,20 +894,74 @@ fn word_wrap(text: &str, max_width: usize) -> String {
     result
 }
 
-/// Detects terminal width via COLUMNS env var, falling back to 80.
+fn detect_terminal_width() -> usize {
+    if let Ok(cols) = std::env::var("COLUMNS") {
+        if let Ok(w) = cols.parse::<usize>() {
+            return w.saturating_sub(4);
+        }
+    }
+    if let Ok(output) = std::process::Command::new("sh")
+        .args(["-c", "tput cols 2>/dev/null || echo 80"])
+        .output()
+    {
+        if let Ok(cols) = String::from_utf8_lossy(&output.stdout).trim().parse::<usize>() {
+            if cols > 0 {
+                return cols.saturating_sub(4);
+            }
+        }
+    }
+    76usize
+}
+
+static TERMINAL_WIDTH: LazyLock<usize> = LazyLock::new(detect_terminal_width);
+
 fn terminal_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(80usize)
-        .saturating_sub(4) // leave room for rail prefix + margin
+    *TERMINAL_WIDTH
 }
 
 /// Prints plain text output line by line, using pager for long output.
+/// Auto-detects code blocks and applies syntax highlighting.
 fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
     let rail_chr = || ui::theme::paint(t, "accent", "\u{258C}", true);
     let max_width = terminal_width();
-    let wrapped = word_wrap(cleaned, max_width);
+    // Check if output looks like code (multi-line, starts with common keywords)
+    let highlighted = if cleaned.contains("```") && cleaned.lines().count() > 3 {
+        // Contains a code fence, apply language detection to fenced blocks
+        let mut result = String::new();
+        let mut in_code = false;
+        let mut lang = "";
+        for line in cleaned.lines() {
+            if let Some(stripped) = line.trim().strip_prefix("```") {
+                if in_code {
+                    in_code = false;
+                } else {
+                    in_code = true;
+                    lang = stripped.trim();
+                }
+                result.push_str(line);
+                result.push('\n');
+                continue;
+            }
+            if in_code && !lang.is_empty() {
+                result.push_str(&highlight_code(line, lang));
+                result.push('\n');
+            } else {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+        result
+    } else if cleaned.lines().count() > 2 {
+        let lang_hint = detect_language_from_content(cleaned);
+        if !lang_hint.is_empty() {
+            highlight_code(cleaned, lang_hint)
+        } else {
+            cleaned.to_string()
+        }
+    } else {
+        cleaned.to_string()
+    };
+    let wrapped = word_wrap(&highlighted, max_width);
     let line_count = wrapped.lines().count();
     if line_count > 50 {
         let mut buf = String::new();

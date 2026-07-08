@@ -37,6 +37,13 @@ impl Completer for RemHelper {
             return Ok((0, candidates));
         }
 
+        // Tab-complete file paths after /session export and /session import
+        for prefix_cmd in &["/session export ", "/session import "] {
+            if let Some(tail) = line_before.strip_prefix(*prefix_cmd) {
+                return Ok(complete_path(prefix_cmd.len(), tail));
+            }
+        }
+
         Ok((0, vec![]))
     }
 }

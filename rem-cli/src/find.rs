@@ -2,7 +2,7 @@
 //! Walks the project tree with `walkdir`, reads each file with a size cap,
 //! and returns every line matching the query. Skips hidden/build/lock dirs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -81,6 +81,7 @@ pub const SKIP_SUFFIXES: &[&str] = &[
 const REGEX_CACHE_MAX_SIZE: usize = 64;
 
 static REGEX_CACHE: LazyLock<Mutex<HashMap<String, regex::Regex>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static REGEX_CACHE_ORDER: LazyLock<Mutex<VecDeque<String>>> = LazyLock::new(|| Mutex::new(VecDeque::new()));
 
 /// Checks whether a directory name should be skipped during traversal.
 pub fn should_skip_dir(name: &str) -> bool {
@@ -138,15 +139,19 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
             format!("(?i){}", query)
         };
         let mut cache = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut order = REGEX_CACHE_ORDER.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(re) = cache.get(&re_query) {
             Some(re.clone())
         } else {
             if cache.len() >= REGEX_CACHE_MAX_SIZE {
-                cache.clear();
+                if let Some(oldest) = order.pop_front() {
+                    cache.remove(&oldest);
+                }
             }
             match regex::Regex::new(&re_query) {
                 Ok(re) => {
-                    cache.insert(re_query, re.clone());
+                    cache.insert(re_query.clone(), re.clone());
+                    order.push_back(re_query);
                     Some(re)
                 }
                 Err(e) => {
@@ -294,7 +299,22 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn byte_to_column(prefix: &[u8]) -> usize {
-    prefix.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+    let mut count = 0;
+    let mut i = 0;
+    while i < prefix.len() {
+        let b = prefix[i];
+        count += 1;
+        i += if b < 0x80 {
+            1
+        } else if b < 0xE0 {
+            2
+        } else if b < 0xF0 {
+            3
+        } else {
+            4
+        };
+    }
+    count
 }
 
 #[cfg(test)]

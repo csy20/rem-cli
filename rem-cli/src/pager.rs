@@ -48,9 +48,8 @@ pub fn maybe_page(text: &str) {
 }
 
 fn pager_args(cmd: &str) -> Vec<&str> {
-    // Check if the binary name (without path) is "less"
     let binary_name = cmd.rsplit('/').next().unwrap_or(cmd);
-    if binary_name == "less" || binary_name == "busybox" {
+    if binary_name == "less" || binary_name == "busybox" || cmd.contains("busybox") {
         vec!["-R", "-F", "-X"]
     } else {
         vec![]

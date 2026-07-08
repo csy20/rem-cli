@@ -17,7 +17,6 @@ mod commands;
 mod completion;
 mod config;
 mod constants;
-mod feedback;
 mod find;
 mod highlight;
 mod indexer;
@@ -190,8 +189,21 @@ async fn main() -> Result<()> {
         None => {
             let is_pipe = !std::io::stdin().is_terminal();
             if is_pipe {
-                let mut stdin_data = String::new();
-                if std::io::stdin().read_to_string(&mut stdin_data).is_ok() {
+                let max_pipe = crate::constants::PIPE_INPUT_MAX_BYTES;
+                let mut stdin_data = String::with_capacity(max_pipe.min(64_000));
+                if std::io::stdin()
+                    .take(max_pipe as u64)
+                    .read_to_string(&mut stdin_data)
+                    .is_ok()
+                {
+                    if stdin_data.len() >= max_pipe {
+                        let t = ui::theme::active();
+                        eprintln!(
+                            "{} input truncated at {} (use files for larger input)",
+                            ui::theme::paint_warning(&t, "warning:"),
+                            crate::text_util::human_size(max_pipe as u64)
+                        );
+                    }
                     let trimmed = stdin_data.trim();
                     if !trimmed.is_empty() {
                         return run_pipe(&client, &cfg, trimmed, verbose).await;

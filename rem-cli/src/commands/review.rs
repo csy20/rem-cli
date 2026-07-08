@@ -43,7 +43,10 @@ pub(crate) fn handle_diff(session: &ChatSession) {
         let abs_path = if rel_path.is_relative() {
             base_dir.join(&rel_path)
         } else {
-            rel_path
+            match crate::types::resolve_safe_path(&base_dir, &f.path) {
+                Some(p) => p,
+                None => continue,
+            }
         };
 
         let icon = file_icon(&f.path);

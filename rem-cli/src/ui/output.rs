@@ -5,6 +5,7 @@
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 use tokio::task::JoinHandle;
 
@@ -12,6 +13,13 @@ use crate::blocklist::{is_command_blocked, sanitize_commands};
 use crate::provider::Provider;
 use crate::types::{file_icon, ModelReply};
 use crate::ui::theme;
+
+static COLUMNS_WIDTH: LazyLock<usize> = LazyLock::new(|| {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(80usize)
+});
 
 /// An animated terminal spinner shown during long-running operations.
 pub struct SpinnerGuard {
@@ -48,17 +56,12 @@ impl SpinnerGuard {
         }
     }
 
-    /// Stops the spinner and clears the line.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
-        let width = std::env::var("COLUMNS")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(80usize);
-        eprint!("\r{}\r", " ".repeat(width));
+        eprint!("\r{}\r", " ".repeat(*COLUMNS_WIDTH));
         let _ = io::stderr().flush();
     }
 }

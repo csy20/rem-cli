@@ -14,9 +14,10 @@ use anyhow::Result;
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::warn;
 
-/// Creates a `RecommendedWatcher` with up to 3 retry attempts and exponential backoff.
-/// Logs errors and returns `None` if all attempts fail.
-fn create_watcher_with_retry(tx: &mpsc::Sender<()>, event_tx: &mpsc::Sender<Vec<Event>>) -> Option<RecommendedWatcher> {
+fn create_watcher_with_retry(
+    fail_tx: &mpsc::Sender<()>,
+    event_tx: &mpsc::Sender<Vec<Event>>,
+) -> Option<RecommendedWatcher> {
     for attempt in 1..=3 {
         let tx_clone = event_tx.clone();
         match RecommendedWatcher::new(
@@ -37,7 +38,7 @@ fn create_watcher_with_retry(tx: &mpsc::Sender<()>, event_tx: &mpsc::Sender<Vec<
             }
         }
     }
-    let _ = tx; // suppress unused warning — sender stays alive for the caller
+    let _ = fail_tx.send(());
     None
 }
 

@@ -5,6 +5,7 @@
 //! The [`IntentClassifier`] trait allows different classification strategies
 //! to be swapped in. The default [`HeuristicClassifier`] uses keyword matching.
 
+use regex::RegexSet;
 use std::sync::LazyLock;
 
 /// Classified intent of a user's input message.
@@ -22,146 +23,197 @@ pub trait IntentClassifier: Send + Sync {
     fn classify(&self, input: &str) -> TaskIntent;
 }
 
-static VERB_PHRASES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    vec![
-        "create a ",
-        "create an ",
-        "create the ",
-        "create me a ",
-        "create my ",
-        "build a ",
-        "build an ",
-        "build the ",
-        "build me a ",
-        "build my ",
-        "make a ",
-        "make an ",
-        "make the ",
-        "make me a ",
-        "make my ",
-        "generate a ",
-        "generate an ",
-        "generate the ",
-        "generate me a ",
-        "scaffold a ",
-        "scaffold an ",
-        "scaffold the ",
-        "code a ",
-        "code an ",
-        "code the ",
-        "code me a ",
-        "spin up a ",
-        "spin up an ",
-        "spin up the ",
-    ]
+static VERB_PHRASES: &[&str] = &[
+    "create a ",
+    "create an ",
+    "create the ",
+    "create me a ",
+    "create my ",
+    "build a ",
+    "build an ",
+    "build the ",
+    "build me a ",
+    "build my ",
+    "make a ",
+    "make an ",
+    "make the ",
+    "make me a ",
+    "make my ",
+    "generate a ",
+    "generate an ",
+    "generate the ",
+    "generate me a ",
+    "scaffold a ",
+    "scaffold an ",
+    "scaffold the ",
+    "code a ",
+    "code an ",
+    "code the ",
+    "code me a ",
+    "spin up a ",
+    "spin up an ",
+    "spin up the ",
+];
+
+static WRITE_OBJECTS: &[&str] = &[
+    "write a file",
+    "write a component",
+    "write a function",
+    "write a class",
+    "write a module",
+    "write a script",
+    "write a test",
+    "write a handler",
+    "write a service",
+    "write a hook",
+    "write a config",
+    "write a schema",
+    "write a migration",
+    "write a seed",
+    "write a cli",
+    "write a tool",
+    "write an app",
+    "write an api",
+    "write an endpoint",
+];
+
+static SUFFIX_PHRASES: &[&str] = &[
+    "a file",
+    "an app",
+    "a component",
+    "a project",
+    "a website",
+    "a script",
+    "a page",
+    "a module",
+    "a class",
+    "a function",
+    "a service",
+    "a handler",
+    "a hook",
+    "a config",
+    "a schema",
+    "a migration",
+    "a seed",
+    "a test",
+    "a cli",
+    "a tool",
+    "a layout",
+    "a route",
+    "an endpoint",
+    "an api",
+];
+
+static VERB_ROOTS: &[&str] = &[
+    "create", "build", "generate", "scaffold", "write", "code", "make", "spin up",
+];
+
+// Pre-compiled RegexSet for efficient concurrent matching
+static QUESTION_RE: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new([
+        "^how to",
+        "^how do i",
+        "^how do you",
+        "^how can i",
+        "^how would you",
+        "^how should i",
+        "^what is the best way to",
+        "^what's the best way to",
+        "^explain how to",
+        "^tell me how to",
+        "^describe how to",
+        "^show me how to",
+        "^can you explain how to",
+        "^can you show me how to",
+        "^why should i",
+        "^when should i",
+        "^where should i",
+        "^what is",
+        "^what are",
+        "^what does",
+        "^how does",
+        "^why is",
+        "^why are",
+        "^why does",
+        "^tell me about",
+        "^describe",
+        "^define",
+    ])
+    .expect("invalid question regex")
 });
 
-static WRITE_OBJECTS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    vec![
-        "write a file",
-        "write a component",
-        "write a function",
-        "write a class",
-        "write a module",
-        "write a script",
-        "write a test",
-        "write a handler",
-        "write a service",
-        "write a hook",
-        "write a config",
-        "write a schema",
-        "write a migration",
-        "write a seed",
-        "write a cli",
-        "write a tool",
-        "write an app",
-        "write an api",
-        "write an endpoint",
-    ]
+// Web intent patterns
+static WEB_RE: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new([
+        "search the web",
+        "search online",
+        "latest version",
+        "latest release",
+        "npm package",
+        "pip install",
+        "api docs",
+        "api documentation",
+        "stripe api",
+        "github repo",
+        "browse http",
+        "stack overflow",
+        "look up the",
+        "on the internet",
+    ])
+    .expect("invalid web regex")
 });
 
-static SUFFIX_PHRASES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    vec![
-        "a file",
-        "an app",
-        "a component",
-        "a project",
-        "a website",
-        "a script",
-        "a page",
-        "a module",
-        "a class",
-        "a function",
-        "a service",
-        "a handler",
-        "a hook",
-        "a config",
-        "a schema",
-        "a migration",
-        "a seed",
-        "a test",
-        "a cli",
-        "a tool",
-        "a layout",
-        "a route",
-        "an endpoint",
-        "an api",
-    ]
-});
-
-static VERB_ROOTS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    vec![
-        "create", "build", "generate", "scaffold", "write", "code", "make", "spin up",
-    ]
-});
-
-static QUESTION_PREFIXES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    vec![
-        "how to",
-        "how do i",
-        "how do you",
-        "how can i",
-        "how would you",
+// Planning intent patterns
+static PLANNING_RE: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new([
+        "suggest an approach",
         "how should i",
-        "what is the best way to",
-        "what's the best way to",
-        "explain how to",
-        "tell me how to",
-        "describe how to",
-        "show me how to",
-        "can you explain how to",
-        "can you show me how to",
-        "why should i",
-        "when should i",
-        "where should i",
-        "what is",
-        "what are",
-        "what does",
-        "how does",
-        "why is",
-        "why are",
-        "why does",
-        "tell me about",
-        "describe",
-        "define",
-    ]
+        "what's the best way",
+        "what is the best way",
+        "suggest a strategy",
+        "design a system",
+        "what are the trade",
+        "should i use",
+        "would you recommend",
+        "is it better to",
+    ])
+    .expect("invalid planning regex")
 });
 
-static PHRASE_COMBINATIONS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut out = Vec::new();
-    for verb in VERB_ROOTS.iter() {
-        for suffix in SUFFIX_PHRASES.iter() {
-            out.push(format!("{} {}", verb, suffix));
-        }
-    }
-    out
+// Fix/refactor intent patterns (word boundaries ensure prefix-like matching)
+static FIX_RE: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new([
+        "^fix the ",
+        "^fix my ",
+        "^fix this ",
+        "^refactor the ",
+        "^refactor my ",
+        "^rename the ",
+        "^delete the ",
+        "^remove the ",
+        "^optimize the ",
+        "^update the ",
+        "^update my ",
+    ])
+    .expect("invalid fix regex")
 });
 
-static VERB_PHRASES_SPACE: LazyLock<Vec<String>> =
-    LazyLock::new(|| VERB_PHRASES.iter().map(|p| format!(" {}", p)).collect());
+// Verb phrase space-prefixed patterns (for contains matching)
+static VERB_SPACE_RE: LazyLock<RegexSet> = LazyLock::new(|| {
+    RegexSet::new(
+        VERB_PHRASES
+            .iter()
+            .map(|p| format!(" {}", p.trim_end()))
+            .collect::<Vec<_>>(),
+    )
+    .expect("invalid verb-space regex")
+});
 
-static PHRASE_COMBINATIONS_SPACE: LazyLock<Vec<String>> =
-    LazyLock::new(|| PHRASE_COMBINATIONS.iter().map(|p| format!(" {}", p)).collect());
+static WRITE_OBJECTS_RE: LazyLock<RegexSet> =
+    LazyLock::new(|| RegexSet::new(WRITE_OBJECTS).expect("invalid write-objects regex"));
+
+static VERB_PHRASES_RE: LazyLock<RegexSet> =
+    LazyLock::new(|| RegexSet::new(VERB_PHRASES).expect("invalid verb-phrases regex"));
 
 /// Heuristic keyword-based intent classifier.
 pub struct HeuristicClassifier;
@@ -184,51 +236,20 @@ pub fn classify_intent(input: &str) -> TaskIntent {
 // ── Heuristic implementation ────────────────────────────────────────────────
 
 fn detect_web_intent(lower: &str) -> bool {
-    lower.contains("search the web")
-        || lower.contains("search online")
-        || lower.contains("latest version")
-        || lower.contains("latest release")
-        || lower.contains("npm package")
-        || lower.contains("pip install")
-        || lower.contains("api docs")
-        || lower.contains("api documentation")
-        || lower.contains("stripe api")
-        || lower.contains("github repo")
-        || lower.contains("browse http")
-        || lower.contains("stack overflow")
-        || lower.contains("look up the")
-        || lower.contains("on the internet")
+    WEB_RE.is_match(lower)
 }
 
 fn detect_planning_intent(lower: &str) -> bool {
-    lower.contains("suggest an approach")
-        || lower.contains("how should i")
-        || lower.contains("what's the best way")
-        || lower.contains("what is the best way")
-        || lower.contains("suggest a strategy")
-        || lower.contains("design a system")
-        || lower.contains("what are the trade")
-        || lower.contains("should i use")
-        || lower.contains("would you recommend")
-        || lower.contains("is it better to")
-        || (lower.contains("how to") && lower.contains("implement"))
-        || (lower.contains("how to") && lower.contains("architect"))
-        || (lower.contains("how to") && lower.contains("design"))
-        || (lower.contains("how to") && lower.contains("structure"))
+    PLANNING_RE.is_match(lower)
+        || (lower.contains("how to")
+            && (lower.contains("implement")
+                || lower.contains("architect")
+                || lower.contains("design")
+                || lower.contains("structure")))
 }
 
 fn detect_fix_intent(lower: &str) -> bool {
-    lower.starts_with("fix the ")
-        || lower.starts_with("fix my ")
-        || lower.starts_with("fix this ")
-        || lower.starts_with("refactor the ")
-        || lower.starts_with("refactor my ")
-        || lower.starts_with("rename the ")
-        || lower.starts_with("delete the ")
-        || lower.starts_with("remove the ")
-        || lower.starts_with("optimize the ")
-        || lower.starts_with("update the ")
-        || lower.starts_with("update my ")
+    FIX_RE.is_match(lower)
 }
 
 fn classify_intent_heuristic(input: &str) -> TaskIntent {
@@ -266,23 +287,23 @@ pub fn intent_instruction(intent: &TaskIntent) -> &'static str {
 }
 
 fn has_creation_intent_lower(lower: &str) -> bool {
-    if (VERB_PHRASES.iter().any(|v| lower.starts_with(v)) || VERB_PHRASES_SPACE.iter().any(|v| lower.contains(v)))
-        && !has_question_prefix_lower(lower)
-    {
-        return true;
-    }
-
-    if WRITE_OBJECTS.iter().any(|w| lower.contains(w)) && !has_question_prefix_lower(lower) {
-        return true;
-    }
-
-    for (combined, combined_space) in PHRASE_COMBINATIONS.iter().zip(PHRASE_COMBINATIONS_SPACE.iter()) {
-        if (lower.starts_with(combined) || lower.contains(combined_space)) && !is_question_about_lower(lower, combined)
-        {
+    if !has_question_prefix_lower(lower) {
+        // Fast path: check starts_with patterns via RegexSet
+        if VERB_PHRASES_RE.is_match(lower) || VERB_SPACE_RE.is_match(lower) {
+            return true;
+        }
+        // Check write objects
+        if WRITE_OBJECTS_RE.is_match(lower) {
+            return true;
+        }
+        // Check verb+suffix combinations: avoid O(160) pre-generated strings,
+        // instead check if input has any verb root AND any suffix phrase
+        let has_verb = VERB_ROOTS.iter().any(|v| lower.contains(v));
+        let has_suffix = SUFFIX_PHRASES.iter().any(|s| lower.contains(s));
+        if has_verb && has_suffix {
             return true;
         }
     }
-
     false
 }
 
@@ -292,13 +313,10 @@ pub fn has_creation_intent(input: &str) -> bool {
 }
 
 fn has_question_prefix_lower(lower: &str) -> bool {
-    QUESTION_PREFIXES.iter().any(|p| lower.starts_with(p))
+    QUESTION_RE.is_match(lower)
 }
 
-fn is_question_about_lower(lower: &str, action_phrase: &str) -> bool {
-    if !lower.contains(action_phrase) {
-        return false;
-    }
+fn _is_question_about_lower(lower: &str, _action_phrase: &str) -> bool {
     has_question_prefix_lower(lower)
 }
 

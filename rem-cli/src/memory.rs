@@ -91,6 +91,7 @@ impl ProjectMemory {
         let mut files_count = 0usize;
         let mut dirs_count = 0usize;
         for entry in WalkDir::new(project_dir)
+            .follow_links(false)
             .max_depth(4)
             .into_iter()
             .filter_entry(|e| {

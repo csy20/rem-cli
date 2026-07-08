@@ -4,6 +4,7 @@
 //! O(1) name → handler lookup, replacing the previous if-else chain.
 
 pub mod files;
+pub mod git;
 pub mod goal;
 pub mod help;
 pub mod repl;
@@ -436,6 +437,14 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/compact-dry-run",
+            CommandInfo {
+                description: "Preview compaction without calling the LLM",
+                usage: "/compact-dry-run",
+                long_description: "Shows what /compact would summarize: current turn count and first lines of each turn. Does not call the LLM or modify history.",
+            },
+        ),
+        (
             "/session",
             CommandInfo {
                 description: "Export or import a session",
@@ -515,22 +524,63 @@ pub(crate) fn registry() -> CommandRegistry {
                 long_description: "",
             },
         ),
+        (
+            "/reload",
+            CommandInfo {
+                description: "Reload config and project settings from disk",
+                usage: "/reload",
+                long_description: "Clears the config cache and re-reads ~/.config/rem-cli/config.toml and .remcli.toml.\nUseful after editing config files without restarting the REPL.",
+            },
+        ),
+        (
+            "/models",
+            CommandInfo {
+                description: "List available models from the active provider",
+                usage: "/models",
+                long_description: "Fetches and displays all available models from the current provider (e.g. Ollama, OpenAI).\nUse /model <name> to switch to a different model.",
+            },
+        ),
+        (
+            "/pull",
+            CommandInfo {
+                description: "Pull a model from Ollama",
+                usage: "/pull <model-name>",
+                long_description: "Downloads a model from Ollama's registry. Only works with the Ollama provider.\nExample: /pull llama3.2:3b",
+            },
+        ),
+        (
+            "/commit",
+            CommandInfo {
+                description: "Stage all changes and create a git commit",
+                usage: "/commit [message]",
+                long_description: "Runs git add -A and git commit in the project directory.\nIf no message is provided, prompts interactively.\nExample: /commit \"fix: resolve type error in parser\"",
+            },
+        ),
+        (
+            "/summary",
+            CommandInfo {
+                description: "Generate and display a session summary",
+                usage: "/summary [save-path]",
+                long_description: "Uses the LLM to summarize the current conversation covering key decisions,\ncode generated, bugs fixed, and next actions.\nOptionally save to a file: /summary output.txt",
+            },
+        ),
     ])
 }
 
 pub(crate) use crate::vision::handle_vision;
 pub(crate) use files::{auto_write_files, handle_copy, handle_undo, handle_write, print_last_files, prompt_for_path};
+pub(crate) use git::handle_commit;
 pub(crate) use goal::handle_goal;
 pub(crate) use help::{print_chat_help, print_command_help};
 pub(crate) use repl::{
-    handle_clear, handle_mode, handle_model, handle_plan, handle_provider, handle_reasoning, handle_reset,
-    handle_theme, handle_watch, handle_why,
+    handle_clear, handle_list_models, handle_mode, handle_model, handle_plan, handle_provider, handle_pull_model,
+    handle_reasoning, handle_reset, handle_theme, handle_watch, handle_why,
 };
 pub(crate) use review::{handle_apply, handle_diff, handle_review};
 pub(crate) use session::{
-    handle_compact, handle_config, handle_config_set, handle_dir, handle_export_session, handle_import_session,
-    handle_init, handle_list_files, handle_memory, handle_memory_set, handle_resume_session, handle_save_session,
-    handle_tokens,
+    handle_compact, handle_compact_dry_run, handle_compact_undo, handle_config, handle_config_set, handle_dir,
+    handle_export_session, handle_import_session, handle_init, handle_list_files, handle_list_sessions, handle_memory,
+    handle_memory_set, handle_reload, handle_resume_session, handle_save_session, handle_summary, handle_tokens,
 };
 pub(crate) use tools::{
     handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_test,
@@ -551,6 +601,10 @@ mod tests {
         assert!(reg.is_command("/clear"));
         assert!(reg.is_command("/goal"));
         assert!(reg.is_command("/vision"));
+        assert!(reg.is_command("/models"));
+        assert!(reg.is_command("/pull"));
+        assert!(reg.is_command("/commit"));
+        assert!(reg.is_command("/summary"));
     }
 
     #[test]

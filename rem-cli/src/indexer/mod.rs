@@ -37,8 +37,8 @@ mod bm25;
 mod chunking;
 mod embedding;
 
+pub(crate) use bm25::build_inverted_index;
 pub use bm25::retrieve_relevant_chunks;
-pub(crate) use bm25::{build_inverted_index, tokenize};
 pub(crate) use chunking::{guess_chunk_type, split_content_into_chunks};
 pub use embedding::compute_embeddings;
 
@@ -71,7 +71,7 @@ pub struct IndexChunk {
     pub start_line: usize,
     #[serde(default)]
     pub end_line: usize,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
     /// Pre-computed lowercased content for faster retrieval.
     pub(crate) content_lower: String,
@@ -158,29 +158,38 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
     None
 }
 
-/// Build a compact "Relevant code from project (via index):" section for injection.
+/// Build a structured "Relevant code from project (via index):" section for injection.
 /// Called from the main prompt assembly when an index is present for the project.
 pub fn build_retrieved_context(chunks: &[&IndexChunk], max_chars: usize) -> String {
     if chunks.is_empty() {
         return String::new();
     }
-    let mut out = String::from("[Relevant code chunks from project index]:\n");
-    let mut used = out.len();
+    let header_prefix = "[Relevant code chunks from project index]:\n";
+    let mut used = header_prefix.len();
+    let mut out = String::with_capacity(max_chars.min(4096));
+    out.push_str(header_prefix);
+    const FOOTER: &str = "[End of retrieved context — use @path for more specific files if needed]\n\n";
     for c in chunks {
         let loc = if c.start_line > 0 && c.end_line > 0 {
             format!("{}:{}-{}", c.path, c.start_line, c.end_line)
         } else {
             c.path.clone()
         };
-        let header = format!("### {} ({})\n", loc, c.chunk_type);
-        let body = format!("{}\n\n", c.content);
-        let add = header.len() + body.len();
-        if used + add > max_chars {
+        let header_len = loc.len() + 7 + c.chunk_type.len(); // "### " + " (" + ")\n"
+        if used + header_len + c.content.len() + 2 > max_chars {
             break;
         }
-        out.push_str(&header);
-        out.push_str(&body);
-        used += add;
+        out.push_str("### ");
+        out.push_str(&loc);
+        out.push_str(" (");
+        out.push_str(&c.chunk_type);
+        out.push_str(")\n");
+        out.push_str(&c.content);
+        out.push_str("\n\n");
+        used += header_len + c.content.len() + 2;
+    }
+    if used > header_prefix.len() {
+        out.push_str(FOOTER);
     }
     if out.len() > 30 {
         out.push_str("[End of retrieved context — use @path for more specific files if needed]\n\n");
@@ -261,7 +270,8 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
 
         scanned_count += 1;
         if scanned_count.is_multiple_of(100) && std::io::stderr().is_terminal() {
-            eprint!("\r  scanning... {} files", scanned_count);
+            let changed = changed_files;
+            eprint!("\r  scanning... {} files ({} new/changed)", scanned_count, changed);
             let _ = std::io::stderr().flush();
         }
 
@@ -328,6 +338,11 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
         walk_entries.iter().filter_map(process_entry).collect()
     };
 
+    let num_files = file_entries.len();
+    if num_files > 0 && std::io::stderr().is_terminal() {
+        eprint!("\r  chunking... {} files", num_files);
+        let _ = std::io::stderr().flush();
+    }
     let mut new_chunks: Vec<IndexChunk> = if file_entries.len() > 100 {
         file_entries
             .into_par_iter()
@@ -339,6 +354,10 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
             .flat_map(|fe| chunk_file_entry(fe, target_chunk))
             .collect()
     };
+    if num_files > 0 && std::io::stderr().is_terminal() {
+        eprint!("\r                                \r");
+        let _ = std::io::stderr().flush();
+    }
 
     // Incremental merge: preserve unchanged chunks from the old index
     let changed_paths: HashSet<&str> = walk_entries.iter().map(|e| e.rel_str.as_str()).collect();
@@ -353,8 +372,15 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
                     file_mtimes.contains_key(&c.path) && !changed_paths.contains(c.path.as_str())
                 })
                 .collect();
+            // Dedup: avoid duplicate chunks when a file's chunk content overlaps
+            let existing_keys: HashSet<(String, usize)> =
+                new_chunks.iter().map(|c| (c.path.clone(), c.start_line)).collect();
+            let unique_unchanged: Vec<IndexChunk> = unchanged
+                .into_iter()
+                .filter(|c| !existing_keys.contains(&(c.path.clone(), c.start_line)))
+                .collect();
             // Prepend unchanged chunks so they appear before new ones
-            new_chunks.splice(0..0, unchanged);
+            new_chunks.splice(0..0, unique_unchanged);
         }
     }
 
@@ -415,17 +441,8 @@ pub fn write_codebase_index(root: &Path, chunks: Vec<IndexChunk>, file_mtimes: H
     let out_path = rem_dir.join("codebase_index.json");
 
     // Build inverted index + doc freqs from chunks using pre-lowercased content
-    let mut inverted_index: HashMap<String, Vec<usize>> = HashMap::new();
     let mut doc_freqs: HashMap<String, u32> = HashMap::new();
-    for (i, chunk) in chunks.iter().enumerate() {
-        let mut seen: HashSet<String> = HashSet::new();
-        for w in tokenize(&chunk.content_lower) {
-            if seen.insert(w.clone()) {
-                *doc_freqs.entry(w.clone()).or_insert(0) += 1;
-            }
-            inverted_index.entry(w).or_default().push(i);
-        }
-    }
+    let inverted_index = build_inverted_index(&chunks, &mut doc_freqs);
 
     let num_chunks = chunks.len();
     let avg_dl = if num_chunks > 0 {
@@ -445,13 +462,21 @@ pub fn write_codebase_index(root: &Path, chunks: Vec<IndexChunk>, file_mtimes: H
     };
 
     let text = serde_json::to_string_pretty(&index).context("failed to serialize index")?;
-    fs::write(&out_path, &text).context("failed to write codebase_index.json")?;
+    // Atomic write: write to temp file, then rename
+    let tmp_path = rem_dir.join("codebase_index.json.tmp");
+    fs::write(&tmp_path, &text).context("failed to write temp index")?;
+    fs::rename(&tmp_path, &out_path).context("failed to finalize index")?;
 
-    // Write compressed variant for faster loading
+    // Write compressed variant synchronously (background thread can cause stale reads)
     let gz_path = rem_dir.join("codebase_index.json.gz");
-    if let Ok(file) = fs::File::create(&gz_path) {
-        let mut encoder = GzEncoder::new(file, Compression::default());
-        let _ = encoder.write_all(text.as_bytes());
+    match fs::File::create(&gz_path) {
+        Ok(file) => {
+            let mut encoder = GzEncoder::new(file, Compression::default());
+            if let Err(e) = encoder.write_all(text.as_bytes()) {
+                tracing::warn!("failed to write compressed index: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("failed to create compressed index file: {e}"),
     }
     Ok(())
 }
@@ -501,6 +526,7 @@ fn load_existing_mtimes(root: &Path) -> HashMap<String, u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::indexer::bm25::tokenize;
 
     fn sample_index() -> CodebaseIndex {
         let chunks = vec![

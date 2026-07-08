@@ -53,6 +53,8 @@ pub struct GeminiStreamContent {
 #[derive(Debug, Deserialize)]
 pub struct GeminiModelsResponse {
     pub models: Option<Vec<GeminiModelEntry>>,
+    #[serde(default)]
+    pub next_page_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,23 +74,32 @@ impl GeminiBackend {
 impl ProviderBackend for GeminiBackend {
     async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
         let url = self.gemini_url(ctx, "/models");
-        let resp = ctx
-            .client
-            .get(&url)
-            .header("x-goog-api-key", ctx.api_key_str())
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(super::ProviderError::Other("Gemini API unreachable".into())));
+        let mut all_models = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut req = ctx.client.get(&url).header("x-goog-api-key", ctx.api_key_str());
+            if let Some(ref token) = page_token {
+                req = req.query(&[("pageToken", token)]);
+            }
+            let resp = req.send().await?;
+            if !resp.status().is_success() {
+                return Err(anyhow!(super::ProviderError::Other("Gemini API unreachable".into())));
+            }
+            let parsed: GeminiModelsResponse = resp.json().await.context("invalid Gemini response")?;
+            if let Some(models) = parsed.models {
+                for m in models {
+                    let name = m.name.strip_prefix("models/").unwrap_or(&m.name).to_string();
+                    if name.contains("gemini") {
+                        all_models.push(name);
+                    }
+                }
+            }
+            match parsed.next_page_token {
+                Some(token) if !token.is_empty() => page_token = Some(token),
+                _ => break,
+            }
         }
-        let parsed: GeminiModelsResponse = resp.json().await.context("invalid Gemini response")?;
-        Ok(parsed
-            .models
-            .unwrap_or_default()
-            .into_iter()
-            .map(|m| m.name.strip_prefix("models/").unwrap_or(&m.name).to_string())
-            .filter(|n| n.contains("gemini"))
-            .collect())
+        Ok(all_models)
     }
 
     async fn complete_json(

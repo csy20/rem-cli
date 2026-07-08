@@ -34,15 +34,15 @@ pub async fn compute_embeddings(chunks: &mut [IndexChunk], ollama_url: &str) {
             } else {
                 chunk.content.clone()
             };
+            if text.trim().is_empty() {
+                continue;
+            }
             let payload = serde_json::json!({
                 "model": "nomic-embed-text",
                 "input": text
             });
             let req = client.post(&url).json(&payload).send();
             futures.push(async move {
-                if text.trim().is_empty() {
-                    return None;
-                }
                 let resp = req.await.ok()?;
                 let body: serde_json::Value = resp.json().await.ok()?;
                 let embeddings = body.get("embeddings")?.as_array()?;

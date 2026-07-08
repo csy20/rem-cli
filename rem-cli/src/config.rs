@@ -18,7 +18,7 @@ use tracing::warn;
 static CONFIG_CACHE: LazyLock<RwLock<Option<AppConfig>>> = LazyLock::new(|| RwLock::new(None));
 
 /// Returns the config directory path, checking XDG_CONFIG_HOME first.
-fn config_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         let dir = std::path::PathBuf::from(xdg).join("rem-cli");
         return Some(dir);
@@ -154,20 +154,25 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
     let kind = ProviderKind::from_str(&cfg.provider);
     let pcfg = cfg.providers.get(kind.as_str());
 
-    let timeout_s = pcfg.and_then(|p| p.timeout_s).unwrap_or(cfg.timeout_s);
-    let model = resolve_model(
-        kind,
-        pcfg.and_then(|p| p.model.clone()).unwrap_or_else(|| cfg.model.clone()),
-    );
-    let model_ctx = pcfg.and_then(|p| p.model_ctx).unwrap_or(cfg.model_ctx);
+    // Helper macro to avoid repeated pcfg.and_then patterns
+    macro_rules! pget {
+        ($field:ident) => {
+            pcfg.and_then(|p| p.$field.clone())
+        };
+        (copy $field:ident) => {
+            pcfg.and_then(|p| p.$field)
+        };
+    }
 
-    let base_url = pcfg
-        .and_then(|p| p.api_url.clone())
+    let timeout_s = pget!(copy timeout_s).unwrap_or(cfg.timeout_s);
+    let model = resolve_model(kind, pget!(model).unwrap_or_else(|| cfg.model.clone()));
+    let model_ctx = pget!(copy model_ctx).unwrap_or(cfg.model_ctx);
+
+    let base_url = pget!(api_url)
         .or_else(|| cfg.api_url.clone())
         .unwrap_or_else(|| crate::provider::default_base_url(kind));
 
-    let api_key = pcfg
-        .and_then(|p| p.api_key.clone())
+    let api_key = pget!(api_key)
         .or_else(|| cfg.api_key.clone())
         .or_else(|| resolve_api_key_from_env(kind));
 
@@ -186,7 +191,7 @@ pub(crate) fn build_provider(cfg: &AppConfig, system_prompt: String) -> Result<P
     let mut provider = Provider::new(kind, base_url, model, timeout_s, system_prompt, api_key, model_ctx);
 
     // Per-provider reasoning override (user can mark any model as reasoning)
-    if let Some(true) = pcfg.and_then(|p| p.reasoning_model) {
+    if let Some(true) = pget!(copy reasoning_model) {
         provider.reasoning_config.enabled = true;
     }
     if let Some(effort) = &cfg.reasoning_effort {
@@ -376,6 +381,13 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
     }
 }
 
+/// Invalidates the in-memory config cache so the next call to load_config re-reads from disk.
+pub(crate) fn invalidate_config_cache() {
+    if let Ok(mut cache) = CONFIG_CACHE.write() {
+        *cache = None;
+    }
+}
+
 /// Persists the workspace directory to config.
 pub(crate) fn persist_workspace(dir: &Path) {
     let t = ui::theme::active();
@@ -538,6 +550,10 @@ mod tests {
 
     #[test]
     fn config_save_does_not_crash() {
+        let tmp = std::env::temp_dir().join(format!("rem-config-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("XDG_CONFIG_HOME", &tmp);
+        let prev = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner()).take();
         let cfg = AppConfig {
             model: "test-model".into(),
             provider: "openai".into(),
@@ -546,24 +562,39 @@ mod tests {
             ..Default::default()
         };
         let result = save_config(&cfg);
-        // save_config writes to XDG dir; we just verify it doesn't error fatally
         assert!(result.is_ok() || result.is_err());
+        if let Some(c) = prev {
+            *CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner()) = Some(c);
+        }
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn first_run_setup_uses_dot_for_current_dir() {
+        let tmp = std::env::temp_dir().join(format!("rem-config-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("XDG_CONFIG_HOME", &tmp);
+        let prev = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner()).take();
         let cfg = &mut AppConfig::default();
         let result = first_run_setup(cfg);
-        // With piped stdin (empty), read_line returns empty -> defaults to current_dir
         assert!(result.is_ok());
+        if let Some(c) = prev {
+            *CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner()) = Some(c);
+        }
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn config_dir_uses_xdg_when_set() {
-        std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-rem-test");
+        let tmp = std::env::temp_dir().join(format!("rem-config-test-xdg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("XDG_CONFIG_HOME", &tmp);
         let dir = config_dir();
-        assert_eq!(dir, Some(std::path::PathBuf::from("/tmp/xdg-rem-test/rem-cli")));
+        assert_eq!(dir, Some(tmp.join("rem-cli")));
         std::env::remove_var("XDG_CONFIG_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -598,13 +629,20 @@ mod tests {
 
     #[test]
     fn persist_workspace_updates_config() {
-        let dir = std::env::temp_dir().join(format!("rem-persist-test-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("rem-config-test-persist-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        std::env::set_var("XDG_CONFIG_HOME", &tmp);
+        let prev = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner()).take();
+        let dir = tmp.join("workspace-test");
         let _ = std::fs::create_dir_all(&dir);
         persist_workspace(&dir);
-        // Verify the workspace was saved by reloading config
         if let Ok(cfg) = load_config() {
             assert!(cfg.workspace_dir.is_some());
         }
-        std::fs::remove_dir_all(&dir).ok();
+        if let Some(c) = prev {
+            *CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner()) = Some(c);
+        }
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

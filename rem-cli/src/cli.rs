@@ -136,6 +136,7 @@ pub struct ProviderSettings {
 
 /// Global and local merged configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub model: String,
     pub ollama_url: String,
