@@ -127,20 +127,14 @@ fn needs_continuation(line: &str) -> bool {
         }
         match c {
             '{' | '(' | '[' => opens.push(c),
-            '}' => {
-                if opens.last() == Some(&'{') {
-                    opens.pop();
-                }
+            '}' if opens.last() == Some(&'{') => {
+                opens.pop();
             }
-            ')' => {
-                if opens.last() == Some(&'(') {
-                    opens.pop();
-                }
+            ')' if opens.last() == Some(&'(') => {
+                opens.pop();
             }
-            ']' => {
-                if opens.last() == Some(&'[') {
-                    opens.pop();
-                }
+            ']' if opens.last() == Some(&'[') => {
+                opens.pop();
             }
             _ => {}
         }

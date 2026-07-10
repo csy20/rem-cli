@@ -3,14 +3,19 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ── REM CLI Installer ──────────────────────────────────────────────────────
-# Usage: curl -fsSL https://raw.githubusercontent.com/<user>/rem-llm/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/csy20/rem-cli/main/install.sh | bash
 #
 # Detects OS and architecture, downloads the matching binary from GitHub Releases,
 # installs to ~/.local/bin/, and adds it to PATH if needed.
+#
+# Optional env vars:
+#   VERSION=v0.4.0   pin a release tag (default: latest)
+#   REPO=owner/name  override the GitHub repo (default: csy20/rem-cli)
+#   INSTALL_DIR=...  install destination (default: ~/.local/bin)
 
-REPO="csy20/rem-llm"
+REPO="${REPO:-csy20/rem-cli}"
 VERSION="${VERSION:-latest}"
-INSTALL_DIR="${HOME}/.local/bin"
+INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 BINARY="rem"
 BOLD="\033[1m"
 GREEN="\033[32m"
@@ -29,7 +34,14 @@ abort() {
     exit 1
 }
 
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || abort "required command not found: $1"
+}
+
 header
+need_cmd curl
+need_cmd uname
+need_cmd mktemp
 
 # ── Detect platform ──────────────────────────────────────────────────────────
 step "detecting platform..."
@@ -53,47 +65,101 @@ TARGET="${PLATFORM_ARCH}-${PLATFORM_OS}"
 step "platform: ${BOLD}${TARGET}${RESET}"
 
 # ── Get latest version if not specified ───────────────────────────────────────
+# Asset naming (must match .github/workflows/release.yml):
+#   rem-x86_64-linux | rem-aarch64-linux | rem-x86_64-macos | rem-aarch64-macos
+# Archives (optional): same name with .tar.gz containing a binary named "rem".
 if [ "$VERSION" = "latest" ]; then
     step "fetching latest release..."
-    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": "\(.*\)".*/\1/')
+    # Avoid curl -f so we can print a clear message on 404 (no releases yet).
+    API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+    HTTP_BODY="$(mktemp)"
+    HTTP_CODE="$(curl -sSL -o "$HTTP_BODY" -w "%{http_code}" \
+        -H "Accept: application/vnd.github+json" \
+        -H "User-Agent: rem-installer" \
+        "$API_URL" || true)"
+
+    if [ "$HTTP_CODE" != "200" ]; then
+        rm -f "$HTTP_BODY"
+        abort "no GitHub release found for ${REPO} (HTTP ${HTTP_CODE}).
+  Publish a release by pushing a version tag, e.g.:
+    git tag v0.4.0 && git push origin v0.4.0
+  Or install from source:
+    git clone https://github.com/${REPO}.git && cd rem-cli && cargo install --path ."
+    fi
+
+    VERSION="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HTTP_BODY" | head -1)"
+    rm -f "$HTTP_BODY"
+
     if [ -z "$VERSION" ]; then
-        abort "could not determine latest version"
+        abort "could not parse latest version from GitHub API for ${REPO}"
     fi
 fi
 step "version: ${BOLD}${VERSION}${RESET}"
 
 # ── Download binary ──────────────────────────────────────────────────────────
-BINARY_NAME="rem-${TARGET}"
-if [ "$PLATFORM_OS" = "macos" ]; then
-    BINARY_NAME="${BINARY_NAME}.tar.gz"
-fi
-
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY_NAME}"
-step "downloading ${BINARY_NAME}..."
-step "  ${DIM}from: ${DOWNLOAD_URL}${RESET}"
+# Prefer a plain binary asset; fall back to .tar.gz if that is what the release ships.
+ASSET_PLAIN="rem-${TARGET}"
+ASSET_TARBALL="rem-${TARGET}.tar.gz"
+BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-
 cd "$TMP_DIR"
 
-if ! curl -fSL --progress-bar "$DOWNLOAD_URL" -o "$BINARY_NAME"; then
-    abort "failed to download binary. Check that the release exists at: $DOWNLOAD_URL"
+download_asset() {
+    local name="$1"
+    local url="${BASE_URL}/${name}"
+    step "trying ${name}..."
+    if curl -fsSL --progress-bar "$url" -o "$name"; then
+        return 0
+    fi
+    return 1
+}
+
+DOWNLOADED=""
+if download_asset "$ASSET_PLAIN"; then
+    DOWNLOADED="$ASSET_PLAIN"
+elif download_asset "$ASSET_TARBALL"; then
+    DOWNLOADED="$ASSET_TARBALL"
+else
+    abort "failed to download a binary for ${TARGET}.
+  Looked for:
+    ${BASE_URL}/${ASSET_PLAIN}
+    ${BASE_URL}/${ASSET_TARBALL}
+  Check that the release assets exist and match your platform."
 fi
 
-# Extract if tar.gz
-if [[ "$BINARY_NAME" == *.tar.gz ]]; then
-    tar xzf "$BINARY_NAME"
+step "downloaded ${BOLD}${DOWNLOADED}${RESET}"
+
+# Normalize to a file named "rem" in TMP_DIR
+if [[ "$DOWNLOADED" == *.tar.gz ]]; then
+    tar xzf "$DOWNLOADED"
+    # Accept either "rem" or the platform-named binary inside the archive
+    if [ -f rem ]; then
+        :
+    elif [ -f "$ASSET_PLAIN" ]; then
+        mv "$ASSET_PLAIN" rem
+    else
+        # Take the first executable-looking file
+        CANDIDATE="$(find . -maxdepth 2 -type f \( -name 'rem' -o -name 'rem-*' \) | head -1)"
+        [ -n "$CANDIDATE" ] || abort "archive did not contain a rem binary"
+        mv "$CANDIDATE" rem
+    fi
+else
+    mv "$DOWNLOADED" rem
 fi
 
-chmod +x rem 2>/dev/null || true
+chmod +x rem
+# Basic sanity: file should be non-empty
+[ -s rem ] || abort "downloaded binary is empty"
 
 # ── Install ──────────────────────────────────────────────────────────────────
 mkdir -p "$INSTALL_DIR"
-cp rem "$INSTALL_DIR/${BINARY}" 2>/dev/null || {
-    mv rem "$INSTALL_DIR/${BINARY}" 2>/dev/null || abort "failed to install binary"
-}
+if ! cp rem "$INSTALL_DIR/${BINARY}" 2>/dev/null; then
+    # Fallback when cp fails (e.g. busy binary on some systems)
+    mv rem "$INSTALL_DIR/${BINARY}" || abort "failed to install binary to ${INSTALL_DIR}/${BINARY}"
+fi
+chmod +x "$INSTALL_DIR/${BINARY}"
 info "installed to ${BOLD}${INSTALL_DIR}/${BINARY}${RESET}"
 
 # ── Add to PATH if needed ────────────────────────────────────────────────────
@@ -106,14 +172,27 @@ case "$SHELL_NAME" in
     fish) SHELL_RC="${HOME}/.config/fish/config.fish" ;;
 esac
 
-if [ -n "$SHELL_RC" ] && ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
-    if [ "$SHELL_NAME" = "fish" ]; then
-        echo "fish_add_path $INSTALL_DIR" >> "$SHELL_RC"
+path_has_install_dir() {
+    case ":${PATH}:" in
+        *":${INSTALL_DIR}:"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ -n "$SHELL_RC" ] && ! path_has_install_dir; then
+    # Avoid duplicating the PATH line on re-install
+    if [ -f "$SHELL_RC" ] && grep -F "$INSTALL_DIR" "$SHELL_RC" >/dev/null 2>&1; then
+        warn "${BOLD}${INSTALL_DIR}${RESET} already referenced in ${SHELL_RC} (restart shell to pick it up)"
     else
-        echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$SHELL_RC"
+        mkdir -p "$(dirname "$SHELL_RC")"
+        if [ "$SHELL_NAME" = "fish" ]; then
+            echo "fish_add_path $INSTALL_DIR" >> "$SHELL_RC"
+        else
+            echo "export PATH=\"${INSTALL_DIR}:\$PATH\"" >> "$SHELL_RC"
+        fi
+        warn "added ${BOLD}${INSTALL_DIR}${RESET} to ${SHELL_RC}"
+        warn "restart your shell or run: ${BOLD}source ${SHELL_RC}${RESET}"
     fi
-    warn "added ${BOLD}${INSTALL_DIR}${RESET} to ${SHELL_RC}"
-    warn "restart your shell or run: ${BOLD}source ${SHELL_RC}${RESET}"
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────────────

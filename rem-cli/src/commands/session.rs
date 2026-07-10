@@ -1159,7 +1159,7 @@ pub(crate) fn handle_list_sessions(session: &ChatSession) {
         );
         return;
     }
-    sessions.sort_by(|a, b| b.1.cmp(&a.1));
+    sessions.sort_by_key(|b| std::cmp::Reverse(b.1));
     println!("{}", ui::theme::paint_rail_header(&t, "SAVED SESSIONS"));
     for (name, size) in &sessions {
         let icon = file_icon(name);

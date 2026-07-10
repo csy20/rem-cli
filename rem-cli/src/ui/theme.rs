@@ -568,8 +568,17 @@ mod tests {
     fn paint_resets() {
         let t = active();
         let s = paint(&t, "accent", "REM", true);
-        assert!(s.ends_with(RESET));
         assert!(s.contains("REM"));
+        // Respect NO_COLOR / CLICOLOR=0 (common in CI and non-TTY agents).
+        if no_color() {
+            assert_eq!(s, "REM", "paint must return plain text when colors are disabled");
+        } else {
+            assert!(s.ends_with(RESET), "paint must reset ANSI styles; got {:?}", s);
+            assert!(
+                s.contains(BOLD) || s.contains("\x1b[38;2;"),
+                "expected color/bold codes"
+            );
+        }
     }
 
     #[test]

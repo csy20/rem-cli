@@ -13,12 +13,19 @@ generates the retrieval index used by chat/goal for larger projects.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/csy20/rem-llm/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/csy20/rem-cli/main/install.sh | bash
 ```
 
 This downloads the prebuilt `rem` binary that matches your OS / architecture
 and installs it to `~/.local/bin/`. The installer also adds that directory to
 `PATH` (via `~/.bashrc` or `~/.zshrc`) if it isn't already.
+
+Supported platforms: `x86_64` / `aarch64` on Linux and macOS (Apple Silicon
+included). Pin a version with `VERSION=v0.4.0` if needed.
+
+> **Note:** the one-line installer needs a published GitHub Release. Create one
+> by pushing a version tag (`git tag v0.4.0 && git push origin v0.4.0`), which
+> triggers the release workflow. Until then, build from source below.
 
 ## Build from source
 

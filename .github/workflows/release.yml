@@ -12,10 +12,13 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
+        include:
+          - target: x86_64-unknown-linux-gnu
+            asset: rem-x86_64-linux
+          - target: aarch64-unknown-linux-gnu
+            asset: rem-aarch64-linux
     steps:
       - uses: actions/checkout@v4
 
@@ -31,32 +34,50 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
       - name: build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           cd rem-cli
           cargo build --release --target ${{ matrix.target }}
 
       - name: strip
-        run: strip rem-cli/target/${{ matrix.target }}/release/rem || true
+        run: |
+          BIN="rem-cli/target/${{ matrix.target }}/release/rem"
+          case "${{ matrix.target }}" in
+            aarch64-*) aarch64-linux-gnu-strip "$BIN" 2>/dev/null || strip "$BIN" || true ;;
+            *) strip "$BIN" || true ;;
+          esac
 
       - name: package
         run: |
-          ARCH=$(echo ${{ matrix.target }} | cut -d- -f1)
-          cp rem-cli/target/${{ matrix.target }}/release/rem rem-${ARCH}-linux
-          chmod +x rem-${ARCH}-linux
+          BIN="rem-cli/target/${{ matrix.target }}/release/rem"
+          test -f "$BIN"
+          cp "$BIN" "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}"
+          # Tarball always contains a file named "rem" (installer fallback)
+          mkdir -p dist
+          cp "${{ matrix.asset }}" dist/rem
+          tar -C dist -czf "${{ matrix.asset }}.tar.gz" rem
+          ls -la "${{ matrix.asset }}" "${{ matrix.asset }}.tar.gz"
 
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rem-${{ matrix.target }}
-          path: rem-*-linux
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.tar.gz
 
   build-macos:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
-        target:
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
+        include:
+          - target: x86_64-apple-darwin
+            asset: rem-x86_64-macos
+          - target: aarch64-apple-darwin
+            asset: rem-aarch64-macos
     steps:
       - uses: actions/checkout@v4
 
@@ -71,19 +92,28 @@ jobs:
           cargo build --release --target ${{ matrix.target }}
 
       - name: strip
-        run: strip rem-cli/target/${{ matrix.target }}/release/rem || true
+        run: |
+          BIN="rem-cli/target/${{ matrix.target }}/release/rem"
+          strip "$BIN" || true
 
       - name: package
         run: |
-          ARCH=$(echo ${{ matrix.target }} | cut -d- -f1)
-          cp rem-cli/target/${{ matrix.target }}/release/rem rem-${ARCH}-macos
-          chmod +x rem-${ARCH}-macos
+          BIN="rem-cli/target/${{ matrix.target }}/release/rem"
+          test -f "$BIN"
+          cp "$BIN" "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}"
+          mkdir -p dist
+          cp "${{ matrix.asset }}" dist/rem
+          tar -C dist -czf "${{ matrix.asset }}.tar.gz" rem
+          ls -la "${{ matrix.asset }}" "${{ matrix.asset }}.tar.gz"
 
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rem-${{ matrix.target }}
-          path: rem-*-macos
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.tar.gz
 
   release:
     needs: [build-linux, build-macos]
@@ -100,5 +130,7 @@ jobs:
       - name: create release
         uses: softprops/action-gh-release@v2
         with:
-          files: binaries/rem-*
+          files: |
+            binaries/rem-*
           generate_release_notes: true
+          fail_on_unmatched_files: true
