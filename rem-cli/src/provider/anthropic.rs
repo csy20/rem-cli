@@ -180,7 +180,7 @@ impl ProviderBackend for AnthropicBackend {
             .context("failed to call Anthropic vision API")?;
 
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("Anthropic", resp).await);
+            return Err(super::parse_api_error("Anthropic", resp, None).await);
         }
 
         super::stream_anthropic_sse(resp, &self.last_usage, ctx.reasoning_config.show_reasoning).await
@@ -220,7 +220,7 @@ impl ProviderBackend for AnthropicBackend {
             .await?;
 
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("Anthropic", resp).await);
+            return Err(super::parse_api_error("Anthropic", resp, None).await);
         }
 
         let parsed: crate::provider::anthropic::AnthropicResponse =
@@ -289,7 +289,7 @@ impl ProviderBackend for AnthropicBackend {
             .context("failed to call Anthropic API")?;
 
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("Anthropic", resp).await);
+            return Err(super::parse_api_error("Anthropic", resp, None).await);
         }
 
         super::stream_anthropic_sse(resp, &self.last_usage, ctx.reasoning_config.show_reasoning).await
@@ -347,7 +347,7 @@ impl ProviderBackend for AnthropicBackend {
             .context("failed to call Anthropic API")?;
 
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("Anthropic", resp).await);
+            return Err(super::parse_api_error("Anthropic", resp, None).await);
         }
 
         let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);

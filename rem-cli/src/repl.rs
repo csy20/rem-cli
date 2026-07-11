@@ -5,7 +5,6 @@
 use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
-use std::sync::LazyLock;
 
 use anyhow::Result;
 
@@ -14,12 +13,13 @@ use crate::cli::AppConfig;
 use crate::commands::{
     auto_write_files, handle_apply, handle_clear, handle_commit, handle_compact, handle_compact_dry_run,
     handle_compact_undo, handle_config, handle_config_set, handle_copy, handle_diff, handle_dir, handle_explain,
-    handle_export_session, handle_find, handle_goal, handle_import_session, handle_init, handle_lint_with_fallback,
-    handle_list_files, handle_list_models, handle_list_sessions, handle_memory, handle_memory_set, handle_mode,
-    handle_model, handle_plan, handle_provider, handle_pull_model, handle_reasoning, handle_refactor, handle_reload,
-    handle_reset, handle_resume_session, handle_review, handle_save_session, handle_search, handle_summary,
-    handle_test, handle_theme, handle_tokens, handle_undo, handle_vision, handle_watch, handle_why, handle_write,
-    print_chat_help, print_command_help, print_last_files, prompt_for_path,
+    handle_export_session, handle_export_session_md, handle_find, handle_goal, handle_import_session, handle_init,
+    handle_lint_with_fallback, handle_list_files, handle_list_models, handle_list_sessions, handle_memory,
+    handle_memory_set, handle_mode, handle_model, handle_page, handle_plan, handle_provider, handle_pull_model,
+    handle_reasoning, handle_refactor, handle_reload, handle_reset, handle_resume_session, handle_review,
+    handle_save_session, handle_search, handle_summary, handle_test, handle_theme, handle_tokens, handle_undo,
+    handle_vision, handle_watch, handle_why, handle_write, print_chat_help, print_command_help, print_last_files,
+    prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
@@ -365,6 +365,8 @@ async fn dispatch_slash_command(
                 handle_compact_undo(session);
             } else if sub == "list" {
                 handle_list_sessions(session);
+            } else if let Some(export_path) = sub.strip_prefix("export-md ") {
+                handle_export_session_md(session, export_path.trim());
             } else if let Some(export_path) = sub.strip_prefix("export ") {
                 handle_export_session(session, export_path.trim());
             } else if let Some(import_path) = sub.strip_prefix("import ") {
@@ -372,7 +374,7 @@ async fn dispatch_slash_command(
             } else {
                 let t = ui::theme::active();
                 println!(
-                    "{} usage: /session compact-undo | list | export <path> | import <path>",
+                    "{} usage: /session compact-undo | list | export <path> | export-md <path> | import <path>",
                     ui::theme::paint_warning(&t, "\u{258C}")
                 );
             }
@@ -399,6 +401,10 @@ async fn dispatch_slash_command(
             } else {
                 handle_write(session, args);
             }
+            return false;
+        }
+        "/page" => {
+            handle_page();
             return false;
         }
         _ => {}
@@ -637,11 +643,8 @@ fn handle_llm_response(
         if session.history_mgr.messages_since_save >= crate::constants::AUTO_SAVE_INTERVAL {
             session.auto_save_session();
             session.history_mgr.messages_since_save = 0;
-            let rail = ui::theme::paint_rail_empty(t);
-            let saved = ui::theme::paint_dim(t, "session auto-saved");
-            println!("{rail}");
-            println!("{rail}  {saved}");
-            println!("{rail}");
+            eprint!("{}", ui::theme::paint_dim(t, "\u{258C} \u{00B7}\r"));
+            let _ = std::io::Write::flush(&mut std::io::stdout());
         }
     }
 }
@@ -888,29 +891,32 @@ fn word_wrap(text: &str, max_width: usize) -> String {
     result
 }
 
-fn detect_terminal_width() -> usize {
-    if let Ok(cols) = std::env::var("COLUMNS") {
-        if let Ok(w) = cols.parse::<usize>() {
-            return w.saturating_sub(4);
-        }
-    }
+/// Cached fallback terminal width from `tput cols`.
+static FALLBACK_WIDTH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+fn detect_fallback_width() -> usize {
     if let Ok(output) = std::process::Command::new("sh")
         .args(["-c", "tput cols 2>/dev/null || echo 80"])
         .output()
     {
         if let Ok(cols) = String::from_utf8_lossy(&output.stdout).trim().parse::<usize>() {
             if cols > 0 {
-                return cols.saturating_sub(4);
+                return cols;
             }
         }
     }
-    76usize
+    80usize
 }
 
-static TERMINAL_WIDTH: LazyLock<usize> = LazyLock::new(detect_terminal_width);
-
 fn terminal_width() -> usize {
-    *TERMINAL_WIDTH
+    // Check COLUMNS env var first (bash updates this on SIGWINCH)
+    if let Ok(cols) = std::env::var("COLUMNS") {
+        if let Ok(w) = cols.parse::<usize>() {
+            return w.saturating_sub(4);
+        }
+    }
+    let fallback = *FALLBACK_WIDTH.get_or_init(detect_fallback_width);
+    fallback.saturating_sub(4)
 }
 
 /// Prints plain text output line by line, using pager for long output.
@@ -957,17 +963,16 @@ fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
     };
     let wrapped = word_wrap(&highlighted, max_width);
     let line_count = wrapped.lines().count();
+    let mut buf = String::new();
+    for line in wrapped.lines() {
+        buf.push_str(&format!("{} {}\n", rail_chr(), line));
+    }
+    crate::pager::store_output(&buf);
     if line_count > 50 {
-        let mut buf = String::new();
-        for line in wrapped.lines() {
-            buf.push_str(&format!("{} {}\n", rail_chr(), line));
-        }
         maybe_page(&buf);
         return;
     }
-    for line in wrapped.lines() {
-        println!("{} {}", rail_chr(), line);
-    }
+    print!("{}", buf);
 }
 
 /// Prints provider, elapsed time, and tokens-per-second stats.

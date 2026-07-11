@@ -1174,6 +1174,72 @@ pub(crate) fn handle_list_sessions(session: &ChatSession) {
     println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
+/// Exports the current session as human-readable Markdown (`/session export-md <path>`).
+pub(crate) fn handle_export_session_md(session: &ChatSession, path: &str) {
+    let t = ui::theme::active();
+    let base = session
+        .ctx
+        .project_dir
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let out_path = match crate::types::resolve_safe_path(base, path) {
+        Some(p) => p,
+        None => {
+            println!(
+                "  {} path traversal blocked",
+                ui::theme::paint_error_label(&t, "\u{2717}")
+            );
+            return;
+        }
+    };
+    let json = session.to_session_json();
+    let mut md = String::new();
+    md.push_str("# Session Export\n\n");
+    md.push_str(&format!(
+        "- **Date:** {}\n",
+        json["saved_at"].as_str().unwrap_or("unknown")
+    ));
+    md.push_str(&format!("- **Mode:** {}\n", json["mode"].as_str().unwrap_or("CHAT")));
+    if let Some(ws) = json["workspace"].as_str() {
+        md.push_str(&format!("- **Workspace:** `{}`\n", ws));
+    }
+    md.push_str("\n---\n\n");
+    if let Some(history) = json["history"].as_array() {
+        for (i, entry) in history.iter().enumerate() {
+            if let (Some(u), Some(a)) = (entry["user"].as_str(), entry["assistant"].as_str()) {
+                md.push_str(&format!("## Turn {}\n\n", i + 1));
+                md.push_str("### User\n\n");
+                md.push_str(&format!("```\n{}\n```\n\n", u));
+                md.push_str("### Assistant\n\n");
+                if a.contains("```") {
+                    md.push_str(&format!("{}\n\n", a));
+                } else {
+                    md.push_str(&format!("```\n{}\n```\n\n", a));
+                }
+            }
+        }
+    }
+    if let Some(code) = json["last_code"].as_str() {
+        if !code.is_empty() {
+            md.push_str("## Last Code\n\n");
+            md.push_str(&format!("```\n{}\n```\n\n", code));
+        }
+    }
+    match std::fs::write(&out_path, &md) {
+        Ok(()) => println!(
+            "{} session exported to {} ({} bytes)",
+            ui::theme::paint_success_label(&t, "\u{2713}"),
+            out_path.display(),
+            md.len(),
+        ),
+        Err(e) => println!(
+            "{} failed to export session: {}",
+            ui::theme::paint_error_label(&t, "\u{2717}"),
+            e
+        ),
+    }
+}
+
 /// Imports a session from a file and merges into the current session (`/session import <path>`).
 pub(crate) fn handle_import_session(session: &mut ChatSession, path: &str) {
     let t = ui::theme::active();

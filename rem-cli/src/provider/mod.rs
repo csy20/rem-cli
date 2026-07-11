@@ -37,9 +37,6 @@ pub(crate) enum ProviderError {
     Timeout(String),
     #[error("server error: {0}")]
     ServerError(String),
-    #[allow(dead_code)]
-    #[error("parse error: {0}")]
-    ParseError(String),
     #[error("cancelled by user")]
     Cancelled,
     #[error("response too large ({0} bytes)")]
@@ -872,12 +869,28 @@ pub(super) fn parse_json_fallback(text: &str) -> Result<crate::ModelReply> {
     }
 }
 
-pub(super) async fn parse_api_error(provider_name: &str, resp: reqwest::Response) -> anyhow::Error {
+/// Redacts sensitive information (API keys, tokens) from error message strings.
+fn redact_api_key(msg: &str, api_key: Option<&str>) -> String {
+    let mut s = msg.to_string();
+    if let Some(key) = api_key {
+        if !key.is_empty() && s.contains(key) {
+            s = s.replace(key, "***");
+        }
+    }
+    s
+}
+
+pub(super) async fn parse_api_error(
+    provider_name: &str,
+    resp: reqwest::Response,
+    api_key: Option<&str>,
+) -> anyhow::Error {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
+    let raw_msg = serde_json::from_str::<LlmErrorResponse>(&body)
         .map(|v| v.error.to_string())
         .unwrap_or_else(|_| body.chars().take(crate::constants::API_ERROR_BODY_MAX_CHARS).collect());
+    let err_msg = redact_api_key(&raw_msg, api_key);
     let code = status.as_u16();
     match code {
         429 => {
@@ -924,7 +937,7 @@ pub(super) async fn openai_compat_complete_json(
         .await
         .with_context(|| format!("failed to call {provider_name} API"))?;
     if !resp.status().is_success() {
-        return Err(parse_api_error(provider_name, resp).await);
+        return Err(parse_api_error(provider_name, resp, Some(ctx.api_key_str())).await);
     }
     let parsed: openai::OpenAIResponse = resp
         .json()
@@ -960,7 +973,7 @@ pub(super) async fn openai_compat_chat_stream(
         .await
         .with_context(|| format!("failed to call {provider_name} API"))?;
     if !resp.status().is_success() {
-        return Err(parse_api_error(provider_name, resp).await);
+        return Err(parse_api_error(provider_name, resp, Some(ctx.api_key_str())).await);
     }
     stream_sse_response(resp).await
 }
@@ -1000,7 +1013,7 @@ pub(super) async fn openai_compat_chat_stream_with_vision(
         .await
         .with_context(|| format!("failed to call {provider_name} vision API"))?;
     if !resp.status().is_success() {
-        return Err(parse_api_error(provider_name, resp).await);
+        return Err(parse_api_error(provider_name, resp, Some(ctx.api_key_str())).await);
     }
     stream_sse_response(resp).await
 }
@@ -1034,7 +1047,7 @@ pub(super) async fn openai_compat_chat_stream_with_tools(
         .await
         .with_context(|| format!("failed to call {provider_name} API"))?;
     if !resp.status().is_success() {
-        return Err(parse_api_error(provider_name, resp).await);
+        return Err(parse_api_error(provider_name, resp, Some(ctx.api_key_str())).await);
     }
     stream_openai_tool_response(resp).await
 }

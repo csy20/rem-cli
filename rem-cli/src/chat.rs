@@ -130,22 +130,8 @@ impl HistoryManager {
                 Cow::Borrowed(assistant)
             };
 
-            let _ = write!(out, "User: ");
-            for c in user.chars() {
-                if c == '\n' {
-                    out.push_str("\\n");
-                } else {
-                    out.push(c);
-                }
-            }
-            let _ = write!(out, "\nREM: ");
-            for c in truncated_assistant.chars() {
-                if c == '\n' {
-                    out.push_str("\\n");
-                } else {
-                    out.push(c);
-                }
-            }
+            let _ = write!(out, "User: {}", user.replace('\n', "\\n"));
+            let _ = write!(out, "\nREM: {}", truncated_assistant.replace('\n', "\\n"));
             out.push_str("\n\n");
         }
         out
@@ -381,6 +367,7 @@ impl ChatSession {
     }
 
     /// Auto-saves the session to `.rem/session.json.gz` every N messages.
+    /// Skips save if the uncompressed JSON exceeds [`MAX_SESSION_FILE_BYTES`].
     pub(crate) fn auto_save_session(&self) {
         use flate2::write::GzEncoder;
         use flate2::Compression;
@@ -408,6 +395,20 @@ impl ChatSession {
                 return;
             }
         };
+        // Size cap check before writing
+        if json.len() > crate::constants::MAX_SESSION_FILE_BYTES {
+            let t = crate::ui::theme::active();
+            let size = crate::text_util::human_size(json.len() as u64);
+            let limit = crate::text_util::human_size(crate::constants::MAX_SESSION_FILE_BYTES as u64);
+            tracing::warn!("auto-save skipped: session is {} (limit {})", size, limit);
+            eprintln!(
+                "  {} auto-save skipped: {} exceeds {} limit — use /compact to reduce history",
+                crate::ui::theme::paint_warning(&t, "!"),
+                size,
+                limit,
+            );
+            return;
+        }
         let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
         if let Err(e) = encoder.write_all(json.as_bytes()) {
             tracing::warn!("failed to compress session: {}", e);
@@ -454,9 +455,8 @@ impl ChatSession {
             .map(|m| m.as_str())
             .filter(|ref_path| !ref_path.starts_with("http"))
             .collect();
-        refs.sort_unstable();
+        refs.sort_by_cached_key(|a| std::cmp::Reverse(a.len()));
         refs.dedup();
-        refs.sort_unstable_by_key(|a| std::cmp::Reverse(a.len()));
 
         for ref_path in &refs {
             let base = self.ctx.project_dir.as_deref().unwrap_or_else(|| Path::new("."));
@@ -621,5 +621,47 @@ mod tests {
         let (cleaned, extra) = session.resolve_at_references("see @https://example.com/doc for details");
         assert_eq!(cleaned, "see @https://example.com/doc for details");
         assert!(extra.is_empty());
+    }
+
+    #[test]
+    fn to_session_json_roundtrip_proptest_history() {
+        proptest::proptest!(|(user_text in "[a-zA-Z0-9 ]{0,50}", assistant_text in "[a-zA-Z0-9 ]{0,50}")| {
+            let mut session = make_session();
+            session.history_mgr.history.push((user_text.clone(), assistant_text.clone()));
+            let json = session.to_session_json();
+            let history = json["history"].as_array().unwrap();
+            assert!(!history.is_empty());
+            assert_eq!(history[0]["user"].as_str().unwrap(), &user_text);
+            assert_eq!(history[0]["assistant"].as_str().unwrap(), &assistant_text);
+        });
+    }
+
+    #[test]
+    fn to_session_json_roundtrip_proptest_mode() {
+        proptest::proptest!(|(mode_label in "CHAT|CODE|PLAN")| {
+            let mut session = make_session();
+            session.mode = match mode_label.as_str() {
+                "CODE" => RunMode::Code,
+                "PLAN" => RunMode::Plan,
+                _ => RunMode::Chat,
+            };
+            let json = session.to_session_json();
+            assert_eq!(json["mode"].as_str().unwrap(), &mode_label);
+        });
+    }
+
+    #[test]
+    fn to_session_json_empty_history() {
+        let session = make_session();
+        let json = session.to_session_json();
+        assert_eq!(json["mode"], "CHAT");
+        assert!(json["history"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn to_session_json_includes_timestamp() {
+        let session = make_session();
+        let json = session.to_session_json();
+        assert!(json["saved_at"].as_str().unwrap_or("").len() > 5);
     }
 }

@@ -1,6 +1,9 @@
 //! End-to-end benchmarks for the `rem` CLI.
 //! Runs the actual compiled binary to measure real-world performance.
 //! Uses Criterion for statistical analysis.
+//!
+//! Library-code microbenchmarks (BM25, tokenization, session serialization)
+//! are written as `#[bench]` tests inside the relevant source modules.
 
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,7 +77,6 @@ fn bench_index_dry_run(c: &mut Criterion) {
         b.iter_with_setup(
             || {
                 let root = unique_dir("index");
-                // Create a small project structure to index
                 std::fs::create_dir_all(root.join("src")).unwrap();
                 std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"hello\"); }\n").unwrap();
                 std::fs::write(root.join("src/lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();

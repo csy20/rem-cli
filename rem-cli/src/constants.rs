@@ -55,37 +55,7 @@ pub const INDEX_TARGET_CHUNK_BYTES: usize = 2800;
 /// Maximum depth for directory walk during indexing.
 pub const INDEX_MAX_DEPTH: usize = 8;
 
-// ── BM25 Retrieval ──────────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-pub const BM25_K1: f64 = 1.5;
-#[allow(dead_code)]
-pub const BM25_B: f64 = 0.75;
-#[allow(dead_code)]
-pub const BM25_NAME_PATH_BONUS: f64 = 2.0;
-#[allow(dead_code)]
-pub const BM25_CHUNK_TYPE_BONUS: f64 = 0.5;
-#[allow(dead_code)]
-pub const BM25_EMBEDDING_BONUS_MULT: f64 = 3.0;
-#[allow(dead_code)]
-pub const BM25_DEFAULT_TOP_K: usize = 8;
-#[allow(dead_code)]
-pub const BM25_DEFAULT_MAX_CHARS: usize = 4500;
-
 // ── Context / Prompt ────────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-pub const AT_REF_MAX_CHARS: usize = 8000;
-#[allow(dead_code)]
-pub const PROJECT_LISTING_MAX_CHARS: usize = 6000;
-#[allow(dead_code)]
-pub const RETRIEVED_CONTEXT_MAX_CHARS: usize = 4800;
-#[allow(dead_code)]
-pub const LAST_CODE_MAX_CHARS: usize = 6000;
-#[allow(dead_code)]
-pub const LAST_FILE_MAX_CHARS: usize = 3000;
-#[allow(dead_code)]
-pub const PIPE_MAX_CHARS: usize = 12000;
 
 /// Max chat history turns to keep.
 pub const MAX_HISTORY_TURNS: usize = 12;
@@ -101,9 +71,6 @@ pub const MAX_HISTORY_ENTRIES: usize = 1000;
 /// Max rounds in the autonomous tool-calling loop.
 pub const MAX_TOOL_ROUNDS: usize = 10;
 
-#[allow(dead_code)]
-pub const MAX_TOOL_OUTPUT_CHARS: usize = 2000;
-
 /// Max chars of stdout from a run_command tool.
 pub const TOOL_COMMAND_STDOUT_MAX: usize = 2000;
 
@@ -115,10 +82,6 @@ pub const TOOL_RESULT_MAX_CHARS: usize = 1500;
 
 /// Timeout for tool subprocess execution.
 pub const TOOL_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Timeout for web search tool calls.
-#[allow(dead_code)]
-pub const TOOL_SEARCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ── Agentic / Goal ──────────────────────────────────────────────────────────
 
@@ -147,49 +110,13 @@ pub const REVIEW_DIFF_MAX_LINES: usize = 30;
 
 // ── Embeddings ──────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
-pub const EMBEDDING_MAX_CHUNK_CHARS: usize = 8000;
-#[allow(dead_code)]
-pub const EMBEDDING_BATCH_SIZE: usize = 10;
-#[allow(dead_code)]
-pub const EMBEDDING_MODEL: &str = "nomic-embed-text";
-#[allow(dead_code)]
-pub const EMBEDDING_TIMEOUT: Duration = Duration::from_secs(120);
+/// Max uncompressed bytes for session files beyond which auto-save warns.
+pub const MAX_SESSION_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
-/// Default config values.
-#[allow(dead_code)]
-pub const DEFAULT_MODEL: &str = "rem-coder:latest";
-#[allow(dead_code)]
-pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
-#[allow(dead_code)]
-pub const DEFAULT_TIMEOUT_S: u64 = 120;
-#[allow(dead_code)]
-pub const DEFAULT_MAX_CONTEXT_BYTES: usize = 16_000;
-#[allow(dead_code)]
-pub const DEFAULT_MODEL_CTX: usize = 4096;
-
-/// Minimum reasonable timeout.
-#[allow(dead_code)]
-pub const MIN_TIMEOUT_S: u64 = 5;
-#[allow(dead_code)]
-pub const MAX_TIMEOUT_S: u64 = 600;
-
-#[allow(dead_code)]
-pub const MIN_MODEL_CTX: usize = 512;
-
-// ── Themes ──────────────────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-pub const DEFAULT_THEME: &str = "GHOST";
-#[allow(dead_code)]
-pub const DEFAULT_MODE: &str = "CHAT";
-
 // ── Search ──────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
-pub const DEFAULT_SEARCH_PROVIDER: &str = "ddg";
 pub const SEARCH_MAX_RESULTS: usize = 8;
 
 pub(crate) const TOKEN_BUDGET_PER_TURN: usize = 500;

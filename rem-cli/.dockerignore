@@ -1,0 +1,11 @@
+target/
+.git/
+*.md
+*.json
+AGENTS.md
+install.sh
+Justfile
+themes/
+prompts/
+benches/
+proptest-regressions/

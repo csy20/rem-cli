@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use rayon::prelude::*;
+
 use super::{CodebaseIndex, IndexChunk};
 
 /// Tokenizes text into lowercase alphanumeric tokens (min 2 chars).
@@ -64,59 +66,64 @@ pub fn retrieve_relevant_chunks<'a>(
     let n = index.chunks.len() as f64;
     let avg_dl = if index.avg_dl > 0.0 { index.avg_dl } else { 1.0 };
 
-    let mut scored: Vec<(f64, &IndexChunk)> = Vec::with_capacity(candidate_indices.len() + 16);
+    // Parallel BM25 scoring on candidate chunks (those containing query terms in content)
+    let candidates: Vec<usize> = candidate_indices
+        .iter()
+        .copied()
+        .filter(|&idx| idx < index.chunks.len())
+        .collect();
+    let mut scored: Vec<(f64, &IndexChunk)> = candidates
+        .par_iter()
+        .filter_map(|&idx| {
+            let c = &index.chunks[idx];
+            let mut score = 0.0f64;
+            let dl = c.content.len() as f64;
 
-    // BM25 scoring only on candidate chunks (those containing query terms in content)
-    for &idx in &candidate_indices {
-        if idx >= index.chunks.len() {
-            continue;
-        }
-        let c = &index.chunks[idx];
-        let mut score = 0.0f64;
-        let dl = c.content.len() as f64;
+            // Build token frequency map once per chunk (avoids O(q_words × tokens) scan)
+            let token_counts: std::collections::HashMap<&str, usize> = {
+                let mut map = std::collections::HashMap::new();
+                for t in c
+                    .content_lower
+                    .split(|ch: char| !ch.is_alphanumeric())
+                    .filter(|t| t.len() > 1)
+                {
+                    *map.entry(t).or_insert(0) += 1;
+                }
+                map
+            };
+            let has_name_or_path_match = q_words
+                .iter()
+                .any(|w| c.name_lower.contains(w) || c.path_lower.contains(w));
 
-        // Build token frequency map once per chunk (avoids O(q_words × tokens) scan)
-        let token_counts: std::collections::HashMap<&str, usize> = {
-            let mut map = std::collections::HashMap::new();
-            for t in c
-                .content_lower
-                .split(|ch: char| !ch.is_alphanumeric())
-                .filter(|t| t.len() > 1)
-            {
-                *map.entry(t).or_insert(0) += 1;
+            for w in &q_words {
+                let tf_val = token_counts.get(w.as_str()).copied().unwrap_or(0);
+                if tf_val == 0 {
+                    continue;
+                }
+                let tf = tf_val as f64;
+                let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg_dl)));
+                let df = index.doc_freqs.get(w).copied().unwrap_or(1) as f64;
+                let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+                score += tf_norm * idf;
             }
-            map
-        };
-        let has_name_or_path_match = q_words
-            .iter()
-            .any(|w| c.name_lower.contains(w) || c.path_lower.contains(w));
 
-        for w in &q_words {
-            let tf_val = token_counts.get(w.as_str()).copied().unwrap_or(0);
-            if tf_val == 0 {
-                continue;
+            // Name/path bonus (computed once, not per word)
+            if has_name_or_path_match {
+                score += 2.0;
             }
-            let tf = tf_val as f64;
-            let tf_norm = (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * (dl / avg_dl)));
-            let df = index.doc_freqs.get(w).copied().unwrap_or(1) as f64;
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
-            score += tf_norm * idf;
-        }
 
-        // Name/path bonus (computed once, not per word)
-        if has_name_or_path_match {
-            score += 2.0;
-        }
+            // Chunk type bonus
+            if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
+                score += 0.5;
+            }
 
-        // Chunk type bonus
-        if matches!(c.chunk_type.as_str(), "function" | "class" | "method") {
-            score += 0.5;
-        }
-
-        if score > 0.0 {
-            scored.push((score, c));
-        }
-    }
+            if score > 0.0 {
+                Some((score, c))
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // Also scan all chunks for name/path matches that weren't content candidates
     for (idx, c) in index.chunks.iter().enumerate() {

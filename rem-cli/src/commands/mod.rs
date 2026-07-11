@@ -16,6 +16,17 @@ pub mod tools;
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+/// Category grouping for `/help` output.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum CommandCategory {
+    Session,
+    Code,
+    Tools,
+    Project,
+    Model,
+    System,
+}
+
 /// Metadata about a registered slash command.
 #[derive(Clone, Copy)]
 pub(crate) struct CommandInfo {
@@ -25,6 +36,8 @@ pub(crate) struct CommandInfo {
     pub(crate) usage: &'static str,
     /// Detailed help text with examples (shown by `/help <command>`).
     pub(crate) long_description: &'static str,
+    /// Category for grouped help display.
+    pub(crate) category: CommandCategory,
 }
 
 /// O(1) lookup for command metadata by name.
@@ -109,24 +122,45 @@ impl CommandRegistry {
         }
     }
 
-    /// Builds the help text body (commands list + tips section).
+    /// Builds the help text body (commands list + tips section), grouped by category.
     fn build_help_body(&self, t: &crate::ui::theme::Theme) -> String {
+        use CommandCategory::*;
         let mut buf = String::new();
         let push = |buf: &mut String, s: &str| {
             buf.push_str(s);
             buf.push('\n');
         };
         push(&mut buf, &crate::ui::theme::paint_rail_empty(t));
-        push(&mut buf, &crate::ui::theme::paint_rail_header(t, "COMMANDS"));
+
+        let categories = [
+            (Session, "SESSION"),
+            (Code, "CODE"),
+            (Tools, "TOOLS"),
+            (Project, "PROJECT"),
+            (Model, "MODEL"),
+            (System, "SYSTEM"),
+        ];
         let mut seen_descriptions: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for &(name, info) in &self.entries {
-            if !name.starts_with('/') || !seen_descriptions.insert(info.description) {
+        for (cat_id, cat_label) in &categories {
+            let mut cat_entries: Vec<&(&str, CommandInfo)> = self
+                .entries
+                .iter()
+                .filter(|(name, info)| name.starts_with('/') && info.category == *cat_id)
+                .collect();
+            if cat_entries.is_empty() {
                 continue;
             }
-            push(
-                &mut buf,
-                &crate::ui::theme::paint_help_line(t, info.usage, info.description),
-            );
+            cat_entries.sort_by_key(|(name, _)| *name);
+            push(&mut buf, &crate::ui::theme::paint_rail_header(t, cat_label));
+            for &(_name, info) in &cat_entries {
+                if !seen_descriptions.insert(info.description) {
+                    continue;
+                }
+                push(
+                    &mut buf,
+                    &crate::ui::theme::paint_help_line(t, info.usage, info.description),
+                );
+            }
         }
         push(&mut buf, &crate::ui::theme::paint_rail_empty(t));
         push(&mut buf, &crate::ui::theme::paint_rail_header(t, "TIPS"));
@@ -193,6 +227,7 @@ impl CommandRegistry {
     pub fn print_help(&self) {
         let t = crate::ui::theme::active();
         let body = self.build_help_body(&t);
+        crate::pager::store_output(&body);
         if self.entries.iter().filter(|(name, _)| name.starts_with('/')).count() > 40 {
             crate::pager::maybe_page(&body);
         } else {
@@ -210,6 +245,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Show this help message",
                 usage: "/help",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -218,6 +254,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Show this help message",
                 usage: "help",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -226,6 +263,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Exit the REPL",
                 usage: "exit",
                 long_description: "",
+            category: CommandCategory::System,
             },
         ),
         (
@@ -234,6 +272,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Exit the REPL",
                 usage: "quit",
                 long_description: "",
+            category: CommandCategory::System,
             },
         ),
         (
@@ -242,6 +281,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Change the color theme",
                 usage: "/theme [name]",
                 long_description: "",
+            category: CommandCategory::System,
             },
         ),
         (
@@ -250,6 +290,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Show or change the active model",
                 usage: "/model <name>",
                 long_description: "",
+            category: CommandCategory::Model,
             },
         ),
         (
@@ -258,6 +299,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Show or change the LLM provider",
                 usage: "/provider <name>",
                 long_description: "",
+            category: CommandCategory::Model,
             },
         ),
         (
@@ -266,6 +308,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Switch between chat and code mode",
                 usage: "/mode",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -274,6 +317,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Switch to plan mode for structured output",
                 usage: "/plan",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -282,6 +326,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Clear the chat history",
                 usage: "/clear",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -290,6 +335,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Reset the session",
                 usage: "/reset",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -298,6 +344,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Explain the last response",
                 usage: "/why",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -306,6 +353,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Show last generated files",
                 usage: "/code",
                 long_description: "",
+            category: CommandCategory::Code,
             },
         ),
         (
@@ -314,6 +362,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Undo last file write",
                 usage: "/undo",
                 long_description: "",
+            category: CommandCategory::Code,
             },
         ),
         (
@@ -322,6 +371,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "List all project files",
                 usage: "/files",
                 long_description: "",
+            category: CommandCategory::Project,
             },
         ),
         (
@@ -330,6 +380,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Show diff of last changes",
                 usage: "/diff",
                 long_description: "",
+            category: CommandCategory::Code,
             },
         ),
         (
@@ -338,6 +389,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Apply the last diff (write changed files with backup for undo)",
                 usage: "/apply",
                 long_description: "",
+            category: CommandCategory::Code,
             },
         ),
         (
@@ -346,6 +398,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Show token usage statistics",
                 usage: "/tokens",
                 long_description: "",
+            category: CommandCategory::System,
             },
         ),
         (
@@ -354,6 +407,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "View or update project memory",
                 usage: "/memory [key=value]",
                 long_description: "",
+            category: CommandCategory::Project,
             },
         ),
         (
@@ -362,6 +416,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Initialize project scaffolding",
                 usage: "/init",
                 long_description: "",
+            category: CommandCategory::Project,
             },
         ),
         (
@@ -370,6 +425,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Show or update configuration",
                 usage: "/config [key=value]",
                 long_description: "",
+            category: CommandCategory::Project,
             },
         ),
         (
@@ -378,6 +434,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Lint the last written files or a specific path",
                 usage: "/lint [file]",
                 long_description: "",
+            category: CommandCategory::Tools,
             },
         ),
         (
@@ -386,6 +443,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Search text inside the project",
                 usage: "/find <query>",
                 long_description: "",
+            category: CommandCategory::Tools,
             },
         ),
         (
@@ -394,6 +452,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Write content to a file",
                 usage: "/write <path>",
                 long_description: "",
+            category: CommandCategory::Code,
             },
         ),
         (
@@ -402,6 +461,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Save the session or write content to a file",
                 usage: "/save [<path>]",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -410,6 +470,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Change the project directory",
                 usage: "/dir <path>",
                 long_description: "",
+            category: CommandCategory::Project,
             },
         ),
         (
@@ -418,6 +479,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Copy last N files to clipboard",
                 usage: "/copy [N]",
                 long_description: "",
+            category: CommandCategory::Code,
             },
         ),
         (
@@ -426,6 +488,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Resume a saved session",
                 usage: "/resume",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -434,6 +497,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Compact the chat context",
                 usage: "/compact",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -442,14 +506,16 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Preview compaction without calling the LLM",
                 usage: "/compact-dry-run",
                 long_description: "Shows what /compact would summarize: current turn count and first lines of each turn. Does not call the LLM or modify history.",
+            category: CommandCategory::Session,
             },
         ),
         (
             "/session",
             CommandInfo {
                 description: "Export or import a session",
-                usage: "/session export <path> | /session import <path>",
+                usage: "/session export <path> | /session export-md <path> | /session import <path>",
                 long_description: "",
+            category: CommandCategory::Session,
             },
         ),
         (
@@ -458,6 +524,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Search the web",
                 usage: "/search <query>",
                 long_description: "",
+            category: CommandCategory::Tools,
             },
         ),
         (
@@ -466,6 +533,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Explain the selected code",
                 usage: "/explain <code>",
                 long_description: "",
+            category: CommandCategory::Tools,
             },
         ),
         (
@@ -474,6 +542,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Generate tests for the selected code",
                 usage: "/test <file>",
                 long_description: "",
+            category: CommandCategory::Tools,
             },
         ),
         (
@@ -482,6 +551,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Refactor the selected code",
                 usage: "/refactor <file>",
                 long_description: "",
+            category: CommandCategory::Tools,
             },
         ),
         (
@@ -490,6 +560,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Review changes for quality issues",
                 usage: "/review",
                 long_description: "",
+            category: CommandCategory::Tools,
             },
         ),
         (
@@ -498,6 +569,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Run autonomous goal-driven loop",
                 usage: "/goal <condition>",
                 long_description: "",
+            category: CommandCategory::Code,
             },
         ),
         (
@@ -506,6 +578,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Analyze an image with the LLM",
                 usage: "/vision <path>",
                 long_description: "",
+            category: CommandCategory::Code,
             },
         ),
         (
@@ -514,6 +587,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Configure reasoning/thinking mode",
                 usage: "/reasoning [on|off|effort]",
                 long_description: "",
+            category: CommandCategory::Model,
             },
         ),
         (
@@ -522,6 +596,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Watch files for changes and auto-retry",
                 usage: "/watch",
                 long_description: "",
+            category: CommandCategory::Tools,
             },
         ),
         (
@@ -530,6 +605,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Reload config and project settings from disk",
                 usage: "/reload",
                 long_description: "Clears the config cache and re-reads ~/.config/rem-cli/config.toml and .remcli.toml.\nUseful after editing config files without restarting the REPL.",
+            category: CommandCategory::Project,
             },
         ),
         (
@@ -538,6 +614,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "List available models from the active provider",
                 usage: "/models",
                 long_description: "Fetches and displays all available models from the current provider (e.g. Ollama, OpenAI).\nUse /model <name> to switch to a different model.",
+            category: CommandCategory::Model,
             },
         ),
         (
@@ -546,6 +623,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Pull a model from Ollama",
                 usage: "/pull <model-name>",
                 long_description: "Downloads a model from Ollama's registry. Only works with the Ollama provider.\nExample: /pull llama3.2:3b",
+            category: CommandCategory::Model,
             },
         ),
         (
@@ -554,6 +632,7 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Stage all changes and create a git commit",
                 usage: "/commit [message]",
                 long_description: "Runs git add -A and git commit in the project directory.\nIf no message is provided, prompts interactively.\nExample: /commit \"fix: resolve type error in parser\"",
+            category: CommandCategory::System,
             },
         ),
         (
@@ -562,11 +641,22 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Generate and display a session summary",
                 usage: "/summary [save-path]",
                 long_description: "Uses the LLM to summarize the current conversation covering key decisions,\ncode generated, bugs fixed, and next actions.\nOptionally save to a file: /summary output.txt",
+            category: CommandCategory::Session,
+            },
+        ),
+        (
+            "/page",
+            CommandInfo {
+                description: "Re-view the last output through a pager",
+                usage: "/page",
+                long_description: "Pipes the most recent command output through the system pager (less by default).\nUseful when previous output has scrolled off the terminal screen.",
+            category: CommandCategory::Session,
             },
         ),
     ])
 }
 
+pub(crate) use crate::pager::handle_page;
 pub(crate) use crate::vision::handle_vision;
 pub(crate) use files::{auto_write_files, handle_copy, handle_undo, handle_write, print_last_files, prompt_for_path};
 pub(crate) use git::handle_commit;
@@ -579,8 +669,9 @@ pub(crate) use repl::{
 pub(crate) use review::{handle_apply, handle_diff, handle_review};
 pub(crate) use session::{
     handle_compact, handle_compact_dry_run, handle_compact_undo, handle_config, handle_config_set, handle_dir,
-    handle_export_session, handle_import_session, handle_init, handle_list_files, handle_list_sessions, handle_memory,
-    handle_memory_set, handle_reload, handle_resume_session, handle_save_session, handle_summary, handle_tokens,
+    handle_export_session, handle_export_session_md, handle_import_session, handle_init, handle_list_files,
+    handle_list_sessions, handle_memory, handle_memory_set, handle_reload, handle_resume_session, handle_save_session,
+    handle_summary, handle_tokens,
 };
 pub(crate) use tools::{
     handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_test,
@@ -685,6 +776,7 @@ mod tests {
                     description: "Foo command",
                     usage: "/foo",
                     long_description: "",
+                    category: CommandCategory::System,
                 },
             ),
             (
@@ -693,6 +785,7 @@ mod tests {
                     description: "Bar command",
                     usage: "bar",
                     long_description: "",
+                    category: CommandCategory::System,
                 },
             ),
         ];

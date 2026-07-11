@@ -349,8 +349,19 @@ fn execute_edit_file(
         Ok(c) => c,
         Err(e) => return err_result(tool_call, &format!("failed to read {}: {}", path.display(), e)),
     };
-    let Some(pos) = content.find(&old_string) else {
+    let count = content.matches(&old_string).count();
+    let pos = if count > 1 {
+        content.rfind(&old_string)
+    } else {
+        content.find(&old_string)
+    };
+    let Some(pos) = pos else {
         return err_result(tool_call, &format!("old_string not found in {}", path.display()));
+    };
+    let note = if count > 1 {
+        format!(" (replaced last of {} occurrences)", count)
+    } else {
+        String::new()
     };
     let new_content = format!(
         "{}{}{}",
@@ -367,7 +378,10 @@ fn execute_edit_file(
     ToolCallResult {
         call_id: tool_call.id.clone(),
         name: "edit_file".into(),
-        content: format!("Edited {}: replaced {} with {}", file_path, old_string, new_string),
+        content: format!(
+            "Edited {}: replaced {} with {}{}",
+            file_path, old_string, new_string, note
+        ),
         is_error: false,
     }
 }

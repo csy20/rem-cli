@@ -3,6 +3,35 @@ use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 use std::sync::RwLock;
 
+/// Stores the last output text for the `/page` command.
+static LAST_OUTPUT: LazyLock<RwLock<String>> = LazyLock::new(|| RwLock::new(String::new()));
+
+/// Stores text for later retrieval via the `/page` command.
+pub fn store_output(text: &str) {
+    if let Ok(mut buf) = LAST_OUTPUT.write() {
+        *buf = text.to_string();
+    }
+}
+
+/// Returns the stored output for the `/page` command.
+pub fn last_output() -> String {
+    LAST_OUTPUT.read().map(|b| b.clone()).unwrap_or_default()
+}
+
+/// Displays the last stored output through the pager (`/page` command).
+pub fn handle_page() {
+    let text = last_output();
+    if text.is_empty() {
+        let t = crate::ui::theme::active();
+        eprintln!(
+            "{} no previous output stored",
+            crate::ui::theme::paint_warning(&t, "\u{258C}")
+        );
+        return;
+    }
+    maybe_page(&text);
+}
+
 /// Threshold for auto-paging (lines). Output shorter than this is printed directly.
 /// Initialized to 50 by default; can be overridden via config or `init_page_threshold`.
 static PAGE_THRESHOLD: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(50));

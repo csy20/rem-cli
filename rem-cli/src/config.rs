@@ -288,8 +288,9 @@ fn warn_missing_api_key(cfg: &AppConfig) {
     }
 }
 
-/// Validates config at startup, printing warnings for common issues.
-pub(crate) fn validate_config(cfg: &AppConfig) {
+/// Validates config at startup. Returns `Err` for hard failures (invalid provider, mode, URL),
+/// prints warnings for non-critical issues (missing API key, unusual timeouts, etc.).
+pub(crate) fn validate_config(cfg: &AppConfig) -> Result<()> {
     let known_providers = [
         "ollama",
         "openai",
@@ -309,8 +310,7 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
             cfg.provider,
             known_providers.join(", ")
         );
-        warn!("{}", msg);
-        eprintln!("  {} {msg}", warn_prefix);
+        return Err(anyhow::anyhow!("{}", msg));
     }
 
     warn_missing_api_key(cfg);
@@ -318,8 +318,7 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
     let mode = cfg.mode.to_uppercase();
     if !["CHAT", "CODE", "PLAN"].contains(&mode.as_str()) {
         let msg = format!("unknown mode '{}' in config. Expected CHAT, CODE, or PLAN.", cfg.mode);
-        warn!("{msg}");
-        eprintln!("  {} {msg}", warn_prefix);
+        return Err(anyhow::anyhow!("{}", msg));
     }
 
     if cfg.timeout_s < 5 || cfg.timeout_s > 600 {
@@ -343,8 +342,7 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
             "ollama_url '{}' does not look like a valid URL (expected http:// or https://)",
             url
         );
-        warn!("{msg}");
-        eprintln!("  {} {msg}", warn_prefix);
+        return Err(anyhow::anyhow!("{}", msg));
     }
 
     if let Some(ref effort) = cfg.reasoning_effort {
@@ -379,6 +377,8 @@ pub(crate) fn validate_config(cfg: &AppConfig) {
         warn!("{msg}");
         eprintln!("  {} {msg}", warn_prefix);
     }
+
+    Ok(())
 }
 
 /// Invalidates the in-memory config cache so the next call to load_config re-reads from disk.
@@ -451,17 +451,16 @@ mod tests {
     #[test]
     fn validate_config_accepts_valid() {
         let cfg = AppConfig::default();
-        // Should not panic or produce warnings.
-        validate_config(&cfg);
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]
-    fn validate_config_warns_on_unknown_mode() {
+    fn validate_config_errors_on_unknown_mode() {
         let cfg = AppConfig {
             mode: "INVALID".into(),
             ..Default::default()
         };
-        validate_config(&cfg);
+        assert!(validate_config(&cfg).is_err());
     }
 
     #[test]
@@ -470,7 +469,8 @@ mod tests {
             timeout_s: 1000,
             ..Default::default()
         };
-        validate_config(&cfg);
+        // Timeout out of range is a warning, not an error
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]
@@ -479,7 +479,8 @@ mod tests {
             model_ctx: 128,
             ..Default::default()
         };
-        validate_config(&cfg);
+        // Low model_ctx is a warning, not an error
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]
@@ -498,17 +499,17 @@ mod tests {
                 provider: provider.to_string(),
                 ..Default::default()
             };
-            validate_config(&cfg);
+            assert!(validate_config(&cfg).is_ok(), "provider {provider} should be valid");
         }
     }
 
     #[test]
-    fn validate_config_warns_on_bad_ollama_url() {
+    fn validate_config_errors_on_bad_ollama_url() {
         let cfg = AppConfig {
             ollama_url: "not-a-url".into(),
             ..Default::default()
         };
-        validate_config(&cfg);
+        assert!(validate_config(&cfg).is_err());
     }
 
     #[test]
@@ -517,7 +518,7 @@ mod tests {
             reasoning_effort: Some("extreme".into()),
             ..Default::default()
         };
-        validate_config(&cfg);
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]
@@ -526,7 +527,7 @@ mod tests {
             thinking_budget: Some(0),
             ..Default::default()
         };
-        validate_config(&cfg);
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]
@@ -535,7 +536,7 @@ mod tests {
             theme: "NONEXISTENT_THEME_123".into(),
             ..Default::default()
         };
-        validate_config(&cfg);
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]
@@ -545,7 +546,7 @@ mod tests {
             api_key: Some("my-secret".into()),
             ..Default::default()
         };
-        validate_config(&cfg);
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]

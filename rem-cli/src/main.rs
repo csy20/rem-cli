@@ -136,7 +136,15 @@ async fn main() -> Result<()> {
         cfg.api_key = Some(k);
     }
 
-    validate_config(&cfg);
+    if let Err(e) = validate_config(&cfg) {
+        let t = theme::active();
+        eprintln!(
+            "{} {}",
+            theme::paint_error_label(&t, "✗"),
+            theme::paint(&t, "error", &format!("config error: {e}"), false)
+        );
+        std::process::exit(1);
+    }
 
     // Commands that don't need a provider — handle early
     let _handled = matches!(

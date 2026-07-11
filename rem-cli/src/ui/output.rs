@@ -61,7 +61,7 @@ impl SpinnerGuard {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
-        eprint!("\r{}\r", " ".repeat(*COLUMNS_WIDTH));
+        eprint!("\r\x1b[2K{}\r", " ".repeat(*COLUMNS_WIDTH));
         let _ = io::stderr().flush();
     }
 }

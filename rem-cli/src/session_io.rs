@@ -97,7 +97,7 @@ pub(crate) fn build_project_context(dir: &Path, max_bytes: usize) -> String {
         if rel_str.starts_with('.') && rel_str != "." {
             continue;
         }
-        if rel_str.contains("dist")
+        if rel.components().any(|c| c.as_os_str() == "dist")
             || rel_str.contains(".pytest_cache")
             || rel
                 .components()

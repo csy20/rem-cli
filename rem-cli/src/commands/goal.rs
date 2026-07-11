@@ -396,7 +396,8 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
         }
 
         if tool_results.len() > MAX_TOOL_OUTPUT_LEN {
-            tool_results.truncate(MAX_TOOL_OUTPUT_LEN);
+            let cutoff = tool_results.floor_char_boundary(MAX_TOOL_OUTPUT_LEN);
+            tool_results.truncate(cutoff);
             tool_results.push_str("\n... [truncated]");
         }
         last_tool_output = tool_results;
