@@ -53,9 +53,10 @@ pub(crate) static REPL_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Registers a global Ctrl+C handler that cancels streams on first press,
 /// and signals graceful exit on second press.
-/// When REPL_ACTIVE is set, the global handler ONLY cancels the stream
-/// without counting — the REPL handler manages the count itself.
-/// Prints nothing — UI messages come from the REPL readline handler.
+/// When REPL_ACTIVE is set, the global handler ONLY sets STREAM_CANCELLED
+/// without touching CTRL_C_COUNT — the REPL handler manages counting
+/// locally via its own `interrupted_once` flag, eliminating the TOCTOU race
+/// between the two handlers reading/writing the same atomic.
 fn setup_global_ctrlc_handler() {
     tokio::spawn(async {
         let mut consecutive_errors: u32 = 0;
@@ -64,7 +65,8 @@ fn setup_global_ctrlc_handler() {
                 Ok(()) => {
                     consecutive_errors = 0;
                     provider::STREAM_CANCELLED.store(true, Ordering::SeqCst);
-                    // When REPL is active, the REPL handler owns counting
+                    // When REPL is active, the REPL handler owns counting via
+                    // a local flag in read_user_input — never touch CTRL_C_COUNT.
                     if REPL_ACTIVE.load(Ordering::SeqCst) {
                         continue;
                     }

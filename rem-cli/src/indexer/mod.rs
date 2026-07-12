@@ -79,6 +79,10 @@ pub struct IndexChunk {
     pub(crate) name_lower: String,
     /// Pre-computed lowercased path for faster retrieval.
     pub(crate) path_lower: String,
+    /// Pre-computed token → frequency map for BM25 scoring,
+    /// avoiding O(chunks × query_terms) re-tokenization at query time.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub(crate) token_counts: std::collections::HashMap<String, usize>,
 }
 
 /// Try to load an index for the given project dir, returning the full `CodebaseIndex`

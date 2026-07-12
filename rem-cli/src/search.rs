@@ -2,11 +2,8 @@
 //! When an API key is configured for Google or Bing, uses the proper search API;
 //! otherwise falls back to DuckDuckGo HTML scraping.
 
-use std::sync::LazyLock;
-
 use crate::ui;
 use anyhow::{Context, Result};
-use regex::Regex;
 use reqwest::Client;
 use scraper::{Html, Selector};
 
@@ -102,10 +99,13 @@ async fn search_bing(client: &Client, query: &str, api_key: &str) -> Result<Vec<
 }
 
 async fn search_ddg(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
+    // Use DDG Lite — a simpler HTML endpoint that is much less likely to change
+    // compared to the full html.duckduckgo.com/html/ page.
     let resp = client
-        .get("https://html.duckduckgo.com/html/")
-        .query(&[("q", query)])
+        .post("https://lite.duckduckgo.com/lite/")
+        .header("Content-Type", "application/x-www-form-urlencoded")
         .header("User-Agent", "Mozilla/5.0 (compatible; rem-cli/0.4)")
+        .body(format!("q={}", urlencoding_encode(query)))
         .send()
         .await
         .context("web search request failed")?;
@@ -113,87 +113,58 @@ async fn search_ddg(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
         return Err(anyhow::anyhow!("DuckDuckGo returned HTTP {}", resp.status()));
     }
     let html = resp.text().await.context("failed to read search response")?;
-    Ok(parse_ddg_html(&html))
+    Ok(parse_ddg_lite_html(&html))
 }
 
-/// Simple percent-decoding for URL-encoded strings (no external dep needed).
-fn url_decode(s: &str) -> String {
+/// Minimal URL encoding for search queries (spaces → +, keep most chars).
+fn urlencoding_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                out.push(byte as char);
-            } else {
-                out.push('%');
-                out.push_str(&hex);
+    for c in s.chars() {
+        match c {
+            ' ' => out.push('+'),
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
+            _ => {
+                for b in c.to_string().bytes() {
+                    out.push_str(&format!("%{:02X}", b));
+                }
             }
-        } else if c == '+' {
-            out.push(' ');
-        } else {
-            out.push(c);
         }
     }
     out
 }
 
-/// Extracts the actual destination URL from a DuckDuckGo redirect URL.
-/// DDG wraps result links in `//duckduckgo.com/l/?uddg=<encoded_url>&rut=...`
-fn resolve_ddg_url(href: &str) -> String {
-    if href.contains("uddg=") {
-        static RE_UDDG: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"[?&]uddg=([^&]+)").expect("invalid uddg regex"));
-        if let Some(caps) = RE_UDDG.captures(href) {
-            if let Some(encoded) = caps.get(1) {
-                return url_decode(encoded.as_str());
-            }
-        }
-    }
-    href.to_string()
-}
-
-fn ddg_selectors() -> (&'static Selector, &'static Selector, &'static Selector) {
-    static RESULT: LazyLock<Selector> = LazyLock::new(|| Selector::parse(".result").expect("invalid selector"));
-    static TITLE: LazyLock<Selector> =
-        LazyLock::new(|| Selector::parse(".result__title a, .result__a").expect("invalid selector"));
-    static SNIPPET: LazyLock<Selector> =
-        LazyLock::new(|| Selector::parse(".result__snippet").expect("invalid selector"));
-    (&RESULT, &TITLE, &SNIPPET)
-}
-
-fn parse_ddg_html(html: &str) -> Vec<SearchResult> {
+/// Parses DDG Lite HTML responses.
+/// DDG Lite has a simple table-based layout:
+///   <tr class="result">
+///     <td class="result-snippet">...</td>
+///     <td><a rel="nofollow" href="...">title</a></td>
+///   </tr>
+fn parse_ddg_lite_html(html: &str) -> Vec<SearchResult> {
     let document = Html::parse_document(html);
 
-    let (result_selector, title_selector, snippet_selector) = ddg_selectors();
-    let result_selector = Some(result_selector);
-    let title_selector = Some(title_selector);
-    let snippet_selector = Some(snippet_selector);
-
-    let result_elements = match result_selector {
-        Some(sel) => document.select(sel).collect::<Vec<_>>(),
-        None => return Vec::new(),
-    };
+    static RESULT_ROW: std::sync::LazyLock<Selector> =
+        std::sync::LazyLock::new(|| Selector::parse("tr.result").expect("invalid selector"));
+    static RESULT_LINK: std::sync::LazyLock<Selector> =
+        std::sync::LazyLock::new(|| Selector::parse("a[rel='nofollow']").expect("invalid selector"));
+    static SNIPPET_CELL: std::sync::LazyLock<Selector> =
+        std::sync::LazyLock::new(|| Selector::parse("td.result-snippet").expect("invalid selector"));
 
     let mut results = Vec::new();
-    for element in result_elements.iter().take(crate::constants::SEARCH_MAX_RESULTS) {
-        let title = title_selector
-            .as_ref()
-            .and_then(|sel| element.select(sel).next())
+    for row in document.select(&RESULT_ROW).take(crate::constants::SEARCH_MAX_RESULTS) {
+        let title = row
+            .select(&RESULT_LINK)
+            .next()
             .map(|el| el.text().collect::<String>().trim().to_string())
             .unwrap_or_default();
-
-        let url = title_selector
-            .as_ref()
-            .and_then(|sel| element.select(sel).next())
+        let url = row
+            .select(&RESULT_LINK)
+            .next()
             .and_then(|el| el.value().attr("href"))
             .unwrap_or("")
             .to_string();
-        let url = resolve_ddg_url(&url);
-
-        let snippet = snippet_selector
-            .as_ref()
-            .and_then(|sel| element.select(sel).next())
+        let snippet = row
+            .select(&SNIPPET_CELL)
+            .next()
             .map(|el| el.text().collect::<String>().trim().to_string())
             .unwrap_or_default();
 
@@ -255,15 +226,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_ddg_html_returns_empty_for_empty_input() {
-        let results = parse_ddg_html("");
+    fn parse_ddg_lite_html_returns_empty_for_empty_input() {
+        let results = parse_ddg_lite_html("");
         assert!(results.is_empty());
     }
 
     #[test]
-    fn parse_ddg_html_returns_empty_for_no_matches() {
+    fn parse_ddg_lite_html_returns_empty_for_no_matches() {
         let html = "<html><body>no results here</body></html>";
-        let results = parse_ddg_html(html);
+        let results = parse_ddg_lite_html(html);
         assert!(results.is_empty());
     }
 

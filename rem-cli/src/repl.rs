@@ -146,10 +146,13 @@ fn needs_continuation(line: &str) -> bool {
 }
 
 /// Reads user input with multi-line support.
+/// Uses a local `interrupted_once` flag to track Ctrl+C presses within
+/// this single call, avoiding races with the global handler on CTRL_C_COUNT.
 fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme::Theme) -> Option<String> {
     let mut error_count = 0u8;
     let mut lines: Vec<String> = Vec::new();
     let mut combined = String::new();
+    let mut interrupted_once = false;
 
     loop {
         let current_prompt = if lines.is_empty() {
@@ -190,14 +193,15 @@ fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme
             }
             Err(e) => {
                 if e.kind() == io::ErrorKind::Interrupted || e.kind() == io::ErrorKind::UnexpectedEof {
-                    let count = crate::CTRL_C_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                    if count >= 2 || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
+                    crate::provider::STREAM_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                    if interrupted_once || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
                         println!("  {} Ctrl+C pressed twice -- bye!", ui::theme::paint_dim(t, "!"));
                         session.save_history();
                         session.auto_save_session();
                         return None;
                     }
-                    crate::provider::STREAM_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    interrupted_once = true;
 
                     if lines.is_empty() {
                         println!("  {} press Ctrl+C again to exit", ui::theme::paint_dim(t, "!"));
@@ -749,10 +753,10 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             }
         };
 
-        let system_prompt: Cow<'static, str> = if !lang_guidance.is_empty() {
-            format!("{}{}", system_prompt, lang_guidance).into()
-        } else {
+        let system_prompt: Cow<'static, str> = if lang_guidance.is_empty() {
             system_prompt.into()
+        } else {
+            format!("{}{}", system_prompt, lang_guidance).into()
         };
 
         if session.mode == RunMode::Chat && intent == TaskIntent::CodeAction {

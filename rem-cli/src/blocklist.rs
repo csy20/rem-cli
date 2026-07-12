@@ -126,8 +126,24 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     if normalized.contains("base64") && (normalized.contains("| sh") || normalized.contains("| bash")) {
         return true;
     }
-    // | bash pipe-to-shell
-    if normalized.contains("| bash") || normalized.contains("| /bin/bash") || normalized.contains("| /usr/bin/bash") {
+    // Pipe-to-shell: catch sh, bash, zsh, dash, and sh -c/shell variants
+    let pipe_shell_targets = [
+        "| sh",
+        "| bash",
+        "| zsh",
+        "| dash",
+        "| /bin/sh",
+        "| /usr/bin/sh",
+        "| /bin/bash",
+        "| /usr/bin/bash",
+        "| /bin/zsh",
+        "| /usr/bin/zsh",
+    ];
+    if pipe_shell_targets.iter().any(|t| normalized.contains(t)) {
+        return true;
+    }
+    // sh -c <cmd> (direct execution, not just pipe)
+    if normalized.starts_with("sh -c") || normalized.starts_with("bash -c") || normalized.starts_with("zsh -c") {
         return true;
     }
     false

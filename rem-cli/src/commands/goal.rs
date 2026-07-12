@@ -355,24 +355,25 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                 let is_test_file =
                     stem.ends_with("_test") || stem.ends_with("_spec") || stem == "test" || stem == "spec";
 
-                let (lint_result, test_result) = tokio::join!(run_lint(file_path), async {
-                    if is_test_file {
-                        let r = run_test(file_path).await;
-                        if !r.stderr.is_empty() || !r.stdout.is_empty() {
-                            println!("{}", format_tool_output(&r));
-                        }
-                        r
-                    } else {
-                        ToolOutput {
-                            tool_name: "test".into(),
-                            success: true,
-                            stdout: "[skipped — not a test file]".into(),
-                            stderr: String::new(),
-                            duration_ms: 0,
-                            action: "test".into(),
-                        }
+                let lint_result = run_lint(file_path).await;
+                println!("{}", format_tool_output(&lint_result));
+
+                let test_result = if is_test_file {
+                    let r = run_test(file_path).await;
+                    if !r.stderr.is_empty() || !r.stdout.is_empty() {
+                        println!("{}", format_tool_output(&r));
                     }
-                });
+                    r
+                } else {
+                    ToolOutput {
+                        tool_name: "test".into(),
+                        success: true,
+                        stdout: "[skipped — not a test file]".into(),
+                        stderr: String::new(),
+                        duration_ms: 0,
+                        action: "test".into(),
+                    }
+                };
                 println!("{}", format_tool_output(&lint_result));
 
                 tool_results.push_str(&build_tool_context(Some(&lint_result), Some(&test_result), None));

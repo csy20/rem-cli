@@ -290,18 +290,8 @@ async fn execute_run_command(
 
     match result {
         Ok(Ok(output)) => {
-            let stdout_max = output.stdout.len().min(crate::constants::TOOL_COMMAND_STDOUT_MAX);
-            let stderr_max = output.stderr.len().min(crate::constants::TOOL_COMMAND_STDERR_MAX);
-            let stdout_end = match std::str::from_utf8(&output.stdout[..stdout_max]) {
-                Ok(s) => s.len(),
-                Err(e) => e.valid_up_to(),
-            };
-            let stderr_end = match std::str::from_utf8(&output.stderr[..stderr_max]) {
-                Ok(s) => s.len(),
-                Err(e) => e.valid_up_to(),
-            };
-            let stdout = String::from_utf8_lossy(&output.stdout[..stdout_end]).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr[..stderr_end]).into_owned();
+            let stdout = truncate_utf8_safe(&output.stdout, crate::constants::TOOL_COMMAND_STDOUT_MAX);
+            let stderr = truncate_utf8_safe(&output.stderr, crate::constants::TOOL_COMMAND_STDERR_MAX);
             let mut content = String::new();
             if !stdout.is_empty() {
                 content.push_str(&format!("stdout:\n{}\n", stdout));
@@ -474,6 +464,16 @@ async fn execute_ask_user(tool_call: &ToolCall) -> ToolCallResult {
 
 fn resolve_path(base: &std::path::Path, rel: &str) -> Option<PathBuf> {
     crate::types::resolve_safe_path(base, rel)
+}
+
+/// Safely truncates a byte slice to `max_bytes` without breaking UTF-8.
+fn truncate_utf8_safe(data: &[u8], max_bytes: usize) -> String {
+    let end = data.len().min(max_bytes);
+    let valid_end = match std::str::from_utf8(&data[..end]) {
+        Ok(s) => s.len(),
+        Err(e) => e.valid_up_to(),
+    };
+    String::from_utf8_lossy(&data[..valid_end]).into_owned()
 }
 
 fn err_result(tool_call: &ToolCall, msg: &str) -> ToolCallResult {
