@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -5,6 +7,8 @@ use serde_json::json;
 
 use super::tools::{ToolCall, ToolResponse, ToolSpec};
 use super::{ProviderBackend, ProviderContext};
+
+static TOOL_CALL_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 #[derive(Debug, Deserialize)]
 pub struct GeminiResponse {
@@ -323,7 +327,10 @@ impl ProviderBackend for GeminiBackend {
                                             let args = fc.args.unwrap_or(serde_json::Value::Null);
                                             if !name.is_empty() {
                                                 tool_calls.push(ToolCall {
-                                                    id: format!("fc_{}", name),
+                                                    id: format!(
+                                                        "fc_{}",
+                                                        TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+                                                    ),
                                                     name,
                                                     arguments: args,
                                                 });

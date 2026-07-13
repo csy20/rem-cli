@@ -15,11 +15,11 @@ use crate::commands::{
     handle_compact_undo, handle_config, handle_config_set, handle_copy, handle_diff, handle_dir, handle_explain,
     handle_export_session, handle_export_session_md, handle_find, handle_goal, handle_import_session, handle_init,
     handle_lint_with_fallback, handle_list_files, handle_list_models, handle_list_sessions, handle_memory,
-    handle_memory_set, handle_mode, handle_model, handle_page, handle_plan, handle_provider, handle_pull_model,
-    handle_reasoning, handle_refactor, handle_reload, handle_reset, handle_resume_session, handle_review,
-    handle_save_session, handle_search, handle_summary, handle_test, handle_theme, handle_tokens, handle_undo,
-    handle_vision, handle_watch, handle_why, handle_write, print_chat_help, print_command_help, print_last_files,
-    prompt_for_path,
+    handle_memory_set, handle_mode, handle_model, handle_page, handle_ping, handle_plan, handle_provider,
+    handle_pull_model, handle_reasoning, handle_refactor, handle_reload, handle_reset, handle_resume_session,
+    handle_review, handle_save_session, handle_search, handle_status, handle_summary, handle_test, handle_theme,
+    handle_tokens, handle_undo, handle_vision, handle_watch, handle_why, handle_write, print_chat_help,
+    print_command_help, print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
@@ -49,6 +49,9 @@ fn initialize_session(client: &Provider, cfg: &mut AppConfig) -> Result<ChatSess
 
     ui::theme::set_active(&cfg.theme);
     let mut session = ChatSession::new(&client.ctx.model, workspace.clone())?;
+    session
+        .history_mgr
+        .set_max_history_tokens_from_ctx(client.ctx.model_ctx);
     let saved_mode = cfg.mode.to_uppercase();
     session.mode = match saved_mode.as_str() {
         "CODE" => RunMode::Code,
@@ -460,12 +463,20 @@ async fn dispatch_slash_command(
             handle_vision(client, session, args).await;
             false
         }
+        "/ping" => {
+            handle_ping(client).await;
+            false
+        }
         "/models" => {
             handle_list_models(client).await;
             false
         }
         "/pull" => {
             handle_pull_model(client, args).await;
+            false
+        }
+        "/status" => {
+            handle_status(session, client).await;
             false
         }
         "/commit" => {
@@ -620,6 +631,7 @@ fn handle_llm_response(
     } else {
         estimate_tokens(&cleaned) as u32
     };
+    session.total_tokens += session.last_tokens as u64;
 
     let treat_as_code = *intent == TaskIntent::CodeAction || session.mode == RunMode::Code;
     if treat_as_code {
@@ -637,9 +649,7 @@ fn handle_llm_response(
         display_text_output(&cleaned, t);
     }
 
-    if session.mode == RunMode::Plan || verbose {
-        display_performance_stats(client, session, elapsed, t);
-    }
+    display_performance_stats(client, session, elapsed, t);
 
     if !cleaned.is_empty() {
         session.history_mgr.push_turn(trimmed.to_string(), cleaned);
@@ -928,13 +938,12 @@ fn terminal_width() -> usize {
 fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
     let rail_chr = || ui::theme::paint(t, "accent", "\u{258C}", true);
     let max_width = terminal_width();
-    // Check if output looks like code (multi-line, starts with common keywords)
-    let highlighted = if cleaned.contains("```") && cleaned.lines().count() > 3 {
-        // Contains a code fence, apply language detection to fenced blocks
+    let processed = crate::ui::markdown::render_markdown(cleaned, t);
+    let highlighted = if processed.contains("```") && processed.lines().count() > 3 {
         let mut result = String::new();
         let mut in_code = false;
         let mut lang = "";
-        for line in cleaned.lines() {
+        for line in processed.lines() {
             if let Some(stripped) = line.trim().strip_prefix("```") {
                 if in_code {
                     in_code = false;
@@ -955,15 +964,15 @@ fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
             }
         }
         result
-    } else if cleaned.lines().count() > 2 {
-        let lang_hint = detect_language_from_content(cleaned);
+    } else if processed.lines().count() > 2 {
+        let lang_hint = detect_language_from_content(&processed);
         if !lang_hint.is_empty() {
-            highlight_code(cleaned, lang_hint)
+            highlight_code(&processed, lang_hint)
         } else {
-            cleaned.to_string()
+            processed.to_string()
         }
     } else {
-        cleaned.to_string()
+        processed.to_string()
     };
     let wrapped = word_wrap(&highlighted, max_width);
     let line_count = wrapped.lines().count();
@@ -979,7 +988,7 @@ fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
     print!("{}", buf);
 }
 
-/// Prints provider, elapsed time, and tokens-per-second stats.
+/// Prints provider, elapsed time, tokens-per-second, session duration, and total tokens.
 fn display_performance_stats(
     client: &Provider,
     session: &ChatSession,
@@ -991,13 +1000,16 @@ fn display_performance_stats(
     } else {
         0.0
     };
+    let session_dur = session.session_start.elapsed();
     let rail = ui::theme::paint_rail_empty(t);
     let provider_tag = ui::theme::paint_chip(t, client.kind.as_str());
     let dur = ui::theme::paint_dim(t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
     let speed = ui::theme::paint_dim(t, &format!("{:.0} tok/s", tps));
+    let total = ui::theme::paint_dim(t, &format!("\u{2211}{} tok", session.total_tokens));
+    let sess = ui::theme::paint_dim(t, &format!("\u{29d6}{:.0}m", session_dur.as_secs_f64() / 60.0));
     let dot = ui::theme::paint_dim(t, "\u{00B7}");
     println!("{rail}");
-    println!("{rail} {provider_tag} {dot} {dur} {dot} {speed}");
+    println!("{rail} {provider_tag} {dot} {dur} {dot} {speed} {dot} {total} {dot} {sess}");
     println!("{rail}");
 }
 

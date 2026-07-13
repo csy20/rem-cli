@@ -1,4 +1,3 @@
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,18 +9,25 @@ use crate::blocklist::is_command_blocked;
 use crate::find::{find_matches, FindOptions};
 use crate::provider::tools::{builtin_tools, ToolCall, ToolResponse, ToolResult as ToolCallResult};
 use crate::provider::Provider;
-use crate::search::perform_web_search;
+use crate::search::{perform_web_search, provider_from_config};
 use crate::ui;
 
 const MAX_TOOL_ROUNDS: usize = crate::constants::MAX_TOOL_ROUNDS;
 
+/// Abstraction for interactive user interactions during tool execution.
+/// Avoids capturing session state in multiple closures (which causes borrow conflicts).
+pub(crate) trait UserInteraction: Send {
+    fn approve_command(&mut self, cmd: &str) -> bool;
+    fn ask_question(&mut self, question: &str) -> Option<String>;
+}
+
 /// Executes a single tool call and returns the result.
-/// `approve_fn` is called for shell command approval (instead of reading from stdin).
+/// `user` handles shell command approval and user questions.
 /// `tracked_writes` is populated with paths of written files (for undo/session tracking).
 pub(crate) async fn execute_tool_call(
     tool_call: &ToolCall,
     project_dir: &std::path::Path,
-    approve_fn: &mut dyn FnMut(&str) -> bool,
+    user: &mut dyn UserInteraction,
     tracked_writes: &Mutex<Vec<String>>,
 ) -> ToolCallResult {
     match tool_call.name.as_str() {
@@ -32,12 +38,13 @@ pub(crate) async fn execute_tool_call(
         "run_test" => execute_tool_test(tool_call, project_dir).await,
         "web_search" => execute_web_search(tool_call).await,
         "list_files" => execute_list_files(tool_call, project_dir),
-        "run_command" => execute_run_command(tool_call, project_dir, approve_fn).await,
+        "run_command" => execute_run_command(tool_call, project_dir, user).await,
         "edit_file" => execute_edit_file(tool_call, project_dir, tracked_writes),
         "git_status" => execute_git_command("status", None, project_dir, tool_call.id.as_str()),
         "git_diff" => execute_git_diff(tool_call, project_dir),
         "git_log" => execute_git_log(tool_call, project_dir),
-        "ask_user" => execute_ask_user(tool_call).await,
+        "ask_user" => execute_ask_user(tool_call, user).await,
+
         name => ToolCallResult {
             call_id: tool_call.id.clone(),
             name: name.to_string(),
@@ -186,7 +193,18 @@ async fn execute_web_search(tool_call: &ToolCall) -> ToolCallResult {
         None => return err_result(tool_call, "missing 'query' argument"),
     };
     let client = crate::provider::HTTP_CLIENT.clone();
-    match perform_web_search(&client, &query, None).await {
+    let search_provider = crate::config::get_cached_config().and_then(|cfg| {
+        if cfg.search_provider == "ddg" {
+            None
+        } else {
+            provider_from_config(
+                &cfg.search_provider,
+                &cfg.search_api_key.unwrap_or_default(),
+                &cfg.search_cse_id.unwrap_or_default(),
+            )
+        }
+    });
+    match perform_web_search(&client, &query, search_provider.as_ref()).await {
         Ok(results) => {
             let mut content = String::new();
             for (i, r) in results.iter().enumerate().take(5) {
@@ -240,7 +258,7 @@ fn execute_list_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> To
 async fn execute_run_command(
     tool_call: &ToolCall,
     project_dir: &std::path::Path,
-    approve_fn: &mut dyn FnMut(&str) -> bool,
+    user: &mut dyn UserInteraction,
 ) -> ToolCallResult {
     let command = match extract_arg(tool_call, "command") {
         Some(c) => c,
@@ -263,10 +281,7 @@ async fn execute_run_command(
         return err_result(tool_call, "shell command blocked by security policy");
     }
 
-    // Interactive approval via approve_fn (may check terminal internally)
-    print!("  ! Allow shell command? [y/N] {} ", full_cmd);
-    let _ = io::stdout().flush();
-    if !approve_fn(&full_cmd) {
+    if !user.approve_command(&full_cmd) {
         return err_result(tool_call, "shell command execution denied by user");
     }
 
@@ -340,16 +355,12 @@ fn execute_edit_file(
         Err(e) => return err_result(tool_call, &format!("failed to read {}: {}", path.display(), e)),
     };
     let count = content.matches(&old_string).count();
-    let pos = if count > 1 {
-        content.rfind(&old_string)
-    } else {
-        content.find(&old_string)
-    };
+    let pos = content.find(&old_string);
     let Some(pos) = pos else {
         return err_result(tool_call, &format!("old_string not found in {}", path.display()));
     };
     let note = if count > 1 {
-        format!(" (replaced last of {} occurrences)", count)
+        format!(" (replaced first of {} occurrences)", count)
     } else {
         String::new()
     };
@@ -435,30 +446,26 @@ fn execute_git_log(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolC
     )
 }
 
-async fn execute_ask_user(tool_call: &ToolCall) -> ToolCallResult {
+async fn execute_ask_user(tool_call: &ToolCall, user: &mut dyn UserInteraction) -> ToolCallResult {
     let question = match extract_arg(tool_call, "question") {
         Some(q) => q,
         None => return err_result(tool_call, "missing 'question' argument"),
     };
-    println!("\n  ! REM asks: {}", question);
-    print!("  > ");
-    let _ = std::io::stdout().flush();
-    let mut answer = String::new();
-    match std::io::stdin().read_line(&mut answer) {
-        Ok(_) => {
-            let answer = answer.trim().to_string();
+    match user.ask_question(&question) {
+        Some(answer) => {
+            let trimmed = answer.trim().to_string();
             ToolCallResult {
                 call_id: tool_call.id.clone(),
                 name: "ask_user".into(),
-                content: if answer.is_empty() {
+                content: if trimmed.is_empty() {
                     "User provided no input".into()
                 } else {
-                    format!("User response: {}", answer)
+                    format!("User response: {}", trimmed)
                 },
                 is_error: false,
             }
         }
-        Err(e) => err_result(tool_call, &format!("failed to read user input: {}", e)),
+        None => err_result(tool_call, "user question not available in this context"),
     }
 }
 
@@ -485,16 +492,32 @@ fn err_result(tool_call: &ToolCall, msg: &str) -> ToolCallResult {
     }
 }
 
+/// A no-op `UserInteraction` for parallel non-interactive tool execution.
+struct NoopUserInteraction;
+impl UserInteraction for NoopUserInteraction {
+    fn approve_command(&mut self, _cmd: &str) -> bool {
+        false
+    }
+    fn ask_question(&mut self, _question: &str) -> Option<String> {
+        None
+    }
+}
+
+/// Returns true if a tool call requires user interaction (cannot run in parallel).
+fn requires_user_interaction(name: &str) -> bool {
+    matches!(name, "run_command" | "ask_user")
+}
+
 /// Runs the tool loop: sends a prompt with tools, executes tool calls, and
 /// continues until the LLM produces a text response.
-/// `approve_fn` is called for shell command approval (instead of reading from stdin).
+/// Non-interactive tool calls (read, write, search, etc.) execute in parallel.
 /// Returns (summary_text, written_file_paths).
 pub(crate) async fn run_tool_loop(
     client: &Provider,
     prompt: &str,
     system_prompt: &str,
     history: &str,
-    approve_fn: &mut dyn FnMut(&str) -> bool,
+    user: &mut dyn UserInteraction,
     project_dir: &std::path::Path,
 ) -> Result<(String, Vec<String>), String> {
     let tools = builtin_tools();
@@ -521,10 +544,55 @@ pub(crate) async fn run_tool_loop(
                 return Ok((text, writes));
             }
             Ok(ToolResponse::ToolCalls(calls)) => {
-                let mut results = Vec::new();
+                let mut results = Vec::with_capacity(calls.len());
+                let mut interactive_futs = Vec::new();
+                let mut parallel_handles = Vec::new();
+
                 for call in &calls {
-                    let result = execute_tool_call(call, project_dir, approve_fn, &tracked_writes).await;
-                    results.push(result.clone());
+                    if requires_user_interaction(&call.name) {
+                        // Flush any pending parallel tasks before interactive call
+                        for handle in parallel_handles.drain(..) {
+                            let tool_result: ToolCallResult = match handle.await {
+                                Ok(r) => r,
+                                Err(e) => err_result(call, &format!("parallel tool failed: {}", e)),
+                            };
+                            results.push(tool_result);
+                        }
+                        interactive_futs.push(call);
+                    } else {
+                        let tw = Arc::clone(&tracked_writes);
+                        let pd = project_dir.to_path_buf();
+                        let c = call.clone();
+                        parallel_handles.push(tokio::spawn(async move {
+                            let mut noop = NoopUserInteraction;
+                            execute_tool_call(&c, &pd, &mut noop, &tw).await
+                        }));
+                    }
+                }
+
+                // Collect remaining parallel results
+                for handle in parallel_handles.drain(..) {
+                    let tool_result: ToolCallResult = match handle.await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let tc = ToolCall {
+                                id: String::new(),
+                                name: "parallel".into(),
+                                arguments: serde_json::Value::Null,
+                            };
+                            err_result(&tc, &format!("parallel tool failed: {}", e))
+                        }
+                    };
+                    results.push(tool_result);
+                }
+
+                // Run interactive tools sequentially
+                for call in interactive_futs {
+                    results.push(execute_tool_call(call, project_dir, user, &tracked_writes).await);
+                }
+
+                // Print results
+                for result in &results {
                     if result.is_error {
                         println!(
                             "  {} {} tool '{}' failed: {}",
@@ -610,16 +678,22 @@ mod tests {
         assert!(err.content.contains("something went wrong"));
     }
 
-    fn deny_approve(_cmd: &str) -> bool {
-        false
+    struct TestUser;
+    impl UserInteraction for TestUser {
+        fn approve_command(&mut self, _cmd: &str) -> bool {
+            false
+        }
+        fn ask_question(&mut self, _question: &str) -> Option<String> {
+            None
+        }
     }
 
     #[tokio::test]
     async fn execute_unknown_tool_returns_error() {
         let tc = make_tool_call("nonexistent_tool", serde_json::json!({}));
-        let mut approve = deny_approve;
+        let mut user = TestUser;
         let tracked = Mutex::new(Vec::new());
-        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut approve, &tracked).await;
+        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut user, &tracked).await;
         assert!(result.is_error);
         assert!(result.content.contains("Unknown tool"));
     }
@@ -627,9 +701,9 @@ mod tests {
     #[tokio::test]
     async fn execute_read_file_missing_path() {
         let tc = make_tool_call("read_file", serde_json::json!({}));
-        let mut approve = deny_approve;
+        let mut user = TestUser;
         let tracked = Mutex::new(Vec::new());
-        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut approve, &tracked).await;
+        let result = execute_tool_call(&tc, &PathBuf::from("."), &mut user, &tracked).await;
         assert!(result.is_error);
         assert!(result.content.contains("missing 'path'"));
     }

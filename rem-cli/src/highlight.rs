@@ -31,6 +31,12 @@ pub fn highlight_code(content: &str, lang_hint: &str) -> String {
         highlight_js(content)
     } else if lang.contains("rust") || lang.contains("rs") {
         highlight_rust(content)
+    } else if lang.contains("python") || lang.contains("py") {
+        highlight_python(content)
+    } else if lang.contains("go") || lang == "golang" {
+        highlight_go(content)
+    } else if lang.contains("json") {
+        highlight_json(content)
     } else {
         highlight_generic(content)
     }
@@ -112,6 +118,66 @@ fn highlight_rust(code: &str) -> String {
                 ui::theme::paint(&t, "accent_info", m.as_str(), true)
             } else if let Some(m) = caps.get(3) {
                 ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
+        })
+        .to_string()
+}
+
+fn highlight_python(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_PY_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(#[^\n]*)|(\b(?:def|class|return|if|elif|else|for|while|import|from|as|try|except|finally|with|pass|break|continue|and|or|not|in|is|None|True|False|raise|yield|lambda|self|async|await|print|len|range|map|filter|type|open|super|del|global|nonlocal|assert|match|case)\b)|('''[^']*'''|"""[^"]*"""|'[^']*'|"[^"]*")"#).expect("invalid python regex")
+    });
+    RE_PY_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
+        })
+        .to_string()
+}
+
+fn highlight_go(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_GO_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(//[^\n]*|/\*.*?\*/)|(\b(?:func|package|import|return|if|else|for|range|switch|case|default|break|continue|var|const|type|struct|interface|map|chan|go|defer|select|nil|true|false|make|new|len|cap|append|close|panic|recover|error|string|int|bool|float64|byte|rune|uint|int64|float32|complex64|complex128|uintptr|int8|int16|int32|int64|uint8|uint16|uint32|uint64)\b)|("[^"]*"|`[^`]*`)"#).expect("invalid go regex")
+    });
+    RE_GO_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
+        })
+        .to_string()
+}
+
+fn highlight_json(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_JSON_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"("[^"]*"\s*:)|("[^"]*")|(\btrue\b|\bfalse\b|\bnull\b)"#).expect("invalid json regex")
+    });
+    RE_JSON_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true).to_string()
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint(&t, "accent", m.as_str(), true)
             } else {
                 caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
             }
@@ -206,6 +272,11 @@ pub fn detect_language_from_content(code: &str) -> &str {
     // JS/TS general patterns (checked after more specific keywords)
     if first_line.starts_with("function ") {
         return "js";
+    }
+    // JSON: starts with { or [
+    let trimmed = first_line.trim();
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return "json";
     }
     ""
 }
@@ -405,5 +476,54 @@ mod tests {
     fn highlight_empty_string() {
         let result = highlight_code("", "html");
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn highlight_python_wraps_in_colored_output() {
+        let result = highlight_code("def hello():\n    print('hi')", "python");
+        assert!(result.contains("def"));
+        assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn highlight_go_wraps_in_colored_output() {
+        let result = highlight_code("func main() {\n\tfmt.Println(\"hello\")\n}", "go");
+        assert!(result.contains("func"));
+        assert!(result.contains("main"));
+    }
+
+    #[test]
+    fn highlight_json_wraps_in_colored_output() {
+        let result = highlight_code("{\"key\": \"value\", \"flag\": true}", "json");
+        assert!(result.contains("key"));
+        assert!(result.contains("value"));
+    }
+
+    #[test]
+    fn detect_json_from_brace() {
+        assert_eq!(detect_language_from_content("{\"key\": 1}"), "json");
+    }
+
+    #[test]
+    fn detect_json_from_bracket() {
+        assert_eq!(detect_language_from_content("[1, 2, 3]"), "json");
+    }
+
+    #[test]
+    fn highlight_python_from_autodetect() {
+        let input = "def foo():\n    pass";
+        let lang = detect_language_from_content(input);
+        assert_eq!(lang, "python");
+        let result = highlight_code(input, lang);
+        assert!(result.contains("def"));
+    }
+
+    #[test]
+    fn highlight_go_from_autodetect() {
+        let input = "func foo() {}";
+        let lang = detect_language_from_content(input);
+        assert_eq!(lang, "go");
+        let result = highlight_code(input, lang);
+        assert!(result.contains("func"));
     }
 }

@@ -408,6 +408,7 @@ fn chunk_file_entry(fe: FileEntryToProcess, target_chunk: usize) -> Vec<IndexChu
             start_line: 1,
             end_line: fe.line_count,
             embedding: None,
+            token_counts: HashMap::new(),
         });
     } else {
         let parts = split_content_into_chunks(&fe.content, target_chunk);
@@ -432,6 +433,7 @@ fn chunk_file_entry(fe: FileEntryToProcess, target_chunk: usize) -> Vec<IndexChu
                 start_line: start_l,
                 end_line: end_l,
                 embedding: None,
+                token_counts: HashMap::new(),
             });
         }
     }
@@ -545,6 +547,7 @@ mod tests {
                 start_line: 1,
                 end_line: 3,
                 embedding: None,
+                token_counts: HashMap::new(),
             },
             IndexChunk {
                 path: "src/auth.rs".into(),
@@ -557,6 +560,7 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 embedding: None,
+                token_counts: HashMap::new(),
             },
             IndexChunk {
                 path: "README.md".into(),
@@ -569,6 +573,7 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 embedding: None,
+                token_counts: HashMap::new(),
             },
         ];
         let mut doc_freqs = HashMap::new();

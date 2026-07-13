@@ -107,6 +107,14 @@ pub(crate) async fn handle_vision(client: &Provider, session: &mut ChatSession, 
 
 /// Encodes a local image file to base64 with its MIME type.
 pub(crate) fn encode_image(path: &Path) -> Result<(String, String), String> {
+    let metadata = std::fs::metadata(path).map_err(|e| format!("cannot stat image '{}': {}", path.display(), e))?;
+    if metadata.len() > crate::constants::MAX_VISION_IMAGE_BYTES {
+        return Err(format!(
+            "image too large: {} bytes (max {} bytes)",
+            metadata.len(),
+            crate::constants::MAX_VISION_IMAGE_BYTES
+        ));
+    }
     let mime = detect_mime_type(path);
     let data = std::fs::read(path).map_err(|e| format!("cannot read image '{}': {}", path.display(), e))?;
     let b64 = base64_encode(&data);
@@ -193,5 +201,53 @@ mod tests {
     fn test_build_data_uri() {
         let uri = format!("data:{};base64,{}", "image/png", "abc123");
         assert_eq!(uri, "data:image/png;base64,abc123");
+    }
+
+    #[test]
+    fn test_encode_image_rejects_large_file() {
+        let dir = std::env::temp_dir().join(format!("rem-test-vision-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let large_path = dir.join("large.png");
+        // Write a file larger than MAX_VISION_IMAGE_BYTES
+        let oversized = vec![0u8; (crate::constants::MAX_VISION_IMAGE_BYTES as usize) + 1];
+        std::fs::write(&large_path, &oversized).unwrap();
+        let result = encode_image(&large_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("too large"),
+            "error should mention file too large: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_encode_image_accepts_small_file() {
+        let dir = std::env::temp_dir().join(format!("rem-test-vision-small-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let small_path = dir.join("small.png");
+        let small = vec![0u8; 100];
+        std::fs::write(&small_path, &small).unwrap();
+        let result = encode_image(&small_path);
+        assert!(result.is_ok(), "small file should be accepted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_is_image_file_rejects_non_images() {
+        assert!(!is_image_file(Path::new("photo.txt")));
+        assert!(!is_image_file(Path::new("photo.pdf")));
+        assert!(!is_image_file(Path::new("file")));
+    }
+
+    #[test]
+    fn test_detect_mime_type_edge_extensions() {
+        assert_eq!(detect_mime_type(Path::new("img.jpeg")), "image/jpeg");
+        assert_eq!(detect_mime_type(Path::new("img.bmp")), "image/bmp");
+        assert_eq!(detect_mime_type(Path::new("img.ico")), "image/x-icon");
+        assert_eq!(detect_mime_type(Path::new("img.tiff")), "image/tiff");
+        assert_eq!(detect_mime_type(Path::new("img.tif")), "image/tiff");
+        assert_eq!(detect_mime_type(Path::new("img.unknown")), "application/octet-stream");
     }
 }

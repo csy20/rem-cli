@@ -72,7 +72,6 @@ pub struct AnthropicDelta {
     /// Extended thinking content — may be populated by future API versions.
     /// Currently, thinking deltas arrive via `delta.text` with `delta_type: "thinking_delta"`.
     #[serde(default)]
-    #[allow(dead_code)]
     pub thinking: Option<String>,
 }
 

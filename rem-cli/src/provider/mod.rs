@@ -1,7 +1,8 @@
 use std::future::Future;
-use std::hash::Hasher;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use rand::Rng;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -15,6 +16,7 @@ pub mod anthropic;
 pub mod azure;
 #[cfg(feature = "bedrock")]
 pub mod bedrock;
+pub mod deepseek;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
@@ -163,6 +165,7 @@ pub enum ProviderKind {
     Azure,
     Bedrock,
     OpenRouter,
+    DeepSeek,
 }
 
 impl ProviderKind {
@@ -175,6 +178,7 @@ impl ProviderKind {
             ProviderKind::Azure => "azure",
             ProviderKind::Bedrock => "bedrock",
             ProviderKind::OpenRouter => "openrouter",
+            ProviderKind::DeepSeek => "deepseek",
         }
     }
 
@@ -186,6 +190,7 @@ impl ProviderKind {
             "azure" => ProviderKind::Azure,
             "bedrock" | "aws" => ProviderKind::Bedrock,
             "openrouter" => ProviderKind::OpenRouter,
+            "deepseek" => ProviderKind::DeepSeek,
             _ => ProviderKind::Ollama,
         }
     }
@@ -254,6 +259,7 @@ const DEFAULT_BASE_URLS: &[(ProviderKind, &str)] = &[
     (ProviderKind::Azure, ""),
     (ProviderKind::Bedrock, ""),
     (ProviderKind::OpenRouter, "https://openrouter.ai/api/v1"),
+    (ProviderKind::DeepSeek, "https://api.deepseek.com"),
 ];
 
 pub(crate) const DEFAULT_MODELS: &[(ProviderKind, &str)] = &[
@@ -261,6 +267,7 @@ pub(crate) const DEFAULT_MODELS: &[(ProviderKind, &str)] = &[
     (ProviderKind::Anthropic, "claude-sonnet-4-20250514"),
     (ProviderKind::Bedrock, "anthropic.claude-sonnet-4-20250514"),
     (ProviderKind::OpenRouter, "openai/gpt-4o"),
+    (ProviderKind::DeepSeek, "deepseek-chat"),
 ];
 
 pub(crate) fn default_base_url(kind: ProviderKind) -> String {
@@ -282,6 +289,7 @@ pub(crate) const API_KEY_ENV_VARS: &[(ProviderKind, &str)] = &[
     (ProviderKind::Azure, "AZURE_OPENAI_API_KEY"),
     (ProviderKind::Bedrock, "AWS_ACCESS_KEY_ID"),
     (ProviderKind::OpenRouter, "OPENROUTER_API_KEY"),
+    (ProviderKind::DeepSeek, "DEEPSEEK_API_KEY"),
 ];
 
 pub(crate) fn api_key_env_var(kind: ProviderKind) -> Option<&'static str> {
@@ -373,6 +381,7 @@ impl Provider {
             #[cfg(not(feature = "bedrock"))]
             ProviderKind::Bedrock => Box::new(UnsupportedBackend),
             ProviderKind::OpenRouter => Box::new(openrouter::OpenRouterBackend),
+            ProviderKind::DeepSeek => Box::new(deepseek::DeepSeekBackend),
         };
         Self {
             kind,
@@ -401,6 +410,7 @@ impl Provider {
             ProviderKind::Azure => format!("azure/{}", self.ctx.model),
             ProviderKind::Bedrock => format!("bedrock/{}", self.ctx.model),
             ProviderKind::OpenRouter => format!("openrouter/{}", self.ctx.model),
+            ProviderKind::DeepSeek => format!("deepseek/{}", self.ctx.model),
         }
     }
 
@@ -460,11 +470,9 @@ impl Provider {
                     }
                     last_err = Some(e);
                     let base_delay_ms = crate::constants::LLM_RETRY_BASE_DELAY_MS * 2u64.pow(attempt as u32);
-                    // Simple jitter: hash attempt to get a multiplier in [0.5, 1.0)
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    std::hash::Hash::hash(&attempt, &mut hasher);
-                    let jitter = (hasher.finish() % 100) as f64 / 200.0; // 0.0..0.495
-                    let delay_ms = (base_delay_ms as f64 * (0.5 + jitter)) as u64;
+                    // Random jitter: multiplier in [0.5, 1.5) to prevent thundering herd
+                    let jitter = rand::thread_rng().gen_range(0.5_f64..1.5);
+                    let delay_ms = (base_delay_ms as f64 * jitter) as u64;
                     let delay = Duration::from_millis(delay_ms.max(100));
                     // Poll STREAM_CANCELLED during backoff sleep (avoids redundant signal listener)
                     let poll_interval = Duration::from_millis(100);
@@ -752,6 +760,9 @@ pub(super) async fn stream_anthropic_sse(
                             if let Some(ref text) = delta.text {
                                 full.push_str(text);
                                 emit_token(text);
+                            } else if let Some(ref thinking) = delta.thinking {
+                                full.push_str(thinking);
+                                emit_token(thinking);
                             }
                         }
                     }

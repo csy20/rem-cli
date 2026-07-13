@@ -204,7 +204,7 @@ impl ProviderBackend for OpenAIBackend {
             .context("failed to call OpenAI API")?;
 
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("OpenAI", resp, None).await);
+            return Err(super::parse_api_error("OpenAI", resp, Some(ctx.api_key_str())).await);
         }
 
         if no_stream {

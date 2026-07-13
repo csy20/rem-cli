@@ -355,6 +355,110 @@ pub(crate) async fn handle_list_models(client: &Provider) {
     }
 }
 
+/// Tests provider connectivity (`/ping` command).
+pub(crate) async fn handle_ping(client: &Provider) {
+    let t = ui::theme::active();
+    let start = std::time::Instant::now();
+    println!(
+        "{} {} pinging {}...",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "\u{25CB}"),
+        client.provider_label()
+    );
+    match client.list_models().await {
+        Ok(models) => {
+            let elapsed = start.elapsed();
+            println!(
+                "{} {} {} ({}.{:02}s)",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_success_label(&t, "\u{2713}"),
+                ui::theme::paint_success_label(&t, "connected"),
+                elapsed.as_secs(),
+                elapsed.subsec_millis()
+            );
+            println!(
+                "{}   {} models available via {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                models.len(),
+                client.provider_label()
+            );
+        }
+        Err(e) => {
+            let elapsed = start.elapsed();
+            println!(
+                "{} {} {} {}.{:02}s",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                ui::theme::paint_error_label(&t, "unreachable"),
+                elapsed.as_secs(),
+                elapsed.subsec_millis()
+            );
+            println!(
+                "{}   {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint(&t, "error", &format!("{}", e), false)
+            );
+        }
+    }
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
+/// Shows session overview (`/status` command).
+pub(crate) async fn handle_status(session: &crate::chat::ChatSession, client: &Provider) {
+    let t = ui::theme::active();
+    let elapsed = session.session_start.elapsed();
+    let turn_count = session.history_mgr.history.len();
+    let history_tokens: usize = session
+        .history_mgr
+        .history
+        .iter()
+        .map(|(u, a)| crate::token_count::estimate_tokens_batch(&[u, a]))
+        .sum();
+    let model_ctx = client.ctx.model_ctx;
+    let pct = crate::token_count::context_usage_percent(history_tokens, model_ctx);
+
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{}  {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "\u{2500}\u{2500} STATUS \u{2500}\u{2500}")
+    );
+    println!(
+        "{}   {:<16} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "provider:"),
+        ui::theme::paint_dim(&t, &client.provider_label())
+    );
+    println!(
+        "{}   {:<16} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "mode:"),
+        ui::theme::paint_dim(&t, session.mode.label())
+    );
+    println!(
+        "{}   {:<16} {}K ctx",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "model ctx:"),
+        ui::theme::paint_dim(&t, &format!("{}", model_ctx / 1000))
+    );
+    println!(
+        "{}   {:<16} {} this turn | {} total | {}% of window",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "tokens:"),
+        ui::theme::paint_dim(&t, &format!("{}", session.last_tokens)),
+        ui::theme::paint_dim(&t, &format!("{}", history_tokens)),
+        ui::theme::paint_dim(&t, &format!("{}", pct))
+    );
+    println!(
+        "{}   {:<16} {} turns | {}s",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "session:"),
+        ui::theme::paint_dim(&t, &format!("{}", turn_count)),
+        ui::theme::paint_dim(&t, &format!("{}", elapsed.as_secs()))
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
 /// Pulls a model from Ollama (`/pull <model>` command).
 pub(crate) async fn handle_pull_model(client: &Provider, model_name: &str) {
     let t = ui::theme::active();

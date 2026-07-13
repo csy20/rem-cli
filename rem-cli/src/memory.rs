@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use walkdir::WalkDir;
 
 /// Filename for project memory (`.rem/memory.md`).
@@ -41,13 +42,22 @@ impl ProjectMemory {
         }
     }
 
-    /// Writes the memory content to disk.
+    /// Writes the memory content to disk with exclusive file locking.
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("failed to create .rem directory")?;
         }
-        fs::write(&self.path, &self.content).context("failed to write memory file")?;
-        Ok(())
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&self.path)
+            .context("failed to open memory file for writing")?;
+        file.lock_exclusive()
+            .context("failed to acquire exclusive lock on memory file")?;
+        let result = fs::write(&self.path, &self.content).context("failed to write memory file");
+        let _ = file.unlock();
+        result
     }
 
     /// Replaces the memory content with new text.
@@ -264,6 +274,34 @@ mod tests {
         let starter = ProjectMemory::generate_starter(&dir, "unknown");
         assert!(starter.contains("Add project conventions here"));
         assert!(starter.contains("Add build/test commands here"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_append_does_not_corrupt() {
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(format!("rem-test-concur-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mem = Arc::new(std::sync::Mutex::new(ProjectMemory::load(&dir)));
+        // Ensure initial content
+        {
+            let mut m = mem.lock().unwrap();
+            m.set("initial").unwrap();
+        }
+        let mem_clone = Arc::clone(&mem);
+        let handle = std::thread::spawn(move || {
+            let mut m = mem_clone.lock().unwrap();
+            m.append("from thread").unwrap();
+        });
+        {
+            let mut m = mem.lock().unwrap();
+            m.append("from main").unwrap();
+        }
+        handle.join().unwrap();
+        let m = mem.lock().unwrap();
+        let content = fs::read_to_string(&m.path).unwrap();
+        assert!(content.contains("initial"), "initial content preserved");
+        assert!(content.contains("from"), "content from at least one writer present");
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -2,10 +2,10 @@
 
 `rem` is a **beginner-focused coding assistant** that runs in your terminal and
 works with any LLM provider (Ollama, OpenAI, Anthropic, Gemini, Azure, AWS Bedrock,
-OpenRouter). It is designed for HTML, CSS, terminal basics, and project scaffolding,
+OpenRouter, DeepSeek). It is designed for HTML, CSS, terminal basics, and project scaffolding,
 with a structured contract so model output is predictable and safe to preview.
 
-The CLI is written in Rust (`rem-cli/`) and supports **7 LLM providers**, **32+ slash
+The CLI is written in Rust (`rem-cli/`) and supports **8 LLM providers**, **34+ slash
 commands**, **BM25 codebase indexing**, **autonomous goal loops**, and a polished
 terminal UI with **6 color themes**.
 
@@ -76,8 +76,8 @@ cargo build 2>&1 | rem
 
 ### 🎯 Core
 
-- **7 LLM providers**: Ollama (default), OpenAI, Anthropic Claude, Google Gemini,
-  Azure OpenAI, AWS Bedrock, OpenRouter
+- **8 LLM providers**: Ollama (default), OpenAI, Anthropic Claude, Google Gemini,
+  Azure OpenAI, AWS Bedrock, OpenRouter, DeepSeek
 - **Three interaction modes**: CHAT (conversation), CODE (generation), PLAN (analysis)
 - **Streaming responses**: tokens appear as they're generated
 - **Pipe mode**: `cat error.log | rem` — non-interactive stdin processing
@@ -90,7 +90,7 @@ cargo build 2>&1 | rem
   feeds results back to the LLM until goal met — with checkpointing and circuit breakers
 - **Multi-file generation**: auto-detects `### path/to/file` headings in LLM output
 - **Atomic file writes**: temp + rename pattern with backup for undo
-- **Edit tool** (`edit_file`): replaces the last occurrence of `old_string` when
+- **Edit tool** (`edit_file`): replaces the first occurrence of `old_string` when
   multiple matches exist
 - **Undo stack**: `/undo` reverts file creates/overwrites, `/undo N` for N levels
 
@@ -118,7 +118,7 @@ cargo build 2>&1 | rem
 - **API key redaction**: sensitive keys are redacted from error messages
 - **Non-shell execution**: tool commands use safe subprocess APIs with timeouts
 
-## Slash commands (32+)
+## Slash commands (34+)
 
 ### Session
 | Command | Description |
@@ -135,6 +135,8 @@ cargo build 2>&1 | rem
 | `/compact-dry-run` | Preview compaction |
 | `/why` | Show intent classification reasoning |
 | `/summary` | Generate session summary via LLM |
+| `/ping` | Test provider connectivity & latency |
+| `/status` | Show session overview (tokens, time, turns, index) |
 
 ### Code
 | Command | Description |
@@ -166,6 +168,7 @@ cargo build 2>&1 | rem
 | `/files` | List project file tree |
 | `/memory [key=val]` | View or update project memory |
 | `/config [key=val]` | View or update configuration |
+| `/config edit` | Open config in `$EDITOR` with auto-reload |
 | `/init` | Auto-generate `.rem/memory.md` |
 | `/reload` | Reload config from disk |
 
@@ -243,7 +246,7 @@ mode = "CHAT"
 ## Requirements
 
 - **Ollama** (for local models): `ollama pull qwen2.5-coder:1.5b`
-- Or an API key for: OpenAI, Anthropic, Gemini, Azure, OpenRouter
+- Or an API key for: OpenAI, Anthropic, Gemini, Azure, OpenRouter, DeepSeek
 
 For low-RAM machines (4-6 GB):
 
@@ -265,6 +268,7 @@ Set the corresponding environment variable or add to config:
 | Gemini | `GEMINI_API_KEY` | `api_key` |
 | Azure | `AZURE_OPENAI_API_KEY` | `api_key` |
 | OpenRouter | `OPENROUTER_API_KEY` | `api_key` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `api_key` |
 
 ## Safety model
 
@@ -298,10 +302,10 @@ If you see `Connection refused`:
 │  Interactive loop: read input → dispatch commands → LLM     │
 ├─────────────────────────────────────────────────────────────┤
 │                   Command Handlers (commands/)              │
-│  32+ slash commands organized by category                   │
+│  34+ slash commands organized by category                   │
 ├───────────────────┬─────────────────────┬───────────────────┤
 │  Provider Layer   │  Indexer Layer      │  Session Layer    │
-│  7 LLM providers  │  BM25 retrieval     │  History mgmt     │
+│  8 LLM providers  │  BM25 retrieval     │  History mgmt     │
 │  Streaming +      │  Incremental index  │  Context assembly │
 │  Tool calling     │  Chunking           │  Mode switching   │
 └───────────────────┴─────────────────────┴───────────────────┘
@@ -311,7 +315,7 @@ If you see `Connection refused`:
 
 ```bash
 cd rem-cli
-cargo test              # Run all tests (509+ unit, 18 integration)
+cargo test              # Run all tests (544+ unit, 18 integration)
 cargo clippy            # Lint check (zero warnings target)
 cargo build --release   # Release build
 just all                # Run all: check, lint, fmt, test, build-release

@@ -37,6 +37,8 @@ tiktoken-rs = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 notify = { version = "7", features = ["macos_kqueue"] }
+fs2 = "0.4"
+rand = "0.8"
 
 [features]
 default = ["bedrock"]

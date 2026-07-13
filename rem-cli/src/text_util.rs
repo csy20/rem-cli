@@ -5,11 +5,13 @@
 /// Formats byte counts as human-readable strings (e.g., `1.5K`, `3.2M`).
 pub(crate) fn human_size(bytes: u64) -> String {
     if bytes < 1024 {
-        format!("{}", bytes)
+        bytes.to_string()
     } else if bytes < 1024 * 1024 {
-        format!("{:.1}K", bytes as f64 / 1024.0)
+        let b = bytes as f64 / 1024.0;
+        format!("{:.1}K", if b > 9999.9 { 9999.9 } else { b })
     } else {
-        format!("{:.1}M", bytes as f64 / (1024.0 * 1024.0))
+        let b = bytes as f64 / (1024.0 * 1024.0);
+        format!("{:.1}M", if b > 9999.9 { 9999.9 } else { b })
     }
 }
 

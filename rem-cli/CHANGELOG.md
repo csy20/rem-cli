@@ -1,0 +1,92 @@
+# Changelog
+
+## v0.6.0 (unreleased)
+
+### New Features
+- **DeepSeek provider**: Full provider support for `deepseek-chat` (V3, streaming + tools) and `deepseek-reasoner` (R1, reasoning extraction, no tools). (#F1)
+- **`/ping` command**: Quick connectivity test showing latency and model count for the active provider. (#F2)
+- **`/status` command**: Single overview showing provider, mode, model context, token usage, turn count, and session duration. (#U3)
+- **`/config edit`**: Opens `$EDITOR` on the config file with automatic reload on exit. (#S3)
+- **Per-project system prompt override**: `.rem/system_prompt.md` is checked and preferred over the default when present. (#F4)
+- **`UserInteraction` trait**: Replaced dual-closure pattern in tool executor with a clean trait, fixing REPL borrow conflicts. (#B3)
+
+### Bug Fixes
+- **web_search ignores configured provider**: Now reads `search_provider`/`search_api_key`/`search_cse_id` from config instead of always passing `None`. (#B1)
+- **run_command approval in pipe mode**: Removed unconditional stdin prompt that hung in non-interactive mode. (#B2)
+- **Vision image size validation**: Enforces 20 MB limit before reading/encoding images. (#B4)
+- **edit_file replaces last occurrence**: Changed `rfind` to `find` for predictable first-match replacement. (#B5)
+- **Memory file locking**: Added `fs2::FileExt::lock_exclusive()` for safe concurrent writes. (#B6)
+- **Gemini tool call ID collision**: Replaced name-based IDs with `AtomicU32` counter. (#B7)
+- **Retry jitter randomization**: Replaced deterministic `DefaultHasher` with `rand::thread_rng()`. (#O5)
+
+### Optimizations
+- **Parallel tool execution**: Non-interactive tool calls (read, write, search, git, web) now execute in parallel via `tokio::spawn`. (#O3)
+- **Atomic config saves**: Config writes use tmp file + rename for crash safety. (#S4)
+- **Lazy index loading** (already implemented): Codebase index loads on first query, not at startup. (#O1)
+- **Token estimate caching** (already implemented): Reuses cached estimates instead of re-estimating on every prompt build. (#O2)
+
+### Testing
+- Blocklist edge cases: unicode, null byte, mixed-case, whitespace normalization, control char stripping
+- Vision edge cases: file size limits, MIME type edge extensions
+- Memory concurrent access: thread-safety verification
+- HistoryManager eviction: token budget, turn cap, empty history
+- DeepSeek provider: stream chunk deserialization, reasoning content field
+
+### CI & Tooling
+- `cargo audit` and `cargo deny` steps made blocking (no longer `continue-on-error`)
+- Justfile: `check-all` target added (check + test + clippy + lint)
+
+## v0.5.0 (unreleased)
+
+### New Features
+- **Token-based history sliding window**: `HistoryManager` now tracks estimated token budget per session, dropping oldest turns when the budget is exceeded. Configurable via model context window (~60% reserved for history). (#S4)
+- **Extended syntax highlighting**: Added `highlight_python()`, `highlight_go()`, `highlight_json()` with keyword regexes. JSON auto-detection from content. (#U3)
+- **Markdown table rendering**: Pipe-delimited tables are detected, column widths calculated, and rendered with aligned borders and header highlighting. (#U2)
+- **Markdown task list rendering**: `- [ ]` and `- [x]` list items render with styled unchecked (`○`) and checked (`✓`) symbols. (#U2)
+- **Session duration & total token display**: Performance footer now shows cumulative session tokens (`Σ N tok`) and wall-clock session duration (`⟖ Nm`). Stats shown after every turn (not just Plan/verbose mode). (#U6)
+- **Session export/import**: `/session export`, `/session export-md`, `/session import` for sharing and backing up sessions (gzipped JSON or Markdown). (#F4)
+- **Configurable page threshold**: `page_threshold` config field in `AppConfig` and `PartialConfig`, wired through `pager::init_page_threshold()`. (#F3)
+- **Incremental indexing**: `generate_codebase_index()` tracks file mtimes and only reprocesses changed files on re-index. (#F1)
+- **Custom `ProviderError` enum**: Typed error variants (Auth, RateLimit, Timeout, ServerError, ParseError, ResponseTooLarge) replacing bare `anyhow::Error` in provider code. (#F2)
+
+### Bug Fixes
+- **API key redaction**: `openai.rs` was passing `None` to `parse_api_error()` instead of `Some(ctx.api_key_str())`, risking key leakage in error responses. Fixed. (#P6)
+- **SpinnerGuard panic**: Removed `handle.abort()` in `output.rs:62`; the `running` flag now cleanly terminates the spinner task within 80ms.
+- **`human_size()` overflow**: Added cap at `9999.9` for very large byte values in `text_util.rs`. (#Q4)
+
+### Code Quality & Optimization
+- **`file_icon_for()` simplification**: Replaced unwieldy `ends_with` chains with a clean extension-based `match` using `rsplit('.')` in `types.rs`. (#Q5)
+- **`AnthropicDelta.thinking` wired**: Removed `#[allow(dead_code)]` and added `delta.thinking` fallback read in `stream_anthropic_sse()`. (#Q6)
+- **`classify_intent_heuristic` extracted**: Broken into `detect_web_intent`, `detect_planning_intent`, `detect_fix_intent` focused helpers. (#Q7)
+
+### UI/UX
+- **Startup banner**: Shows provider/model label and mode chip. (#U4)
+- **Unknown command suggestions**: Levenshtein-based `did_you_mean` with distance ≤ 2 surfaced in REPL. (#U5)
+
+### CI & Tooling
+- **Security scanning**: Added `cargo audit` and `cargo deny` to CI workflow. (#P1)
+- **Justfile targets**: Added `audit`, `outdated`, `bench` targets. (#P2)
+- **`deny.toml`**: License allowlist and dependency ban configuration.
+
+## v0.4.0
+
+### Features
+- Categorized help menu with Docker support
+- Goal command checkpointing with pagination
+- ProviderError enum for structured error handling
+- Tool executor with file editing and git support
+- BM25 tokenization optimization
+- Gzip-compressed index loading
+- Command help paging with tips
+
+### Fixes
+- Ctrl+C race condition resolution
+- curl installer 404 and release asset pipeline repair
+- Various bug fixes across the codebase
+
+### Refactoring
+- Modularized indexer architecture
+- Command runner architecture implementation
+- Centralized gzip compression utilities
+- Improved CTRL-C handling and config cache
+- Token truncation and command output sanitization

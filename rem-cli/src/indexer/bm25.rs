@@ -224,6 +224,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
             embedding: None,
+            token_counts: HashMap::new(),
         }];
         let mut doc_freqs = HashMap::new();
         let inverted = build_inverted_index(&chunks, &mut doc_freqs);
@@ -246,6 +247,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 embedding: None,
+                token_counts: HashMap::new(),
             },
             IndexChunk {
                 path: "b.rs".into(),
@@ -258,6 +260,7 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 embedding: None,
+                token_counts: HashMap::new(),
             },
         ];
         let mut doc_freqs = HashMap::new();
@@ -329,6 +332,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
             embedding: None,
+            token_counts: HashMap::new(),
         };
         let index = make_index(vec![chunk]);
         let result = retrieve_relevant_chunks(&index, "", 5, 1000);
@@ -348,6 +352,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
             embedding: None,
+            token_counts: HashMap::new(),
         };
         let index = make_index(vec![chunk]);
         let result = retrieve_relevant_chunks(&index, "nonexistent_token", 5, 1000);

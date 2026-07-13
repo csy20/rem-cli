@@ -22,7 +22,7 @@ Now with 30+ slash commands, persistent project memory, pipe mode, and autonomou
 
 ## Interactive Mode Slash Commands
 
-### Core Commands
+### Session Management
 | Command | Description |
 |---|---|
 | `/help` | Show all commands |
@@ -30,17 +30,39 @@ Now with 30+ slash commands, persistent project memory, pipe mode, and autonomou
 | `/plan` | Switch directly to PLAN mode |
 | `/clear` | Reset conversation history |
 | `/reset` | Full reset — clear history, code cache, search |
+| `/save` | Save session to `.rem/session.json` |
+| `/resume` | Restore saved session history |
+| `/session export <path>` | Export session as gzipped JSON |
+| `/session export-md <path>` | Export session as Markdown |
+| `/session import <path>` | Import a previously exported session |
+| `/summary [save-path]` | LLM-generated session summary |
+| `/compact` | Summarize history to free context window |
+| `/compact-dry-run` | Preview compaction without calling LLM |
+| `/page` | Re-view last output through system pager |
 | `exit` / `quit` | Exit REM |
+
+### Model & Provider
+| Command | Description |
+|---|---|
+| `/model <name>` | Show or switch the active model |
+| `/provider <name>` | Show or switch LLM provider |
+| `/reasoning [on\|off\|effort]` | Configure reasoning/thinking mode |
+| `/models` | List available models from provider |
+| `/pull <model>` | Pull a model (Ollama only) |
+| `/theme [name]` | Change the color theme |
 
 ### Code Operations
 | Command | Description |
 |---|---|
-| `/explain <code>` | Explain what code does |
-| `/test <file>` | Generate tests for a file |
-| `/refactor <file>` | Suggest refactoring improvements |
 | `/write <path>` | Save last code to file |
-| `/save <path>` | Same as `/write` |
 | `/code` | Show last generated code |
+| `/undo` | Delete last written files |
+| `/diff` | Compare generated vs existing files |
+| `/apply` | Write changed files with backup for undo |
+| `/copy [N]` | Copy last N files to clipboard |
+| `/goal <condition>` | Autonomous loop until condition met |
+| `/vision <path>` | Analyze an image with the LLM |
+| `/commit [message]` | Stage all and create a git commit |
 
 ### Project Context
 | Command | Description |
@@ -49,31 +71,29 @@ Now with 30+ slash commands, persistent project memory, pipe mode, and autonomou
 | `/memory` | View project memory |
 | `/memory add <text>` | Append to project memory |
 | `/memory clear` | Clear project memory |
-| `@path` | Inline file/directory context reference |
 | `/dir <path>` | Set project workspace |
 | `/files` | List project file tree |
-| `/search <query>` | Search the web (DuckDuckGo) |
-| `/find <query>` | Search text inside the project (skips node_modules, target, .git) |
+| `/reload` | Reload config and project settings from disk |
+| `@path` | Inline file/directory context reference |
 
-### Analysis & Quality
+### Tools & Analysis
 | Command | Description |
 |---|---|
-| `/diff` | Compare generated vs existing files |
-| `/review` | AI code review of generated code |
+| `/explain <code>` | Explain what code does |
+| `/test <file>` | Generate tests for a file |
+| `/refactor <file>` | Suggest refactoring improvements |
 | `/lint [file]` | Run linter on generated files |
-| `/tokens` | Show token usage & context stats |
-| `/config` | View current configuration |
-| `/why` | Show intent classification reasoning |
+| `/review` | AI code review of generated code |
+| `/find <query>` | Search text inside the project |
+| `/search <query>` | Search the web |
+| `/watch` | Watch files for changes and auto-retry |
 
-### Advanced
+### System & Info
 | Command | Description |
 |---|---|
-| `/compact` | Summarize & free context window |
-| `/goal <condition>` | Autonomous loop until condition met |
-| `/copy [N]` | Copy last response to clipboard |
-| `/save` | Save session to `.rem/session.json` |
-| `/resume` | Restore saved session history |
-| `/undo` | Delete last written files |
+| `/tokens` | Show token usage & context stats |
+| `/config [key=value]` | View or update configuration |
+| `/why` | Show intent classification reasoning |
 
 ### Mode Descriptions
 

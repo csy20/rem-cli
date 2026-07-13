@@ -298,6 +298,39 @@ pub(crate) fn handle_config_set(session: &mut ChatSession, client: &Provider, ar
                 );
             }
         }
+        "edit" => {
+            let config_path = crate::config::config_dir().unwrap_or_default().join("config.toml");
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+            println!(
+                "{} {} opening {} with {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "\u{270E}"),
+                ui::theme::paint_bright(&t, &config_path.display().to_string()),
+                editor
+            );
+            match std::process::Command::new(&editor).arg(&config_path).status() {
+                Ok(status) if status.success() => {
+                    crate::config::invalidate_config_cache();
+                    println!(
+                        "{} {} config reloaded",
+                        ui::theme::paint(&t, "accent", "\u{258C}", true),
+                        ui::theme::paint_success_label(&t, "\u{2713}")
+                    );
+                }
+                Ok(_) => println!(
+                    "{} {} editor exited with error",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_warning(&t, "\u{2717}")
+                ),
+                Err(e) => println!(
+                    "{} {} failed to launch {}: {}",
+                    ui::theme::paint(&t, "accent", "\u{258C}", true),
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
+                    editor,
+                    e
+                ),
+            }
+        }
         other => {
             println!(
                 "{} unknown config key: {}",
@@ -305,7 +338,7 @@ pub(crate) fn handle_config_set(session: &mut ChatSession, client: &Provider, ar
                 other
             );
             println!(
-                "{} usage: /config workspace <path>  (use /model to change models)",
+                "{} usage: /config workspace <path> | /config edit",
                 ui::theme::paint_rail_empty(&t)
             );
         }

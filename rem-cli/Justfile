@@ -19,9 +19,22 @@ build:
 build-release:
     cargo build --release
 
+audit:
+    cargo audit
+
+outdated:
+    cargo outdated
+
+bench:
+    cargo bench
+
 clean:
     cargo clean
 
+check-all: check lint fmt test
+
 all: check lint fmt test build-release
 
-.PHONY: check lint fmt test test-all build build-release clean all
+check-audit: audit deny
+
+.PHONY: check lint fmt test test-all build build-release audit outdated bench clean all check-all check-audit

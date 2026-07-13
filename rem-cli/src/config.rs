@@ -17,6 +17,11 @@ use tracing::warn;
 /// Cached config to avoid repeated TOML parsing from disk.
 static CONFIG_CACHE: LazyLock<RwLock<Option<AppConfig>>> = LazyLock::new(|| RwLock::new(None));
 
+/// Returns the cached config, or `None` if not yet loaded.
+pub(crate) fn get_cached_config() -> Option<AppConfig> {
+    CONFIG_CACHE.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Returns the config directory path, checking XDG_CONFIG_HOME first.
 pub(crate) fn config_dir() -> Option<std::path::PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -33,7 +38,9 @@ pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
     if let Some(dir) = config_dir() {
         fs::create_dir_all(&dir)?;
         let path = dir.join("config.toml");
-        fs::write(&path, &text).context("failed to write config")?;
+        let tmp_path = dir.join("config.toml.tmp");
+        fs::write(&tmp_path, &text).context("failed to write config")?;
+        fs::rename(&tmp_path, &path).context("failed to atomically replace config")?;
     }
     // Update cache directly instead of invalidating, to avoid re-reading from disk
     crate::pager::init_page_threshold(cfg.page_threshold);
@@ -260,6 +267,8 @@ fn load_system_prompt_uncached(custom_prompts_dir: Option<&str>) -> String {
         candidates.push(PathBuf::from(dir).join("system_prompt.txt"));
     }
     candidates.push(PathBuf::from("prompts/system_prompt.txt"));
+    // Per-project system prompt override via `.rem/system_prompt.md`
+    candidates.push(PathBuf::from(".rem/system_prompt.md"));
     for path in candidates {
         if path.exists() {
             if let Ok(text) = fs::read_to_string(path) {
@@ -300,6 +309,7 @@ pub(crate) fn validate_config(cfg: &AppConfig) -> Result<()> {
         "azure",
         "bedrock",
         "openrouter",
+        "deepseek",
     ];
     let t = ui::theme::active();
     let warn_prefix = ui::theme::paint_warning(&t, "config warning:");

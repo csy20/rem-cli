@@ -102,22 +102,34 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
             ui::theme::paint_dim(&t, "\u{26A1}")
         );
         let project_path = session.ctx.project_dir.clone().unwrap_or_else(|| PathBuf::from("."));
-        let mut approve_fn = |_cmd: &str| -> bool {
-            match session.readline("(y/N) ") {
-                Ok(line) => {
-                    let trimmed = line.trim().to_lowercase();
-                    trimmed == "y" || trimmed == "yes"
+        struct GoalUserInteraction<'a> {
+            session: &'a mut ChatSession,
+        }
+        impl tool_executor::UserInteraction for GoalUserInteraction<'_> {
+            fn approve_command(&mut self, _cmd: &str) -> bool {
+                match self.session.readline("(y/N) ") {
+                    Ok(line) => {
+                        let trimmed = line.trim().to_lowercase();
+                        trimmed == "y" || trimmed == "yes"
+                    }
+                    Err(_) => false,
                 }
-                Err(_) => false,
             }
-        };
+            fn ask_question(&mut self, question: &str) -> Option<String> {
+                match self.session.readline(&format!("REM asks: {} ", question)) {
+                    Ok(line) => Some(line.trim().to_string()),
+                    Err(_) => None,
+                }
+            }
+        }
+        let mut user = GoalUserInteraction { session };
         let project_dir: &Path = &project_path;
         let result = tool_executor::run_tool_loop(
             client,
             condition,
             "[MODE: CODE] Use tools to achieve the goal. When done, explain what was accomplished.",
             "",
-            &mut approve_fn,
+            &mut user,
             project_dir,
         )
         .await;

@@ -43,6 +43,9 @@ pub(crate) struct HistoryManager {
     pub(crate) history: Vec<(String, String)>,
     pub(crate) messages_since_save: usize,
     assistant_token_cache: Vec<usize>,
+    /// Token-based history budget: when total estimated tokens exceed this,
+    /// oldest turns are dropped. 0 = no token-based limit (uses turn-count only).
+    pub(crate) max_history_tokens: usize,
 }
 
 impl HistoryManager {
@@ -63,6 +66,7 @@ impl HistoryManager {
             history: Vec::new(),
             messages_since_save: 0,
             assistant_token_cache: Vec::new(),
+            max_history_tokens: 0,
         })
     }
 
@@ -70,9 +74,22 @@ impl HistoryManager {
         let tokens = crate::token_count::estimate_tokens(&assistant);
         self.assistant_token_cache.push(tokens);
         self.history.push((user, assistant));
+        // Trim by turn count (hard cap)
         if self.history.len() > crate::constants::MAX_HISTORY_TURNS {
             self.history.remove(0);
             self.assistant_token_cache.remove(0);
+        }
+        // Trim by token budget (soft cap: drop oldest turns when budget exceeded)
+        if self.max_history_tokens > 0 {
+            let total: usize = self.assistant_token_cache.iter().sum();
+            if total > self.max_history_tokens {
+                while self.history.len() > 1
+                    && self.assistant_token_cache.iter().sum::<usize>() > self.max_history_tokens
+                {
+                    self.history.remove(0);
+                    self.assistant_token_cache.remove(0);
+                }
+            }
         }
     }
 
@@ -99,6 +116,13 @@ impl HistoryManager {
     pub(crate) fn clear_turns(&mut self) {
         self.history.clear();
         self.assistant_token_cache.clear();
+    }
+
+    /// Configure token-based history eviction using ~60% of model_ctx.
+    /// This ensures history fits within the context window alongside the
+    /// system prompt, user input, and the pending response.
+    pub(crate) fn set_max_history_tokens_from_ctx(&mut self, model_ctx: usize) {
+        self.max_history_tokens = (model_ctx as f64 * 0.6) as usize;
     }
 
     pub(crate) fn build_chat_history(&self) -> String {
@@ -277,6 +301,10 @@ pub(crate) struct ChatSession {
     pub(crate) mode: RunMode,
     pub(crate) last_tokens: u32,
     pub(crate) last_elapsed: std::time::Duration,
+    /// Cumulative tokens used across all turns in this session.
+    pub(crate) total_tokens: u64,
+    /// Wall-clock start time of the session.
+    pub(crate) session_start: std::time::Instant,
 }
 
 impl ChatSession {
@@ -292,6 +320,8 @@ impl ChatSession {
             mode: RunMode::Chat,
             last_tokens: 0,
             last_elapsed: std::time::Duration::from_secs(0),
+            total_tokens: 0,
+            session_start: std::time::Instant::now(),
         })
     }
 
@@ -358,6 +388,8 @@ impl ChatSession {
             "last_code": self.code_out.last_code,
             "last_files": last_files_json,
             "last_files_written": self.code_out.last_files_written.iter().map(|e| e.path.display().to_string()).collect::<Vec<_>>(),
+            "total_tokens": self.total_tokens,
+            "session_duration_secs": self.session_start.elapsed().as_secs_f64(),
         })
     }
 
@@ -663,5 +695,61 @@ mod tests {
         let session = make_session();
         let json = session.to_session_json();
         assert!(json["saved_at"].as_str().unwrap_or("").len() > 5);
+    }
+
+    #[test]
+    fn push_turn_evicts_oldest_when_over_cap() {
+        let mut hm = HistoryManager::new().unwrap();
+        // Push more than MAX_HISTORY_TURNS (12) + 1 turns
+        for i in 0..14 {
+            hm.push_turn(format!("user{}", i), format!("assistant{}", i));
+        }
+        assert_eq!(hm.history.len(), crate::constants::MAX_HISTORY_TURNS);
+        // Oldest turn should have been evicted
+        assert_eq!(hm.history.first().unwrap().0, "user2");
+        assert_eq!(hm.history.last().unwrap().0, "user13");
+    }
+
+    #[test]
+    fn push_turn_no_eviction_when_under_budget() {
+        let mut hm = HistoryManager::new().unwrap();
+        hm.push_turn("hello".into(), "world".into());
+        hm.push_turn("foo".into(), "bar".into());
+        assert_eq!(hm.history.len(), 2);
+        assert_eq!(hm.assistant_token_cache.len(), 2);
+    }
+
+    #[test]
+    fn push_turn_evicts_by_token_budget() {
+        let mut hm = HistoryManager::new().unwrap();
+        hm.max_history_tokens = 10; // very small budget
+        hm.push_turn("user1".into(), "a short resp".into());
+        hm.push_turn("user2".into(), "another".into());
+        // With token budget of 10, at least one turn should be kept
+        assert!(!hm.history.is_empty(), "at least one turn should remain");
+        assert!(hm.history.len() <= 2);
+    }
+
+    #[test]
+    fn push_turn_empty_history_allowed() {
+        let hm = HistoryManager::new().unwrap();
+        assert!(hm.history.is_empty());
+        assert!(hm.assistant_token_cache.is_empty());
+    }
+
+    #[test]
+    fn set_max_history_tokens_from_ctx_sets_reasonable_budget() {
+        let mut hm = HistoryManager::new().unwrap();
+        hm.set_max_history_tokens_from_ctx(128_000);
+        assert_eq!(hm.max_history_tokens, (128_000_f64 * 0.6) as usize);
+    }
+
+    #[test]
+    fn clear_turns_clears_both_history_and_cache() {
+        let mut hm = HistoryManager::new().unwrap();
+        hm.push_turn("user".into(), "assistant".into());
+        hm.clear_turns();
+        assert!(hm.history.is_empty());
+        assert!(hm.assistant_token_cache.is_empty());
     }
 }

@@ -40,6 +40,24 @@ jobs:
         working-directory: rem-cli
         run: cargo test
 
+      - name: install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: audit
+        working-directory: rem-cli
+        run: cargo audit
+
+      - name: install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: deny
+        working-directory: rem-cli
+        run: cargo deny check
+
       - name: build
         working-directory: rem-cli
         run: cargo build --release

@@ -4,7 +4,7 @@
 
 - **Language:** Rust (edition 2021)
 - **Build:** `cargo build`
-- **Test:** `cargo test` (178 unit + 17 integration + 12 intent_parsing tests = 207 total)
+- **Test:** `cargo test` (527 unit + 18 integration tests = 545 total)
 - **Lint:** `cargo clippy` (zero warnings target)
 - **Run:** `cargo run -- [args]` or `./target/debug/rem`
 

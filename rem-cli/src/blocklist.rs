@@ -331,4 +331,35 @@ mod tests {
             "'dd' in middle of word should not be blocked"
         );
     }
+
+    #[test]
+    fn blocks_mixed_case_blocked_patterns() {
+        assert!(is_command_blocked("RM -RF /"), "uppercase RM should be blocked");
+        assert!(is_command_blocked("Chmod 777 /"), "capitalized Chmod should be blocked");
+        assert!(
+            is_command_blocked("DD if=/dev/zero of=/dev/sda"),
+            "uppercase DD should be blocked"
+        );
+        assert!(
+            is_command_blocked("ShutDown now"),
+            "mixed case shutdown should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_whitespace_only_and_empty_commands() {
+        assert!(!is_command_blocked(""), "empty string should not be blocked");
+        assert!(!is_command_blocked("   "), "whitespace only should not be blocked");
+        assert!(!is_command_blocked("\t\n"), "control whitespace should not be blocked");
+    }
+
+    #[test]
+    fn normalize_cmd_strips_control_and_backslash() {
+        // control chars are stripped entirely (no space inserted)
+        assert_eq!(normalize_cmd("rm\x00 -rf /"), "rm -rf /");
+        assert_eq!(normalize_cmd("echo\u{0000}hello"), "echohello");
+        // regular whitespace normalization
+        assert_eq!(normalize_cmd("  ls   -la  "), "ls -la");
+        assert_eq!(normalize_cmd("rm   -rf  /"), "rm -rf /");
+    }
 }

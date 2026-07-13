@@ -609,6 +609,15 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/ping",
+            CommandInfo {
+                description: "Test provider connectivity",
+                usage: "/ping",
+                long_description: "Pings the active provider to check connectivity and latency.\nDisplays response time and available model count.",
+            category: CommandCategory::Model,
+            },
+        ),
+        (
             "/models",
             CommandInfo {
                 description: "List available models from the active provider",
@@ -645,6 +654,15 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/status",
+            CommandInfo {
+                description: "Show session and provider status overview",
+                usage: "/status",
+                long_description: "Displays an overview of the current session: provider, mode, model context window,\ntoken usage, turn count, and session duration.",
+            category: CommandCategory::Session,
+            },
+        ),
+        (
             "/page",
             CommandInfo {
                 description: "Re-view the last output through a pager",
@@ -663,8 +681,8 @@ pub(crate) use git::handle_commit;
 pub(crate) use goal::handle_goal;
 pub(crate) use help::{print_chat_help, print_command_help};
 pub(crate) use repl::{
-    handle_clear, handle_list_models, handle_mode, handle_model, handle_plan, handle_provider, handle_pull_model,
-    handle_reasoning, handle_reset, handle_theme, handle_watch, handle_why,
+    handle_clear, handle_list_models, handle_mode, handle_model, handle_ping, handle_plan, handle_provider,
+    handle_pull_model, handle_reasoning, handle_reset, handle_status, handle_theme, handle_watch, handle_why,
 };
 pub(crate) use review::{handle_apply, handle_diff, handle_review};
 pub(crate) use session::{

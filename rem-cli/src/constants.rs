@@ -115,6 +115,11 @@ pub const MAX_SESSION_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
+// ── Vision ───────────────────────────────────────────────────────────────────
+
+/// Maximum file size (bytes) allowed for vision image uploads.
+pub const MAX_VISION_IMAGE_BYTES: u64 = 20_000_000; // 20 MB
+
 // ── Search ──────────────────────────────────────────────────────────────────
 
 pub const SEARCH_MAX_RESULTS: usize = 8;
