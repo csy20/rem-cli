@@ -36,7 +36,6 @@ mod tool_executor;
 mod types;
 mod ui;
 mod vision;
-mod watcher;
 
 use crate::cli::{Cli, Commands};
 use crate::commands::runner::*;

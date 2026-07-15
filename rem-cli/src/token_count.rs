@@ -1,18 +1,6 @@
 use std::sync::LazyLock;
 
 static BPE_CL100K: LazyLock<Option<tiktoken_rs::CoreBPE>> = LazyLock::new(|| tiktoken_rs::cl100k_base().ok());
-#[allow(dead_code)]
-static BPE_O200K: LazyLock<Option<tiktoken_rs::CoreBPE>> = LazyLock::new(|| tiktoken_rs::o200k_base().ok());
-
-#[allow(dead_code)]
-pub fn get_tokenizer(model: &str) -> &'static Option<tiktoken_rs::CoreBPE> {
-    let lower = model.to_lowercase();
-    if lower.contains("gpt-4o") || lower.contains("o1") || lower.contains("o3") {
-        &BPE_O200K
-    } else {
-        &BPE_CL100K
-    }
-}
 
 /// Estimates token count, using tiktoken-rs if available, falling back to heuristic.
 pub fn estimate_tokens(text: &str) -> usize {
@@ -20,18 +8,6 @@ pub fn estimate_tokens(text: &str) -> usize {
         return 0;
     }
     if let Some(ref bpe) = *BPE_CL100K {
-        let tokens = bpe.encode_with_special_tokens(text);
-        return tokens.len().max(1);
-    }
-    estimate_tokens_heuristic(text)
-}
-
-#[allow(dead_code)]
-pub fn estimate_tokens_for_model(text: &str, model: &str) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    if let Some(ref bpe) = *get_tokenizer(model) {
         let tokens = bpe.encode_with_special_tokens(text);
         return tokens.len().max(1);
     }

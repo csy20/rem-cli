@@ -20,8 +20,8 @@ use crate::commands::{
     handle_memory_set, handle_mode, handle_model, handle_page, handle_ping, handle_plan, handle_provider,
     handle_pull_model, handle_reasoning, handle_refactor, handle_reload, handle_reset, handle_resume_session,
     handle_review, handle_save_session, handle_search, handle_status, handle_summary, handle_test, handle_theme,
-    handle_tokens, handle_undo, handle_vision, handle_watch, handle_why, handle_write, print_chat_help,
-    print_command_help, print_last_files, prompt_for_path,
+    handle_tokens, handle_undo, handle_vision, handle_why, handle_write, print_chat_help, print_command_help,
+    print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
@@ -368,10 +368,6 @@ async fn dispatch_slash_command(
         }
         "/reasoning" => {
             handle_reasoning(client, cfg, if args.is_empty() { None } else { Some(args) });
-            return false;
-        }
-        "/watch" => {
-            handle_watch(session);
             return false;
         }
         "/resume" => {

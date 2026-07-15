@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use serde::{Deserialize, Serialize};
 
 /// Effort level for reasoning models (OpenAI o1/o3).
@@ -52,18 +50,7 @@ impl Default for ReasoningConfig {
     }
 }
 
-static REASONING_OVERRIDE: LazyLock<std::sync::RwLock<Option<bool>>> = LazyLock::new(|| std::sync::RwLock::new(None));
-
-#[allow(dead_code)]
-pub fn set_reasoning_override(enabled: Option<bool>) {
-    let mut w = REASONING_OVERRIDE.write().unwrap_or_else(|e| e.into_inner());
-    *w = enabled;
-}
-
 pub fn is_reasoning_model(model: &str) -> bool {
-    if let Some(override_val) = *REASONING_OVERRIDE.read().unwrap_or_else(|e| e.into_inner()) {
-        return override_val;
-    }
     let lower = model.to_lowercase();
     lower == "o1"
         || lower.starts_with("o1-")

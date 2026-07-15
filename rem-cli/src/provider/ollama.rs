@@ -29,15 +29,6 @@ pub struct OllamaJsonResponse {
     pub response: String,
 }
 
-/// Non-chat API stream line variant — kept for future use of the
-/// /api/generate endpoint (currently we use /api/chat).
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct OllamaStreamLine {
-    pub response: Option<String>,
-    pub done: Option<bool>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct OllamaChatStreamLine {
     pub message: Option<OllamaChatMessage>,
@@ -360,29 +351,6 @@ mod tests {
         let json = r#"{"response":"{\"explanation\":\"test\"}"}"#;
         let resp: OllamaJsonResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.response, "{\"explanation\":\"test\"}");
-    }
-
-    #[test]
-    fn ollama_stream_line_deserialize_with_response() {
-        let json = r#"{"response":"hello","done":false}"#;
-        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
-        assert_eq!(line.response.as_deref(), Some("hello"));
-        assert_eq!(line.done, Some(false));
-    }
-
-    #[test]
-    fn ollama_stream_line_done() {
-        let json = r#"{"response":"","done":true}"#;
-        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
-        assert_eq!(line.done, Some(true));
-    }
-
-    #[test]
-    fn ollama_stream_line_partial() {
-        let json = r#"{"response":"world"}"#;
-        let line: OllamaStreamLine = serde_json::from_str(json).unwrap();
-        assert_eq!(line.response.as_deref(), Some("world"));
-        assert!(line.done.is_none());
     }
 
     #[test]

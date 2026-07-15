@@ -700,7 +700,7 @@ pub(crate) use goal::handle_goal;
 pub(crate) use help::{print_chat_help, print_command_help};
 pub(crate) use repl::{
     handle_clear, handle_list_models, handle_mode, handle_model, handle_ping, handle_plan, handle_provider,
-    handle_pull_model, handle_reasoning, handle_reset, handle_status, handle_theme, handle_watch, handle_why,
+    handle_pull_model, handle_reasoning, handle_reset, handle_status, handle_theme, handle_why,
 };
 pub(crate) use review::{handle_apply, handle_diff, handle_review};
 pub(crate) use session::{

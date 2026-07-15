@@ -27,7 +27,7 @@ src/
 │   ├── bedrock.rs   — AWS Bedrock streaming
 │   ├── openrouter.rs— OpenRouter streaming
 │   └── tools.rs     — Shared ToolCall type + provider tool support matrix
-├── indexer.rs       — Codebase indexing (rem index), BM25 + embedding retrieval
+├── indexer/         — Codebase indexing (rem index), BM25 + embedding retrieval
 ├── intent.rs        — Query intent classification
 ├── commands/        — REPL slash command handlers
 │   ├── mod.rs       — CommandRegistry with O(1) lookup
@@ -51,7 +51,6 @@ src/
 ├── watcher.rs       — Live file watcher with debounce for auto-reindex
 ├── pager.rs         — Pager output
 ├── highlight.rs     — Syntax highlighting
-├── feedback.rs      — User feedback
 └── ui/              — Terminal UI
     ├── mod.rs
     ├── theme.rs     — Color themes (GHOST, etc.)
@@ -83,4 +82,4 @@ cargo check                   # Fast type-check only
 - Tests: `#[cfg(test)] mod tests { use super::*; }` at end of source file
 - New features must keep all tests passing and clippy clean
 - Logging: `tracing::warn!()` / `tracing::info!()` via `EnvFilter`, never raw `eprintln!`
-- Watcher: background thread with `mpsc::Sender<()>` for stop signal; 1-second debounce window
+

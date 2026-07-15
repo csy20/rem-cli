@@ -4,6 +4,7 @@ __pycache__/
 
 # Rust
 rem-cli/target/
+rem-cli/.rem/
 **/*.rs.bk
 Cargo.lock.bak
 
