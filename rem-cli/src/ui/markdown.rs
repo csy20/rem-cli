@@ -134,7 +134,7 @@ fn render_table(rows: &[&str], t: &crate::ui::theme::Theme) -> String {
                 out.push_str(&theme::paint(
                     t,
                     "text_faint",
-                    &format!("{:-<w$}|", "", w = w + 1),
+                    &format!("{:-<w$}|", "", w = w + 2),
                     false,
                 ));
             }

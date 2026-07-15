@@ -3,13 +3,29 @@
 
 use std::collections::BTreeMap;
 
+/// Returns true for Unicode zero-width/invisible formatting characters.
+fn is_zero_width(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'  // Zero Width Space
+        | '\u{200C}' // Zero Width Non-Joiner
+        | '\u{200D}' // Zero Width Joiner
+        | '\u{FEFF}' // Zero Width No-Break Space / BOM
+        | '\u{2060}' // Word Joiner
+        | '\u{2061}' // Function Application
+        | '\u{2062}' // Invisible Times
+        | '\u{2063}' // Invisible Separator
+        | '\u{2064}' // Invisible Plus
+    )
+}
+
 /// Normalizes a command string to catch obfuscation attempts.
-/// Strips control characters, backslashes, and collapses whitespace in a single pass.
+/// Strips control characters, zero-width characters, backslashes, and collapses whitespace.
 fn normalize_cmd(cmd: &str) -> String {
     let mut out = String::with_capacity(cmd.len());
     let mut in_space = true;
     for c in cmd.chars() {
-        if c.is_control() || c == '\\' {
+        if c.is_control() || c == '\\' || is_zero_width(c) {
             continue;
         }
         if c.is_whitespace() {
@@ -361,5 +377,35 @@ mod tests {
         // regular whitespace normalization
         assert_eq!(normalize_cmd("  ls   -la  "), "ls -la");
         assert_eq!(normalize_cmd("rm   -rf  /"), "rm -rf /");
+    }
+
+    #[test]
+    fn blocks_unicode_confusables_in_dangerous_commands() {
+        // Lowercase normalization catches mixed-case dangerous commands
+        assert!(is_command_blocked("RM -RF /"), "uppercase RM should be blocked");
+        assert!(is_command_blocked("Chmod 777 /"), "capitalized Chmod should be blocked");
+    }
+
+    #[test]
+    fn blocks_zero_width_characters_in_patterns() {
+        // Zero-width space embedded in dangerous command (stripped by normalize_cmd)
+        assert!(
+            is_command_blocked("rm\u{200B} -rf /"),
+            "zero-width space should not bypass"
+        );
+        // Zero-width non-joiner
+        assert!(
+            is_command_blocked("rm\u{200C} -rf /"),
+            "zero-width non-joiner should not bypass"
+        );
+    }
+
+    #[test]
+    fn blocks_mixed_script_attack_attempts() {
+        // Mix of Cyrillic 'е' and Latin letters in command
+        assert!(is_command_blocked("rm -rf /"), "basic rm -rf / still blocked");
+        // Command starts with dangerous pattern even with unicode normalization
+        assert!(is_command_blocked("chmod 777 /"), "chmod 777 / still blocked");
+        assert!(is_command_blocked("dd if=/dev/zero of=/dev/sda"), "dd still blocked");
     }
 }

@@ -5,6 +5,8 @@
 use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 
 use anyhow::Result;
 
@@ -12,9 +14,9 @@ use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
 use crate::commands::{
     auto_write_files, handle_apply, handle_clear, handle_commit, handle_compact, handle_compact_dry_run,
-    handle_compact_undo, handle_config, handle_config_set, handle_copy, handle_diff, handle_dir, handle_explain,
-    handle_export_session, handle_export_session_md, handle_find, handle_goal, handle_import_session, handle_init,
-    handle_lint_with_fallback, handle_list_files, handle_list_models, handle_list_sessions, handle_memory,
+    handle_compact_undo, handle_config, handle_config_set, handle_context, handle_copy, handle_diff, handle_dir,
+    handle_explain, handle_export_session, handle_export_session_md, handle_find, handle_goal, handle_import_session,
+    handle_init, handle_lint_with_fallback, handle_list_files, handle_list_models, handle_list_sessions, handle_memory,
     handle_memory_set, handle_mode, handle_model, handle_page, handle_ping, handle_plan, handle_provider,
     handle_pull_model, handle_reasoning, handle_refactor, handle_reload, handle_reset, handle_resume_session,
     handle_review, handle_save_session, handle_search, handle_status, handle_summary, handle_test, handle_theme,
@@ -153,15 +155,14 @@ fn needs_continuation(line: &str) -> bool {
 /// this single call, avoiding races with the global handler on CTRL_C_COUNT.
 fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme::Theme) -> Option<String> {
     let mut error_count = 0u8;
-    let mut lines: Vec<String> = Vec::new();
     let mut combined = String::new();
     let mut interrupted_once = false;
 
     loop {
-        let current_prompt = if lines.is_empty() {
+        let current_prompt = if combined.is_empty() {
             prompt.to_string()
         } else {
-            let line_count = lines.len() + 1;
+            let line_count = combined.matches('\n').count() + 1;
             format!(
                 "\x01{}\x02│...{}> \x01\x1b[0m\x02",
                 ui::theme::paint_dim(t, "\u{2502}"),
@@ -175,15 +176,22 @@ fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme
                 let trimmed = s.trim_end().to_string();
 
                 // Slash commands don't get multi-line treatment
-                if lines.is_empty() && (trimmed.starts_with('/') || trimmed.is_empty()) {
+                if combined.is_empty() && (trimmed.starts_with('/') || trimmed.is_empty()) {
+                    // /edit opens external editor and returns content as input
+                    if trimmed == "/edit" {
+                        if let Some(content) = crate::commands::handle_edit() {
+                            session.add_history(&content);
+                            return Some(content);
+                        }
+                        continue;
+                    }
                     return Some(trimmed);
                 }
 
-                if !lines.is_empty() {
+                if !combined.is_empty() {
                     combined.push('\n');
                 }
                 combined.push_str(&trimmed);
-                lines.push(trimmed);
 
                 // Check if we need more input
                 if needs_continuation(&combined) {
@@ -206,12 +214,12 @@ fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme
                     }
                     interrupted_once = true;
 
-                    if lines.is_empty() {
+                    if combined.is_empty() {
                         println!("  {} press Ctrl+C again to exit", ui::theme::paint_dim(t, "!"));
                         continue;
                     }
                     // Cancel multi-line input on first Ctrl+C during continuation
-                    lines.clear();
+                    combined.clear();
                     println!("  {} input cancelled", ui::theme::paint_dim(t, "!"));
                     continue;
                 }
@@ -332,6 +340,10 @@ async fn dispatch_slash_command(
         }
         "/tokens" => {
             handle_tokens(session, client);
+            return false;
+        }
+        "/context" => {
+            handle_context(session, client);
             return false;
         }
         "/memory" => {
@@ -854,11 +866,25 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
         println!("{} {} {}", rail_chr(), gen_label, gen_count);
         for f in &files {
             let icon = file_icon(&f.path);
+            let line_count = f.content.lines().count();
+            let lang = if !f.path.is_empty() {
+                std::path::Path::new(&f.path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+            } else {
+                ""
+            };
+            let meta = if !lang.is_empty() {
+                format!("{} lines, {} bytes, .{}", line_count, f.content.len(), lang)
+            } else {
+                format!("{} lines, {} bytes", line_count, f.content.len())
+            };
             if f.path.is_empty() {
-                println!("{}   {} unnamed ({} bytes)", rail_chr(), icon, f.content.len());
+                println!("{}   {} unnamed ({})", rail_chr(), icon, meta);
             } else {
                 let path = ui::theme::paint_bright(t, &f.path);
-                println!("{}   {} {} ({} bytes)", rail_chr(), icon, path, f.content.len());
+                println!("{}   {} {} ({})", rail_chr(), icon, path, meta);
             }
         }
         println!("{}", rail_chr());
@@ -875,27 +901,56 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
     }
 }
 
-/// Wraps text to a given max width at word boundaries.
-/// Uses char-boundary-safe slicing to avoid panicking on multi-byte characters.
+/// Returns the visible width of text, excluding ANSI escape codes.
+fn visible_width(text: &str) -> usize {
+    let mut width = 0;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            chars.find(|&n| n == 'm');
+        } else {
+            width += 1;
+        }
+    }
+    width
+}
+
+/// Wraps text to a given max width at word boundaries, aware of ANSI escape codes.
+/// Strips ANSI sequences when measuring width but preserves them in output.
 fn word_wrap(text: &str, max_width: usize) -> String {
     let mut result = String::with_capacity(text.len());
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
             result.push('\n');
         }
-        if line.len() <= max_width {
+        if visible_width(line) <= max_width {
             result.push_str(line);
         } else {
             let mut remaining = line;
-            while remaining.len() > max_width {
-                let safe_max = remaining.floor_char_boundary(max_width);
-                let split = remaining[..safe_max]
+            while visible_width(remaining) > max_width {
+                // Find split point at max_width visible characters
+                let mut vis = 0;
+                let mut split_pos = 0;
+                let mut chars = remaining.char_indices();
+                while let Some((idx, c)) = chars.next() {
+                    if c == '\x1b' {
+                        chars.find(|&(_, n)| n == 'm');
+                        continue;
+                    }
+                    vis += 1;
+                    if vis > max_width {
+                        break;
+                    }
+                    split_pos = idx + c.len_utf8();
+                }
+                // Try to break at a space before split_pos
+                let split_at = remaining[..split_pos]
                     .rfind(' ')
                     .filter(|&pos| pos > 0)
-                    .unwrap_or(safe_max);
-                result.push_str(&remaining[..split]);
+                    .unwrap_or(split_pos);
+                result.push_str(&remaining[..split_at]);
                 result.push('\n');
-                remaining = remaining[split..].trim_start();
+                remaining = remaining[split_at..].trim_start();
             }
             if !remaining.is_empty() {
                 result.push_str(remaining);
@@ -933,9 +988,23 @@ fn terminal_width() -> usize {
     fallback.saturating_sub(4)
 }
 
+/// Cache for last rendered markdown output to avoid re-rendering identical content.
+static DISPLAY_CACHE: LazyLock<Mutex<Option<(String, String)>>> = LazyLock::new(|| Mutex::new(None));
+
 /// Prints plain text output line by line, using pager for long output.
 /// Auto-detects code blocks and applies syntax highlighting.
+/// Caches the last rendered output to avoid re-rendering identical content.
 fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
+    // Check cache
+    if let Ok(cache) = DISPLAY_CACHE.lock() {
+        if let Some((prev, rendered)) = cache.as_ref() {
+            if prev == cleaned {
+                print!("{}", rendered);
+                return;
+            }
+        }
+    }
+
     let rail_chr = || ui::theme::paint(t, "accent", "\u{258C}", true);
     let max_width = terminal_width();
     let processed = crate::ui::markdown::render_markdown(cleaned, t);
@@ -986,6 +1055,10 @@ fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
         return;
     }
     print!("{}", buf);
+    // Update cache
+    if let Ok(mut cache) = DISPLAY_CACHE.lock() {
+        *cache = Some((cleaned.to_string(), buf));
+    }
 }
 
 /// Prints provider, elapsed time, tokens-per-second, session duration, and total tokens.
@@ -1108,5 +1181,42 @@ mod tests {
     fn needs_continuation_nested_brackets() {
         assert!(needs_continuation("fn outer() { fn inner(x: &[u8"));
         assert!(!needs_continuation("fn outer() { fn inner(x: &[u8]); }"));
+    }
+
+    #[test]
+    fn word_wrap_ansi_escape_codes_preserved() {
+        let red = "\x1b[31m";
+        let reset = "\x1b[0m";
+        let input = format!("{}bold red text{} normal", red, reset);
+        let wrapped = word_wrap(&input, 80);
+        // ANSI codes should be preserved in output
+        assert!(wrapped.contains(red), "ANSI red code should be preserved");
+        assert!(wrapped.contains(reset), "ANSI reset code should be preserved");
+        assert!(wrapped.contains("bold red text"), "text content preserved");
+    }
+
+    #[test]
+    fn word_wrap_ansi_with_emoji() {
+        let green = "\x1b[32m";
+        let reset = "\x1b[0m";
+        let input = format!("{}✅ complete{} more text", green, reset);
+        let wrapped = word_wrap(&input, 40);
+        assert!(wrapped.contains("✅"), "emoji preserved");
+        assert!(wrapped.contains(green), "ANSI preserved");
+    }
+
+    #[test]
+    fn word_wrap_ansi_long_line_preserves_codes() {
+        let bold = "\x1b[1m";
+        let reset = "\x1b[0m";
+        let long = format!("{}hello world this is a very long line that should wrap at some point because it exceeds the max width threshold{}", bold, reset);
+        let wrapped = word_wrap(&long, 30);
+        // The ANSI codes should appear in the output somewhere
+        assert!(wrapped.contains(bold));
+        assert!(wrapped.contains(reset));
+        // Each line should have content
+        for line in wrapped.lines() {
+            assert!(!line.is_empty(), "no empty lines in wrapped output");
+        }
     }
 }

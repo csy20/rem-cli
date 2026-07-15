@@ -255,14 +255,14 @@ pub fn find_matches(root: &Path, query: &str, opts: &FindOptions) -> FindReport 
                 let line_no = idx + 1;
                 let mut search_from = 0usize;
                 let haystack: &[u8];
-                let _lower_buf: Vec<u8>;
+                let lower_buf: Vec<u8>;
                 if opts.case_sensitive {
                     haystack = raw_line.as_bytes();
                 } else {
-                    _lower_buf = raw_line.to_lowercase().into_bytes();
-                    haystack = &_lower_buf;
+                    lower_buf = raw_line.to_lowercase().into_bytes();
+                    haystack = &lower_buf;
                 }
-                // SAFETY: haystack borrows from _lower_buf in the same scope —
+                // SAFETY: haystack borrows from lower_buf in the same scope —
                 // both are declared inside the for-loop iteration and cannot
                 // outlive each other. The borrow checker guarantees this.
                 while let Some(pos) = find_subslice(&haystack[search_from..], &needle) {

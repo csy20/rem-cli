@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 
@@ -6,11 +8,15 @@ use super::{ProviderBackend, ProviderContext};
 
 pub(super) struct BedrockBackend;
 
-impl BedrockBackend {
-    async fn bedrock_client(&self) -> Result<aws_sdk_bedrockruntime::Client> {
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-        Ok(aws_sdk_bedrockruntime::Client::new(&config))
+async fn bedrock_client() -> Result<aws_sdk_bedrockruntime::Client> {
+    static CLIENT: OnceLock<aws_sdk_bedrockruntime::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
     }
+    let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let client = aws_sdk_bedrockruntime::Client::new(&config);
+    let _ = CLIENT.set(client.clone());
+    Ok(client)
 }
 
 #[async_trait]
@@ -25,7 +31,7 @@ impl ProviderBackend for BedrockBackend {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<crate::ModelReply> {
-        let client = self.bedrock_client().await?;
+        let client = bedrock_client().await?;
         let system_content = aws_sdk_bedrockruntime::types::SystemContentBlock::Text(system_prompt.to_string());
         let content = aws_sdk_bedrockruntime::types::ContentBlock::Text(format!(
             "{}\n\nReturn JSON only. Respond with a valid JSON object.",
@@ -84,7 +90,7 @@ impl ProviderBackend for BedrockBackend {
         user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        let client = self.bedrock_client().await?;
+        let client = bedrock_client().await?;
         let system_content = aws_sdk_bedrockruntime::types::SystemContentBlock::Text(system_prompt.to_string());
 
         let mut prompt = String::new();

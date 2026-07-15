@@ -474,6 +474,15 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/edit",
+            CommandInfo {
+                description: "Edit current input in external editor",
+                usage: "/edit",
+                long_description: "Opens $VISUAL or $EDITOR to write or edit multi-line input.\nSaves and returns the content when the editor exits.",
+            category: CommandCategory::Session,
+            },
+        ),
+        (
             "/copy",
             CommandInfo {
                 description: "Copy last N files to clipboard",
@@ -497,6 +506,15 @@ pub(crate) fn registry() -> CommandRegistry {
                 description: "Compact the chat context",
                 usage: "/compact",
                 long_description: "",
+            category: CommandCategory::Session,
+            },
+        ),
+        (
+            "/context",
+            CommandInfo {
+                description: "Show debug context being sent to the model",
+                usage: "/context",
+                long_description: "Displays the assembled prompt with character/token counts for debugging context injection.\nAlso shows analytics: provider, model, turn count, total tokens, and session duration.",
             category: CommandCategory::Session,
             },
         ),
@@ -686,10 +704,10 @@ pub(crate) use repl::{
 };
 pub(crate) use review::{handle_apply, handle_diff, handle_review};
 pub(crate) use session::{
-    handle_compact, handle_compact_dry_run, handle_compact_undo, handle_config, handle_config_set, handle_dir,
-    handle_export_session, handle_export_session_md, handle_import_session, handle_init, handle_list_files,
-    handle_list_sessions, handle_memory, handle_memory_set, handle_reload, handle_resume_session, handle_save_session,
-    handle_summary, handle_tokens,
+    handle_compact, handle_compact_dry_run, handle_compact_undo, handle_config, handle_config_set, handle_context,
+    handle_dir, handle_edit, handle_export_session, handle_export_session_md, handle_import_session, handle_init,
+    handle_list_files, handle_list_sessions, handle_memory, handle_memory_set, handle_reload, handle_resume_session,
+    handle_save_session, handle_summary, handle_tokens,
 };
 pub(crate) use tools::{
     handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_test,

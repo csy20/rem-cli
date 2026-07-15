@@ -52,16 +52,16 @@ impl Default for ReasoningConfig {
     }
 }
 
-static REASONING_OVERIDE: LazyLock<std::sync::RwLock<Option<bool>>> = LazyLock::new(|| std::sync::RwLock::new(None));
+static REASONING_OVERRIDE: LazyLock<std::sync::RwLock<Option<bool>>> = LazyLock::new(|| std::sync::RwLock::new(None));
 
 #[allow(dead_code)]
 pub fn set_reasoning_override(enabled: Option<bool>) {
-    let mut w = REASONING_OVERIDE.write().unwrap_or_else(|e| e.into_inner());
+    let mut w = REASONING_OVERRIDE.write().unwrap_or_else(|e| e.into_inner());
     *w = enabled;
 }
 
 pub fn is_reasoning_model(model: &str) -> bool {
-    if let Some(override_val) = *REASONING_OVERIDE.read().unwrap_or_else(|e| e.into_inner()) {
+    if let Some(override_val) = *REASONING_OVERRIDE.read().unwrap_or_else(|e| e.into_inner()) {
         return override_val;
     }
     let lower = model.to_lowercase();

@@ -728,7 +728,7 @@ fn parse_history_turns_empty() {
 
 #[test]
 fn parse_history_turns_single_pair() {
-    let input = "User: hello\nREM: Hi there!";
+    let input = "User: hello\n<<<REM:BOUNDARY>>>\nHi there!";
     let turns = parse_history_turns(input);
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].0, "hello");
@@ -737,7 +737,7 @@ fn parse_history_turns_single_pair() {
 
 #[test]
 fn parse_history_turns_multiple_pairs() {
-    let input = "User: first\nREM: answer1\n\nUser: second\nREM: answer2";
+    let input = "User: first\n<<<REM:BOUNDARY>>>\nanswer1\n\nUser: second\n<<<REM:BOUNDARY>>>\nanswer2";
     let turns = parse_history_turns(input);
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[0].0, "first");
@@ -748,7 +748,7 @@ fn parse_history_turns_multiple_pairs() {
 
 #[test]
 fn parse_history_turns_no_assistant() {
-    let input = "User: only user message\nREM: ";
+    let input = "User: only user message\n<<<REM:BOUNDARY>>>\n";
     let turns = parse_history_turns(input);
     assert_eq!(turns.len(), 1);
     // The user part strips "User: " prefix
@@ -764,7 +764,7 @@ fn parse_history_turns_no_assistant() {
 
 #[test]
 fn parse_history_turns_with_newline_escaping() {
-    let input = "User: line1\\nline2\nREM: response";
+    let input = "User: line1\\nline2\n<<<REM:BOUNDARY>>>\nresponse";
     let turns = parse_history_turns(input);
     assert_eq!(turns.len(), 1);
     assert_eq!(turns[0].0, "line1\nline2", "escaped newlines should be unescaped");
@@ -782,7 +782,7 @@ fn build_messages_from_history_empty() {
 
 #[test]
 fn build_messages_from_history_with_turns() {
-    let messages = build_messages_from_history("User: prev user\nREM: prev asst", "new prompt", None);
+    let messages = build_messages_from_history("User: prev user\n<<<REM:BOUNDARY>>>\nprev asst", "new prompt", None);
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[0]["role"], "user");
     assert_eq!(messages[0]["content"], "prev user");
@@ -790,6 +790,41 @@ fn build_messages_from_history_with_turns() {
     assert_eq!(messages[1]["content"], "prev asst");
     assert_eq!(messages[2]["role"], "user");
     assert_eq!(messages[2]["content"], "new prompt");
+}
+
+#[test]
+fn parse_history_turns_user_content_containing_delimiter() {
+    // User message containing "REM:" should not confuse parsing
+    let input = "User: I said REM: remember this\n<<<REM:BOUNDARY>>>\nGot it!";
+    let turns = parse_history_turns(input);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].0, "I said REM: remember this");
+    assert_eq!(turns[0].1, "Got it!");
+}
+
+#[test]
+fn parse_history_turns_empty_history() {
+    assert!(parse_history_turns("").is_empty());
+    assert!(parse_history_turns(" ").is_empty());
+    assert!(parse_history_turns("\n\n").is_empty());
+}
+
+#[test]
+fn parse_history_turns_unicode_preservation() {
+    let input = "User: café résumé 日本語\n<<<REM:BOUNDARY>>>\nпривет world 🌍";
+    let turns = parse_history_turns(input);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].0, "café résumé 日本語");
+    assert_eq!(turns[0].1, "привет world 🌍");
+}
+
+#[test]
+fn parse_history_turns_multi_turn_empty_assistant() {
+    let input = "User: first\n<<<REM:BOUNDARY>>>\n\n\nUser: second\n<<<REM:BOUNDARY>>>\nanswer2";
+    let turns = parse_history_turns(input);
+    assert_eq!(turns.len(), 2);
+    assert!(turns[0].1.is_empty() || turns[0].1.trim().is_empty());
+    assert_eq!(turns[1].1, "answer2");
 }
 
 #[test]

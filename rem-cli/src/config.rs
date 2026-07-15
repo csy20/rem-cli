@@ -310,6 +310,8 @@ pub(crate) fn validate_config(cfg: &AppConfig) -> Result<()> {
         "bedrock",
         "openrouter",
         "deepseek",
+        "github",
+        "xai",
     ];
     let t = ui::theme::active();
     let warn_prefix = ui::theme::paint_warning(&t, "config warning:");

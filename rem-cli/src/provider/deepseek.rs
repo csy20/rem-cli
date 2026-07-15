@@ -37,7 +37,10 @@ impl ProviderBackend for DeepSeekBackend {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(anyhow!("DeepSeek API unreachable at {}", ctx.base_url));
+            return Err(anyhow!(
+                "{}",
+                super::ProviderError::Other(format!("DeepSeek API unreachable at {}", ctx.base_url))
+            ));
         }
         let parsed: openai::OpenAIModelsResponse = resp.json().await.context("invalid DeepSeek models response")?;
         Ok(parsed.data.into_iter().map(|m| m.id).collect())

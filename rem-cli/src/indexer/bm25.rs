@@ -24,7 +24,7 @@ pub(crate) fn build_inverted_index(
     let mut inverted: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, chunk) in chunks.iter().enumerate() {
         let mut seen_in_chunk: HashSet<String> = HashSet::new();
-        for w in tokenize(&chunk.content_lower) {
+        for w in tokenize(&chunk.content) {
             if seen_in_chunk.insert(w.clone()) {
                 *doc_freqs.entry(w.clone()).or_insert(0) += 1;
                 inverted.entry(w).or_default().push(i);
@@ -80,20 +80,20 @@ pub fn retrieve_relevant_chunks<'a>(
             let dl = c.content.len() as f64;
 
             // Build token frequency map once per chunk (avoids O(q_words × tokens) scan)
-            let token_counts: std::collections::HashMap<&str, usize> = {
+            let token_counts: std::collections::HashMap<String, usize> = {
                 let mut map = std::collections::HashMap::new();
                 for t in c
-                    .content_lower
+                    .content
                     .split(|ch: char| !ch.is_alphanumeric())
                     .filter(|t| t.len() > 1)
                 {
-                    *map.entry(t).or_insert(0) += 1;
+                    *map.entry(t.to_lowercase()).or_insert(0) += 1;
                 }
                 map
             };
-            let has_name_or_path_match = q_words
-                .iter()
-                .any(|w| c.name_lower.contains(w) || c.path_lower.contains(w));
+            let name_lower = c.name.to_lowercase();
+            let path_lower = c.path.to_lowercase();
+            let has_name_or_path_match = q_words.iter().any(|w| name_lower.contains(w) || path_lower.contains(w));
 
             for w in &q_words {
                 let tf_val = token_counts.get(w.as_str()).copied().unwrap_or(0);
@@ -132,7 +132,7 @@ pub fn retrieve_relevant_chunks<'a>(
         }
         let has_name_or_path = q_words
             .iter()
-            .any(|w| c.name_lower.contains(w) || c.path_lower.contains(w));
+            .any(|w| c.name.to_lowercase().contains(w) || c.path.to_lowercase().contains(w));
         let mut bonus = 0.0f64;
         if has_name_or_path {
             bonus += 2.0;
@@ -218,9 +218,6 @@ mod tests {
             name: "lib.rs".into(),
             chunk_type: "function".into(),
             content: "fn hello() {}".into(),
-            content_lower: "fn hello() {}".into(),
-            name_lower: "lib.rs".into(),
-            path_lower: "src/lib.rs".into(),
             start_line: 1,
             end_line: 1,
             embedding: None,
@@ -241,9 +238,6 @@ mod tests {
                 name: "a.rs".into(),
                 chunk_type: "file".into(),
                 content: "hello world".into(),
-                content_lower: "hello world".into(),
-                name_lower: "a.rs".into(),
-                path_lower: "a.rs".into(),
                 start_line: 1,
                 end_line: 1,
                 embedding: None,
@@ -254,9 +248,6 @@ mod tests {
                 name: "b.rs".into(),
                 chunk_type: "file".into(),
                 content: "hello there".into(),
-                content_lower: "hello there".into(),
-                name_lower: "b.rs".into(),
-                path_lower: "b.rs".into(),
                 start_line: 1,
                 end_line: 1,
                 embedding: None,
@@ -326,9 +317,6 @@ mod tests {
             name: "test.rs".into(),
             chunk_type: "file".into(),
             content: "hello world".into(),
-            content_lower: "hello world".into(),
-            name_lower: "test.rs".into(),
-            path_lower: "test.rs".into(),
             start_line: 1,
             end_line: 1,
             embedding: None,
@@ -346,9 +334,6 @@ mod tests {
             name: "test.rs".into(),
             chunk_type: "file".into(),
             content: "some code here".into(),
-            content_lower: "some code here".into(),
-            name_lower: "test.rs".into(),
-            path_lower: "test.rs".into(),
             start_line: 1,
             end_line: 1,
             embedding: None,

@@ -3,6 +3,68 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-07-16
+
+### Added
+
+- **GitHub Models provider** — new `github` provider backed by `GITHUB_TOKEN`,
+  supporting GitHub's OpenAI-compatible Models API. (`rem-cli/src/provider/github.rs`)
+- **xAI Grok provider** — new `xai` provider for the xAI API with Grok models.
+  (`rem-cli/src/provider/xai.rs`)
+- **Streaming inline Markdown rendering** — `render_inline_markdown()` in the
+  streaming path applies ANSI formatting for `` `code` ``, `**bold**`, and
+  `*italic*` in real-time.
+- **`/context` command** — shows the full assembled prompt being sent to the LLM
+  (provider, model, turns, tokens, duration, plus the assembled prompt).
+- **`/edit` command** — opens `$VISUAL` / `$EDITOR` to compose multi-line input
+  outside the REPL.
+- **MessagePack index format** — `codebase_index.msgpack` written alongside JSON;
+  preferred on load for 60-80% smaller index files and faster I/O.
+  (`rem-cli/src/indexer/mod.rs`)
+- **Memory-mapped index loading** — `try_mmap_read()` uses `memmap2` for zero-copy
+  reads of JSON index files. (`rem-cli/src/indexer/mod.rs`)
+- **Circuit breaker for provider retries** — tracks consecutive failures per
+  provider; after 3 transient errors, stops retrying for a 30-second cooldown.
+  (`rem-cli/src/provider/mod.rs`)
+- **ANSI-aware word wrapping** — `visible_width()` strips ANSI escape codes before
+  measuring line length, preventing mid-sequence breakage.
+- **Enhanced file display in code mode** — file listings now include detected
+  language extension and line count.
+- **Cached Markdown rendering** — `DISPLAY_CACHE` avoids re-rendering unchanged
+  output blocks.
+
+### Changed
+
+- **Provider registration** — consolidated to ~10 registration points
+  (`ProviderKind::as_str/from_str`, `DEFAULT_BASE_URLS`, `DEFAULT_MODELS`,
+  `API_KEY_ENV_VARS`, `Provider::new`, `provider_label`, `provider_supports_tools`,
+  `known_providers`), making adding a new provider a mechanical task.
+- **IndexChunk memory footprint** — removed `content_lower`, `name_lower`,
+  `path_lower` fields; lowercase computation deferred to BM25 tokenizer.
+  (`rem-cli/src/indexer/mod.rs`)
+- **SSE parsing** — byte-level `starts_with(b"data: ")` instead of string
+  allocation per line. (`rem-cli/src/provider/mod.rs`)
+- **`_lower_buf` renamed** — removed misleading underscore prefix in `find.rs`.
+- **`build_chat_history` reuses token cache** — avoids redundant `estimate_tokens()`
+  calls. (`rem-cli/src/chat.rs`)
+- **`word_wrap`** — replaced char-boundary splitting with ANSI-aware visible-width
+  measurement.
+- **`build_retrieved_context`** — removed duplicate footer push.
+
+### Fixed
+
+- **Duplicate footer** in `build_retrieved_context` — footer now appears exactly
+  once. (`rem-cli/src/indexer/mod.rs:184-186`)
+- **`REASONING_OVERIDE` typo** → `REASONING_OVERRIDE`. (`rem-cli/src/reasoning.rs`)
+- **Double `no_color()` atomic read** in `paint()` — `fg()`/`bg()` no longer
+  check `no_color()`; caller handles it once. (`rem-cli/src/ui/theme.rs`)
+- **Fragile delimiter in `parse_history_turns`** — replaced `\nREM: ` with unique
+  `\n<<<REM:BOUNDARY>>>\n` marker. (`rem-cli/src/provider/mod.rs:594-595`)
+- **ANSI escape splitting** — `word_wrap` now preserves ANSI codes through
+  wrapping. (`rem-cli/src/repl.rs`)
+- **Prompt rendering** — extracted fragile `\x01`/`\x02` marker logic into
+  `prompt_no_color` helper. (`rem-cli/src/session_io.rs`)
+
 ## [0.4.0] — 2026-06-23
 
 ### Added

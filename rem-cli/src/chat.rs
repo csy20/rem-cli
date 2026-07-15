@@ -155,7 +155,11 @@ impl HistoryManager {
             };
 
             let _ = write!(out, "User: {}", user.replace('\n', "\\n"));
-            let _ = write!(out, "\nREM: {}", truncated_assistant.replace('\n', "\\n"));
+            let _ = write!(
+                out,
+                "\n<<<REM:BOUNDARY>>>\n{}",
+                truncated_assistant.replace('\n', "\\n")
+            );
             out.push_str("\n\n");
         }
         out

@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 
 use rand::Rng;
 
@@ -18,10 +20,12 @@ pub mod azure;
 pub mod bedrock;
 pub mod deepseek;
 pub mod gemini;
+pub mod github;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
 pub mod tools;
+pub mod xai;
 
 #[cfg(test)]
 mod tests;
@@ -105,6 +109,63 @@ pub(crate) static HTTP_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock
 
 pub(crate) use crate::constants::{MAX_RESPONSE_BYTES, STREAM_CHUNK_TIMEOUT};
 
+// ── Circuit breaker for provider retries ─────────────────────────────────
+
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
+const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
+
+#[derive(Default)]
+struct CircuitState {
+    consecutive_failures: u32,
+    cooldown_until: Option<Instant>,
+}
+
+static CIRCUIT_BREAKER: LazyLock<Mutex<HashMap<ProviderKind, CircuitState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn circuit_breaker_check(kind: ProviderKind) -> Result<()> {
+    let mut cb = CIRCUIT_BREAKER.lock().unwrap_or_else(|e| e.into_inner());
+    let state = cb.entry(kind).or_default();
+    if state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+        if let Some(cooldown) = state.cooldown_until {
+            if Instant::now() < cooldown {
+                return Err(anyhow!(
+                    "circuit breaker open for {} — too many transient errors ({} consecutive). Retry in ~{}s",
+                    kind.as_str(),
+                    state.consecutive_failures,
+                    cooldown.saturating_duration_since(Instant::now()).as_secs(),
+                ));
+            }
+            // Cooldown expired — reset
+            state.consecutive_failures = 0;
+            state.cooldown_until = None;
+        }
+    }
+    Ok(())
+}
+
+fn circuit_breaker_record_success(kind: ProviderKind) {
+    let mut cb = CIRCUIT_BREAKER.lock().unwrap_or_else(|e| e.into_inner());
+    let state = cb.entry(kind).or_default();
+    state.consecutive_failures = 0;
+    state.cooldown_until = None;
+}
+
+fn circuit_breaker_record_failure(kind: ProviderKind) {
+    let mut cb = CIRCUIT_BREAKER.lock().unwrap_or_else(|e| e.into_inner());
+    let state = cb.entry(kind).or_default();
+    state.consecutive_failures += 1;
+    if state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
+        state.cooldown_until = Some(Instant::now() + Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS));
+        tracing::warn!(
+            "circuit breaker tripped for {} — {} consecutive failures, cooling down for {}s",
+            kind.as_str(),
+            state.consecutive_failures,
+            CIRCUIT_BREAKER_COOLDOWN_SECS,
+        );
+    }
+}
+
 // ── ProviderContext: immutable shared state extracted from Provider ──────
 
 #[derive(Clone)]
@@ -156,7 +217,8 @@ impl std::fmt::Debug for ProviderContext {
 
 // ── Provider ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum ProviderKind {
     Ollama,
     OpenAI,
@@ -166,6 +228,8 @@ pub enum ProviderKind {
     Bedrock,
     OpenRouter,
     DeepSeek,
+    GitHub,
+    XAI,
 }
 
 impl ProviderKind {
@@ -179,6 +243,8 @@ impl ProviderKind {
             ProviderKind::Bedrock => "bedrock",
             ProviderKind::OpenRouter => "openrouter",
             ProviderKind::DeepSeek => "deepseek",
+            ProviderKind::GitHub => "github",
+            ProviderKind::XAI => "xai",
         }
     }
 
@@ -191,6 +257,8 @@ impl ProviderKind {
             "bedrock" | "aws" => ProviderKind::Bedrock,
             "openrouter" => ProviderKind::OpenRouter,
             "deepseek" => ProviderKind::DeepSeek,
+            "github" | "githubmodels" => ProviderKind::GitHub,
+            "xai" | "grok" => ProviderKind::XAI,
             _ => ProviderKind::Ollama,
         }
     }
@@ -260,6 +328,8 @@ const DEFAULT_BASE_URLS: &[(ProviderKind, &str)] = &[
     (ProviderKind::Bedrock, ""),
     (ProviderKind::OpenRouter, "https://openrouter.ai/api/v1"),
     (ProviderKind::DeepSeek, "https://api.deepseek.com"),
+    (ProviderKind::GitHub, "https://models.inference.ai.azure.com"),
+    (ProviderKind::XAI, "https://api.x.ai/v1"),
 ];
 
 pub(crate) const DEFAULT_MODELS: &[(ProviderKind, &str)] = &[
@@ -268,6 +338,8 @@ pub(crate) const DEFAULT_MODELS: &[(ProviderKind, &str)] = &[
     (ProviderKind::Bedrock, "anthropic.claude-sonnet-4-20250514"),
     (ProviderKind::OpenRouter, "openai/gpt-4o"),
     (ProviderKind::DeepSeek, "deepseek-chat"),
+    (ProviderKind::GitHub, "gpt-4o"),
+    (ProviderKind::XAI, "grok-2"),
 ];
 
 pub(crate) fn default_base_url(kind: ProviderKind) -> String {
@@ -290,6 +362,8 @@ pub(crate) const API_KEY_ENV_VARS: &[(ProviderKind, &str)] = &[
     (ProviderKind::Bedrock, "AWS_ACCESS_KEY_ID"),
     (ProviderKind::OpenRouter, "OPENROUTER_API_KEY"),
     (ProviderKind::DeepSeek, "DEEPSEEK_API_KEY"),
+    (ProviderKind::GitHub, "GITHUB_TOKEN"),
+    (ProviderKind::XAI, "XAI_API_KEY"),
 ];
 
 pub(crate) fn api_key_env_var(kind: ProviderKind) -> Option<&'static str> {
@@ -382,6 +456,8 @@ impl Provider {
             ProviderKind::Bedrock => Box::new(UnsupportedBackend),
             ProviderKind::OpenRouter => Box::new(openrouter::OpenRouterBackend),
             ProviderKind::DeepSeek => Box::new(deepseek::DeepSeekBackend),
+            ProviderKind::GitHub => Box::new(github::GitHubBackend),
+            ProviderKind::XAI => Box::new(xai::XAIBackend),
         };
         Self {
             kind,
@@ -411,6 +487,8 @@ impl Provider {
             ProviderKind::Bedrock => format!("bedrock/{}", self.ctx.model),
             ProviderKind::OpenRouter => format!("openrouter/{}", self.ctx.model),
             ProviderKind::DeepSeek => format!("deepseek/{}", self.ctx.model),
+            ProviderKind::GitHub => format!("github/{}", self.ctx.model),
+            ProviderKind::XAI => format!("xai/{}", self.ctx.model),
         }
     }
 
@@ -442,8 +520,14 @@ impl Provider {
         err_str.contains("connection refused")
             || err_str.contains("connection reset")
             || err_str.contains("timed out")
-            || err_str.contains("429")
-            || err_str.contains(" 5")
+            // Match HTTP 429 and 5xx status codes precisely (not substring)
+            || err_str.contains("429 ")
+            || err_str.contains("429,")
+            || err_str.contains("500 ")
+            || err_str.contains("501 ")
+            || err_str.contains("502 ")
+            || err_str.contains("503 ")
+            || err_str.contains("504 ")
     }
 
     async fn with_retry<F, Fut, T>(f: F) -> Result<T>
@@ -491,22 +575,47 @@ impl Provider {
         Err(last_err.unwrap_or_else(|| anyhow!(ProviderError::Other("retry exhausted".into()))))
     }
 
+    // ─── Circuit-breaker-aware retry wrapper ──────────────────────────
+
+    async fn with_retry_and_circuit_breaker<F, Fut, T>(kind: ProviderKind, f: F) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        circuit_breaker_check(kind)?;
+        match Self::with_retry(f).await {
+            Ok(v) => {
+                circuit_breaker_record_success(kind);
+                Ok(v)
+            }
+            Err(e) => {
+                if Self::is_transient_error(&e) {
+                    circuit_breaker_record_failure(kind);
+                }
+                Err(e)
+            }
+        }
+    }
+
     // ─── Public API ─────────────────────────────────────────────────────
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
         STREAM_CANCELLED.store(false, Ordering::SeqCst);
-        Self::with_retry(|| self.backend.list_models(&self.ctx)).await
+        Self::with_retry_and_circuit_breaker(self.kind, || self.backend.list_models(&self.ctx)).await
     }
 
     pub async fn complete_json(&self, user_prompt: &str) -> Result<crate::ModelReply> {
         STREAM_CANCELLED.store(false, Ordering::SeqCst);
-        Self::with_retry(|| self.backend.complete_json(&self.ctx, &self.system_prompt, user_prompt)).await
+        Self::with_retry_and_circuit_breaker(self.kind, || {
+            self.backend.complete_json(&self.ctx, &self.system_prompt, user_prompt)
+        })
+        .await
     }
 
     pub async fn complete_chat_stream(&self, user_prompt: &str, system_prompt: &str, history: &str) -> Result<String> {
         STREAM_CANCELLED.store(false, Ordering::SeqCst);
         let ctx = self.build_ctx();
-        Self::with_retry(|| {
+        Self::with_retry_and_circuit_breaker(self.kind, || {
             self.backend
                 .complete_chat_stream(&ctx, system_prompt, user_prompt, history)
         })
@@ -523,7 +632,7 @@ impl Provider {
     ) -> Result<String> {
         STREAM_CANCELLED.store(false, Ordering::SeqCst);
         let ctx = self.build_ctx();
-        Self::with_retry(|| {
+        Self::with_retry_and_circuit_breaker(self.kind, || {
             self.backend.complete_chat_stream_with_vision(
                 &ctx,
                 system_prompt,
@@ -545,7 +654,7 @@ impl Provider {
     ) -> Result<tools::ToolResponse> {
         STREAM_CANCELLED.store(false, Ordering::SeqCst);
         let ctx = self.build_ctx();
-        Self::with_retry(|| {
+        Self::with_retry_and_circuit_breaker(self.kind, || {
             self.backend
                 .complete_chat_stream_with_tools(&ctx, system_prompt, user_prompt, history, tool_specs)
         })
@@ -572,11 +681,14 @@ fn parse_history_turns(history: &str) -> Vec<(String, String)> {
             continue;
         }
         // Find the REM: boundary within the block (allows multi-line messages)
-        let (user_part, assistant_part) = if let Some(rem_idx) = block.find("\nREM: ") {
+        // Uses a unique marker unlikely to appear in user content.
+        const BOUNDARY: &str = "\n<<<REM:BOUNDARY>>>\n";
+        const BOUNDARY_STRIP: &str = "<<<REM:BOUNDARY>>>\n";
+        let (user_part, assistant_part) = if let Some(rem_idx) = block.find(BOUNDARY) {
             let user = &block[..rem_idx];
-            let assistant = &block[rem_idx + 6..]; // skip "\nREM: "
+            let assistant = &block[rem_idx + BOUNDARY.len()..];
             (user, assistant)
-        } else if let Some(rem_idx) = block.strip_prefix("REM: ") {
+        } else if let Some(rem_idx) = block.strip_prefix(BOUNDARY_STRIP) {
             ("", rem_idx)
         } else {
             (block, "")
@@ -639,11 +751,83 @@ pub fn add_openai_auth(req: reqwest::RequestBuilder, api_key: &str, kind: Provid
     }
 }
 
+/// Applies lightweight inline Markdown formatting (code, bold, italic) using ANSI codes.
+/// Only formats non-code-fence lines. Uses simple character scanning (no regex dependency).
+fn render_inline_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '`' => {
+                let mut code = String::new();
+                loop {
+                    match chars.next() {
+                        Some('`') => break,
+                        Some(c) => code.push(c),
+                        None => break,
+                    }
+                }
+                if code.is_empty() {
+                    out.push_str("\x1b[32m``\x1b[0m");
+                } else {
+                    out.push_str("\x1b[32m");
+                    out.push_str(&code);
+                    out.push_str("\x1b[0m");
+                }
+            }
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next();
+                    let mut bold = String::new();
+                    loop {
+                        match chars.next() {
+                            Some('*') if chars.peek() == Some(&'*') => {
+                                chars.next();
+                                out.push_str("\x1b[1m");
+                                out.push_str(&bold);
+                                out.push_str("\x1b[0m");
+                                break;
+                            }
+                            Some(c) => bold.push(c),
+                            None => {
+                                out.push_str("**");
+                                out.push_str(&bold);
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    let mut italic = String::new();
+                    loop {
+                        match chars.next() {
+                            Some('*') => {
+                                out.push_str("\x1b[3m");
+                                out.push_str(&italic);
+                                out.push_str("\x1b[0m");
+                                break;
+                            }
+                            Some(c) => italic.push(c),
+                            None => {
+                                out.push('*');
+                                out.push_str(&italic);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn emit_token(text: &str) {
     if STREAM_TOKENS.load(Ordering::SeqCst) {
         HAD_STREAMING_OUTPUT.store(true, Ordering::SeqCst);
         use std::io::Write;
-        let _ = std::io::stdout().write(text.as_bytes());
+        let rendered = render_inline_markdown(text);
+        let _ = std::io::stdout().write(rendered.as_bytes());
         if text.contains('\n') {
             let _ = std::io::stdout().flush();
         }
@@ -718,7 +902,8 @@ where
 
 pub(super) async fn stream_sse_response(resp: reqwest::Response) -> Result<String> {
     stream_lines(resp, |trimmed, full| {
-        if let Some(data) = trimmed.strip_prefix("data: ") {
+        if trimmed.as_bytes().starts_with(b"data: ") {
+            let data = &trimmed[6..];
             if data == "[DONE]" {
                 return Ok(false);
             }

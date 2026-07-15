@@ -49,7 +49,7 @@ pub(crate) fn handle_dir(session: &mut ChatSession, path: &str) {
                         if safe
                             .canonicalize()
                             .map(|c| c.starts_with(&canon_parent))
-                            .unwrap_or(true)
+                            .unwrap_or(false)
                         {
                             safe
                         } else {
@@ -119,7 +119,12 @@ pub(crate) fn handle_list_files(session: &ChatSession) {
     let t = ui::theme::active();
 
     let mut entries: Vec<(String, bool, u64)> = Vec::new();
-    for entry in WalkDir::new(&dir).max_depth(4).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&dir)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let p = entry.path();
         if p == dir {
             continue;
@@ -673,6 +678,116 @@ pub(crate) fn handle_compact_dry_run(session: &ChatSession) {
     println!("{}", ui::theme::paint_rail_empty(&t));
 }
 
+/// Opens $VISUAL or $EDITOR to write multi-line input (/edit command).
+/// Returns the editor content as a String, or an error message.
+pub(crate) fn handle_edit() -> Option<String> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let tmp_path = std::env::temp_dir().join(format!("rem-edit-{}.md", std::process::id()));
+    match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} \"$1\"", editor))
+        .arg("rem-edit")
+        .arg(&tmp_path)
+        .status()
+    {
+        Ok(status) if status.success() => {
+            let content = std::fs::read_to_string(&tmp_path).unwrap_or_default();
+            let _ = std::fs::remove_file(&tmp_path);
+            let trimmed = content.trim().to_string();
+            if trimmed.is_empty() {
+                let t = crate::ui::theme::active();
+                println!(
+                    "{} empty input, cancelled",
+                    crate::ui::theme::paint_warning(&t, "\u{258C}")
+                );
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        Ok(_) => {
+            let t = crate::ui::theme::active();
+            println!(
+                "{} editor exited with error",
+                crate::ui::theme::paint_error_label(&t, "\u{258C}")
+            );
+            let _ = std::fs::remove_file(&tmp_path);
+            None
+        }
+        Err(e) => {
+            let t = crate::ui::theme::active();
+            eprintln!(
+                "{} failed to launch editor '{}': {}",
+                crate::ui::theme::paint_error_label(&t, "err:"),
+                editor,
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Shows debug context being sent to the model (`/context` command).
+/// Displays the assembled prompt with character/token counts and session analytics.
+pub(crate) fn handle_context(session: &ChatSession, client: &Provider) {
+    let t = ui::theme::active();
+    let history = session.history_mgr.build_chat_history();
+    let turn_count = session.history_mgr.history.len();
+    let elapsed = session.session_start.elapsed();
+
+    println!("{}", ui::theme::paint_rail_header(&t, "CONTEXT DEBUG"));
+    println!(
+        "{} {} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "Provider:"),
+        ui::theme::paint_dim(&t, client.kind.as_str()),
+    );
+    println!(
+        "{} {} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "Model:"),
+        ui::theme::paint_dim(&t, &client.ctx.model),
+    );
+    println!(
+        "{} {} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "Mode:"),
+        ui::theme::paint_dim(&t, session.mode.label()),
+    );
+    println!(
+        "{} {} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "Turns:"),
+        ui::theme::paint_dim(&t, &turn_count.to_string()),
+    );
+    println!(
+        "{} {} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "Total Tokens:"),
+        ui::theme::paint_dim(&t, &session.total_tokens.to_string()),
+    );
+    println!(
+        "{} {} {:.1}s",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "Duration:"),
+        elapsed.as_secs_f64(),
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+
+    println!(
+        "{} Chat history: {} chars, ~{} tokens",
+        ui::theme::paint_bright(&t, "\u{258C}"),
+        history.len(),
+        crate::token_count::estimate_tokens(&history),
+    );
+    if !history.is_empty() {
+        println!("{}", ui::theme::paint_rail_header(&t, "HISTORY"));
+        println!("{}", history);
+    }
+}
+
 /// Compacts conversation history via LLM summarization (`/compact`).
 pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession) {
     let t = ui::theme::active();
@@ -827,7 +942,13 @@ fn read_maybe_gzip(path: &std::path::Path) -> std::io::Result<String> {
     if raw.first() == Some(&0x1f) && raw.get(1) == Some(&0x8b) {
         let mut decoder = GzDecoder::new(&raw[..]);
         let mut out = String::new();
-        decoder.read_to_string(&mut out)?;
+        decoder.read_to_string(&mut out).map_err(|e| {
+            if out.len() > 100_000_000 {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "decompressed data exceeds size limit")
+            } else {
+                e
+            }
+        })?;
         Ok(out)
     } else {
         String::from_utf8(raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))

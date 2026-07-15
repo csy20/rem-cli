@@ -35,6 +35,7 @@ struct CustomThemeDef {
     accent_info: String,
     text_muted: String,
     text_faint: String,
+    text_bright: String,
     pill_bg: String,
     pill_border: String,
     pill_text: String,
@@ -67,6 +68,7 @@ fn load_custom_theme(path: &PathBuf) -> Option<(String, Theme)> {
         &def.accent_info,
         &def.text_muted,
         &def.text_faint,
+        &def.text_bright,
         &def.pill_bg,
         &def.pill_border,
         &def.pill_text,
@@ -114,57 +116,57 @@ static THEMES: LazyLock<BTreeMap<&'static str, Theme>> = LazyLock::new(|| {
     t.insert(
         "GHOST",
         Theme::build(
-            "GHOST", "#030303", "#0d0d0d", "#181818", "#e8e8e8", "#888888", "#7a8aa0", "#444444", "#222222", "#1a1a1a",
-            "#2a2a2a", "#e8e8e8", "#111111", "#1e1e1e", "#333333", "#1e1e1e", "#141414", "#e8e8e8", "#888888",
-            "#d87070", "#7ac890", "#0a0a0a",
+            "GHOST", "#030303", "#0d0d0d", "#181818", "#e8e8e8", "#888888", "#7a8aa0", "#444444", "#222222", "#333333",
+            "#1a1a1a", "#2a2a2a", "#e8e8e8", "#111111", "#1e1e1e", "#333333", "#1e1e1e", "#141414", "#e8e8e8",
+            "#888888", "#d87070", "#7ac890", "#0a0a0a",
         ),
     );
     t.insert(
         "PHOSPHOR",
         Theme::build(
             "PHOSPHOR", "#030a04", "#050e06", "#0d2010", "#3aff5a", "#2a8040", "#3acfa0", "#1a4020", "#0d2010",
-            "#061409", "#0d2a10", "#3aff5a", "#061409", "#0d2010", "#1a4020", "#0d2010", "#0a1e0c", "#3aff5a",
-            "#3aff5a", "#ff6a6a", "#3aff5a", "#050e06",
+            "#143018", "#061409", "#0d2a10", "#3aff5a", "#061409", "#0d2010", "#1a4020", "#0d2010", "#0a1e0c",
+            "#3aff5a", "#3aff5a", "#ff6a6a", "#3aff5a", "#050e06",
         ),
     );
     t.insert(
         "MIST",
         Theme::build(
-            "MIST", "#0c0f14", "#0f1420", "#1a2538", "#7ba8d4", "#4a6a90", "#8aa0c8", "#2a3a55", "#1a2538", "#102040",
-            "#1a3060", "#7ba8d4", "#0f1420", "#1a2538", "#2a3a55", "#1a2538", "#102040", "#7ba8d4", "#7ba8d4",
-            "#d49a9a", "#9ac8a8", "#0a0f18",
+            "MIST", "#0c0f14", "#0f1420", "#1a2538", "#7ba8d4", "#4a6a90", "#8aa0c8", "#2a3a55", "#1a2538", "#223046",
+            "#102040", "#1a3060", "#7ba8d4", "#0f1420", "#1a2538", "#2a3a55", "#1a2538", "#102040", "#7ba8d4",
+            "#7ba8d4", "#d49a9a", "#9ac8a8", "#0a0f18",
         ),
     );
     t.insert(
         "PAPER",
         Theme::build(
-            "PAPER", "#f5f2eb", "#ede8df", "#d0cabb", "#3a3228", "#5a5248", "#6a6048", "#a09888", "#c8c0b0", "#e0d8cc",
-            "#c8c0b0", "#3a3228", "#e5e0d5", "#d0cabb", "#a09888", "#c8c0b0", "#ddd8cc", "#3a3228", "#3a3228",
-            "#a04848", "#4a7858", "#e8e4d8",
+            "PAPER", "#f5f2eb", "#ede8df", "#d0cabb", "#3a3228", "#5a5248", "#6a6048", "#a09888", "#c8c0b0", "#b4ac9c",
+            "#e0d8cc", "#c8c0b0", "#3a3228", "#e5e0d5", "#d0cabb", "#a09888", "#c8c0b0", "#ddd8cc", "#3a3228",
+            "#3a3228", "#a04848", "#4a7858", "#e8e4d8",
         ),
     );
     t.insert(
         "SAKURA",
         Theme::build(
             "SAKURA", "#1a1018", "#24151e", "#3a1e30", "#ff8cbc", "#c86090", "#e8a0c0", "#805870", "#503848",
-            "#3a1e30", "#4a2840", "#ffb0d0", "#24151e", "#3a1e30", "#805870", "#3a1e30", "#2a1420", "#ff8cbc",
-            "#ff8cbc", "#d84860", "#70b890", "#1a0e14",
+            "#684858", "#3a1e30", "#4a2840", "#ffb0d0", "#24151e", "#3a1e30", "#805870", "#3a1e30", "#2a1420",
+            "#ff8cbc", "#ff8cbc", "#d84860", "#70b890", "#1a0e14",
         ),
     );
     t.insert(
         "EMBER",
         Theme::build(
-            "EMBER", "#14100a", "#1e1810", "#302818", "#ff8833", "#cc6620", "#eeaa44", "#887050", "#504030", "#302818",
-            "#403020", "#ffbb88", "#1e1810", "#302818", "#887050", "#302818", "#201810", "#ff8833", "#ff8833",
-            "#cc3333", "#66aa44", "#0e0c08",
+            "EMBER", "#14100a", "#1e1810", "#302818", "#ff8833", "#cc6620", "#eeaa44", "#887050", "#504030", "#6c5840",
+            "#302818", "#403020", "#ffbb88", "#1e1810", "#302818", "#887050", "#302818", "#201810", "#ff8833",
+            "#ff8833", "#cc3333", "#66aa44", "#0e0c08",
         ),
     );
     t.insert(
         "CONTRAST",
         Theme::build(
             "CONTRAST", "#ffffff", "#f0f0f0", "#d0d0d0", "#000000", "#333333", "#0055aa", "#666666", "#999999",
-            "#e8e8e8", "#cccccc", "#000000", "#ffffff", "#d0d0d0", "#666666", "#e0e0e0", "#000000", "#000000",
-            "#cc0000", "#008800", "#f8f8f8", "#f0f0f0",
+            "#808080", "#e8e8e8", "#cccccc", "#000000", "#ffffff", "#d0d0d0", "#666666", "#e0e0e0", "#000000",
+            "#000000", "#cc0000", "#008800", "#f8f8f8", "#f0f0f0",
         ),
     );
     t
@@ -216,6 +218,7 @@ pub struct Theme {
     pub accent_info: String,
     pub text_muted: String,
     pub text_faint: String,
+    pub text_bright: String,
     pub pill_bg: String,
     pub pill_border: String,
     pub pill_text: String,
@@ -234,7 +237,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Builds a new theme from 21 hex color values.
+    /// Builds a new theme from 22 hex color values.
     #[allow(clippy::too_many_arguments)]
     fn build(
         name: &str,
@@ -246,6 +249,7 @@ impl Theme {
         accent_info: &str,
         text_muted: &str,
         text_faint: &str,
+        text_bright: &str,
         pill_bg: &str,
         pill_border: &str,
         pill_text: &str,
@@ -260,7 +264,7 @@ impl Theme {
         success: &str,
         code_bg: &str,
     ) -> Self {
-        let field_names: [&str; 21] = [
+        let field_names: [&str; 22] = [
             "bg",
             "surface",
             "border",
@@ -269,6 +273,7 @@ impl Theme {
             "accent_info",
             "text_muted",
             "text_faint",
+            "text_bright",
             "pill_bg",
             "pill_border",
             "pill_text",
@@ -292,6 +297,7 @@ impl Theme {
             accent_info,
             text_muted,
             text_faint,
+            text_bright,
             pill_bg,
             pill_border,
             pill_text,
@@ -322,6 +328,7 @@ impl Theme {
             accent_info: accent_info.to_string(),
             text_muted: text_muted.to_string(),
             text_faint: text_faint.to_string(),
+            text_bright: text_bright.to_string(),
             pill_bg: pill_bg.to_string(),
             pill_border: pill_border.to_string(),
             pill_text: pill_text.to_string(),
@@ -341,20 +348,14 @@ impl Theme {
     }
 
     /// Returns the ANSI foreground escape code for a named color field.
-    /// Returns empty string if NO_COLOR or CLICOLOR=0 is set.
+    /// Callers should check `no_color()` before calling this.
     pub fn fg(&self, field: &str) -> &str {
-        if no_color() {
-            return "";
-        }
         self.fg_cache.get(field).map(|s| s.as_str()).unwrap_or("")
     }
 
     /// Returns the ANSI background escape code for a named color field.
-    /// Returns empty string if NO_COLOR or CLICOLOR=0 is set.
+    /// Callers should check `no_color()` before calling this.
     pub fn bg(&self, field: &str) -> &str {
-        if no_color() {
-            return "";
-        }
         self.bg_cache.get(field).map(|s| s.as_str()).unwrap_or("")
     }
 }

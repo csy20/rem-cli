@@ -5,9 +5,9 @@ works with any LLM provider (Ollama, OpenAI, Anthropic, Gemini, Azure, AWS Bedro
 OpenRouter, DeepSeek). It is designed for HTML, CSS, terminal basics, and project scaffolding,
 with a structured contract so model output is predictable and safe to preview.
 
-The CLI is written in Rust (`rem-cli/`) and supports **8 LLM providers**, **34+ slash
-commands**, **BM25 codebase indexing**, **autonomous goal loops**, and a polished
-terminal UI with **6 color themes**.
+The CLI is written in Rust (`rem-cli/`) and supports **10 LLM providers**, **36+ slash
+commands**, **BM25 codebase indexing** (with MessagePack + memmap), **autonomous
+goal loops**, and a polished terminal UI with **6 color themes**.
 
 ## Install
 
@@ -76,8 +76,8 @@ cargo build 2>&1 | rem
 
 ### 🎯 Core
 
-- **8 LLM providers**: Ollama (default), OpenAI, Anthropic Claude, Google Gemini,
-  Azure OpenAI, AWS Bedrock, OpenRouter, DeepSeek
+- **10 LLM providers**: Ollama (default), OpenAI, Anthropic Claude, Google Gemini,
+  Azure OpenAI, AWS Bedrock, OpenRouter, DeepSeek, GitHub Models, xAI Grok
 - **Three interaction modes**: CHAT (conversation), CODE (generation), PLAN (analysis)
 - **Streaming responses**: tokens appear as they're generated
 - **Pipe mode**: `cat error.log | rem` — non-interactive stdin processing
@@ -96,7 +96,8 @@ cargo build 2>&1 | rem
 
 ### 🔍 Search & Context
 
-- **Codebase indexing**: pure-Rust BM25 retrieval with incremental updates
+- **Codebase indexing**: pure-Rust BM25 retrieval with incremental updates,
+  MessagePack format (60-80% smaller), and memmap-based loading
 - **Web search**: DuckDuckGo, Google, Bing integration
 - **Filesystem search**: `/find <query>` with gitignore-awareness and regex mode
 - **Relevant project context**: auto-injected from BM25 index on each query
@@ -133,6 +134,8 @@ cargo build 2>&1 | rem
 | `/session export/import` | Export/import session data |
 | `/compact` | Summarize & free context window |
 | `/compact-dry-run` | Preview compaction |
+| `/context` | Show full assembled prompt with token/turn/duration stats |
+| `/edit` | Open `$VISUAL`/`$EDITOR` for multi-line input |
 | `/why` | Show intent classification reasoning |
 | `/summary` | Generate session summary via LLM |
 | `/ping` | Test provider connectivity & latency |
@@ -269,6 +272,8 @@ Set the corresponding environment variable or add to config:
 | Azure | `AZURE_OPENAI_API_KEY` | `api_key` |
 | OpenRouter | `OPENROUTER_API_KEY` | `api_key` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `api_key` |
+| GitHub Models | `GITHUB_TOKEN` | `api_key` |
+| xAI Grok | `XAI_API_KEY` | `api_key` |
 
 ## Safety model
 
@@ -315,7 +320,7 @@ If you see `Connection refused`:
 
 ```bash
 cd rem-cli
-cargo test              # Run all tests (544+ unit, 18 integration)
+cargo test              # Run all tests (558+ unit, 18 integration)
 cargo clippy            # Lint check (zero warnings target)
 cargo build --release   # Release build
 just all                # Run all: check, lint, fmt, test, build-release

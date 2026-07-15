@@ -186,8 +186,30 @@ pub(crate) fn language_specific_guidance(project_type: &str) -> &'static str {
     }
 }
 
+/// Returns true when NO_COLOR or CLICOLOR=0 is set.
+fn prompt_no_color() -> bool {
+    if std::env::var("NO_COLOR").is_ok() {
+        return true;
+    }
+    if let Ok(v) = std::env::var("CLICOLOR") {
+        if v == "0" {
+            return true;
+        }
+    }
+    false
+}
+
 /// Builds the styled terminal prompt string (e.g., `[CODE] ollama/rem-coder>`).
+/// Uses \x01/\x02 markers around ANSI codes for rustyline's prompt rendering.
 pub(crate) fn build_prompt(session: &ChatSession, client: &Provider) -> String {
+    if prompt_no_color() {
+        let provider_prefix = match client.kind {
+            ProviderKind::Ollama => "",
+            _ => client.kind.as_str(),
+        };
+        let model_short = client.ctx.model.split(':').next().unwrap_or(&client.ctx.model);
+        return format!("[{}] {}{}> ", session.mode.label(), provider_prefix, model_short);
+    }
     let t = ui::theme::active();
     let model_short = client.ctx.model.split(':').next().unwrap_or(&client.ctx.model);
     let mode_key = ui::theme::accent_for_mode(session.mode.label());
