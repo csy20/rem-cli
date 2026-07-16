@@ -2,10 +2,24 @@
 //! When an API key is configured for Google or Bing, uses the proper search API;
 //! otherwise falls back to DuckDuckGo HTML scraping.
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::time::Instant;
+
 use crate::ui;
 use anyhow::{Context, Result};
 use reqwest::Client;
 use scraper::{Html, Selector};
+
+/// Time-to-live for cached search results.
+const SEARCH_CACHE_TTL_SECS: u64 = 300;
+
+type SearchCache = HashMap<String, (Instant, Vec<SearchResult>)>;
+
+/// In-memory cache for web search results keyed by normalized query.
+/// Each entry stores the results and the time they were cached.
+static SEARCH_CACHE: LazyLock<Mutex<SearchCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A single web search result with title, snippet, and URL.
 #[derive(Debug, Clone)]
@@ -23,8 +37,36 @@ pub enum SearchProvider {
 }
 
 /// Performs a web search using the configured provider, with automatic fallback.
-/// Tries the configured provider first, then falls back to DuckDuckGo on failure.
+/// Results are cached in-memory for SEARCH_CACHE_TTL_SECS to avoid redundant network calls.
 pub(crate) async fn perform_web_search(
+    client: &Client,
+    query: &str,
+    provider: Option<&SearchProvider>,
+) -> Result<Vec<SearchResult>> {
+    let cache_key = query.trim().to_lowercase();
+
+    // Check cache first
+    {
+        let cache = SEARCH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached_at, cached_results)) = cache.get(&cache_key) {
+            if cached_at.elapsed().as_secs() < SEARCH_CACHE_TTL_SECS {
+                return Ok(cached_results.clone());
+            }
+        }
+    }
+
+    // Perform the search
+    let results = perform_web_search_uncached(client, query, provider).await?;
+
+    // Store in cache
+    if let Ok(mut cache) = SEARCH_CACHE.lock() {
+        cache.insert(cache_key, (Instant::now(), results.clone()));
+    }
+
+    Ok(results)
+}
+
+async fn perform_web_search_uncached(
     client: &Client,
     query: &str,
     provider: Option<&SearchProvider>,

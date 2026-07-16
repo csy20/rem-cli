@@ -4,6 +4,7 @@
 use crate::chat::ChatSession;
 use crate::ui;
 use std::path::Path;
+use tokio::io::AsyncBufReadExt;
 
 /// Stages all changes and creates a commit (`/commit` command).
 pub(crate) async fn handle_commit(session: &ChatSession, message: &str) {
@@ -65,7 +66,8 @@ pub(crate) async fn handle_commit(session: &ChatSession, message: &str) {
         use std::io::Write;
         let _ = std::io::stdout().flush();
         let mut input = String::new();
-        match std::io::stdin().read_line(&mut input) {
+        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+        match reader.read_line(&mut input).await {
             Ok(_) => {
                 let trimmed = input.trim().to_string();
                 if trimmed.is_empty() {

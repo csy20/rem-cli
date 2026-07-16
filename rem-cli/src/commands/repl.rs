@@ -9,6 +9,7 @@ use crate::config::{build_provider, load_system_prompt, save_config};
 use crate::intent::has_creation_intent;
 use crate::intent::TaskIntent;
 use crate::provider::Provider;
+use crate::text_util::levenshtein_distance;
 use crate::ui;
 
 pub(crate) fn handle_theme(cfg: &mut AppConfig, tail: Option<&str>) {
@@ -118,6 +119,36 @@ pub(crate) fn handle_provider(client: &mut Provider, cfg: &mut AppConfig, tail: 
                 let rail = ui::theme::paint_rail_empty(&t);
                 let msg = ui::theme::paint_error_label(&t, &format!("failed to switch provider: {}", e));
                 println!("{rail} {msg}");
+                // Did you mean?
+                let known = [
+                    "ollama",
+                    "openai",
+                    "vllm",
+                    "anthropic",
+                    "gemini",
+                    "azure",
+                    "bedrock",
+                    "openrouter",
+                    "deepseek",
+                    "github",
+                    "xai",
+                ];
+                let mut best_dist = usize::MAX;
+                let mut best_name: Option<&str> = None;
+                for &name in &known {
+                    let dist = levenshtein_distance(&new_provider, name);
+                    if dist > 0 && dist < best_dist {
+                        best_dist = dist;
+                        best_name = Some(name);
+                    }
+                }
+                if let Some(suggestion) = best_name {
+                    if best_dist <= 2 {
+                        let hint = ui::theme::paint(&t, "accent", suggestion, false);
+                        let m = ui::theme::paint_dim(&t, "did you mean?");
+                        println!("{rail}   {m} {hint}");
+                    }
+                }
                 println!("{rail}");
             }
         }

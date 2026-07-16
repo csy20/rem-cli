@@ -78,6 +78,30 @@ pub(crate) fn current_year() -> i64 {
     days_to_year(days).0
 }
 
+/// Returns the Levenshtein edit distance between two strings.
+/// Used for "did you mean?" suggestions.
+pub(crate) fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_len = a.chars().count();
+    let b_len = b.chars().count();
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr: Vec<usize> = vec![0; b_len + 1];
+    for (i, ca) in a.chars().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.chars().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            curr[j + 1] = (curr[j] + 1).min(prev[j + 1] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_len]
+}
+
 /// Returns the current UTC timestamp as `YYYY-MM-DD HH:MM:SS`.
 pub(crate) fn format_timestamp() -> String {
     let dur = std::time::SystemTime::now()
@@ -130,6 +154,84 @@ pub(crate) fn format_timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn levenshtein_identical_strings() {
+        assert_eq!(levenshtein_distance("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn levenshtein_completely_different() {
+        assert_eq!(levenshtein_distance("abc", "xyz"), 3);
+    }
+
+    #[test]
+    fn levenshtein_empty_first() {
+        assert_eq!(levenshtein_distance("", "abc"), 3);
+    }
+
+    #[test]
+    fn levenshtein_empty_second() {
+        assert_eq!(levenshtein_distance("abc", ""), 3);
+    }
+
+    #[test]
+    fn levenshtein_both_empty() {
+        assert_eq!(levenshtein_distance("", ""), 0);
+    }
+
+    #[test]
+    fn levenshtein_single_insert() {
+        assert_eq!(levenshtein_distance("cat", "cats"), 1);
+    }
+
+    #[test]
+    fn levenshtein_single_substitute() {
+        assert_eq!(levenshtein_distance("cat", "cut"), 1);
+    }
+
+    #[test]
+    fn levenshtein_single_delete() {
+        assert_eq!(levenshtein_distance("cats", "cat"), 1);
+    }
+
+    #[test]
+    fn levenshtein_unicode_chars() {
+        assert_eq!(levenshtein_distance("café", "cafe"), 1);
+    }
+
+    #[test]
+    fn levenshtein_unicode_deletion() {
+        assert_eq!(levenshtein_distance("café", "caf"), 1);
+    }
+
+    #[test]
+    fn levenshtein_case_sensitive() {
+        assert_eq!(levenshtein_distance("Hello", "hello"), 1);
+    }
+
+    #[test]
+    fn levenshtein_proptest_symmetry() {
+        proptest::proptest!(|(a: String, b: String)| {
+            let d1 = levenshtein_distance(&a, &b);
+            let d2 = levenshtein_distance(&b, &a);
+            assert_eq!(d1, d2, "levenshtein_distance should be symmetric");
+        });
+    }
+
+    #[test]
+    fn levenshtein_proptest_triangle_inequality() {
+        proptest::proptest!(|(a: String, b: String, c: String)| {
+            let d_ab = levenshtein_distance(&a, &b);
+            let d_bc = levenshtein_distance(&b, &c);
+            let d_ac = levenshtein_distance(&a, &c);
+            assert!(
+                d_ac <= d_ab + d_bc,
+                "triangle inequality violated: d({},{}) <= d({},{}) + d({},{})",
+                a, c, a, b, b, c
+            );
+        });
+    }
 
     #[test]
     fn truncates_string() {

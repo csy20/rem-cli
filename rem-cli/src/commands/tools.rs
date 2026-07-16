@@ -12,7 +12,6 @@ use crate::search::{perform_web_search, print_search_results, provider_from_conf
 use crate::truncate_to_lines;
 use crate::ui;
 use std::fs;
-use std::path::Path;
 
 /// Performs a web search (`/search` command).
 pub(crate) async fn handle_search(_client: &Provider, session: &mut ChatSession, cfg: &AppConfig, query: &str) {
@@ -195,10 +194,18 @@ pub(crate) async fn handle_refactor(client: &Provider, session: &mut ChatSession
 }
 
 /// Runs a linter on the specified file (`/lint` command).
-pub(crate) async fn handle_lint(_session: &ChatSession, path: &str) {
+pub(crate) async fn handle_lint(session: &ChatSession, path: &str) {
     let t = ui::theme::active();
-    let file_path = Path::new(path);
-    if !file_path.exists() {
+    let base = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let safe_path = match crate::types::resolve_safe_path(&base, path) {
+        Some(p) => p,
+        None => return,
+    };
+    if !safe_path.exists() {
         println!("{} file not found: {}", ui::theme::paint_warning(&t, "\u{258C}"), path);
         return;
     }
@@ -207,7 +214,7 @@ pub(crate) async fn handle_lint(_session: &ChatSession, path: &str) {
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         path
     );
-    let result = run_lint(path).await;
+    let result = run_lint(safe_path.to_str().unwrap_or(path)).await;
     println!("{}", format_tool_output(&result));
 }
 

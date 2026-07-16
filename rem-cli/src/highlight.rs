@@ -37,6 +37,16 @@ pub fn highlight_code(content: &str, lang_hint: &str) -> String {
         highlight_go(content)
     } else if lang.contains("json") {
         highlight_json(content)
+    } else if lang.contains("cpp") || lang == "c++" || lang == "cxx" || lang == "c" || lang == "h" {
+        highlight_c(content)
+    } else if lang.contains("java") {
+        highlight_java(content)
+    } else if lang.contains("ruby") || lang.contains("rb") {
+        highlight_ruby(content)
+    } else if lang.contains("php") {
+        highlight_php(content)
+    } else if lang.contains("bash") || lang.contains("sh") || lang.contains("shell") || lang.contains("zsh") {
+        highlight_bash(content)
     } else {
         highlight_generic(content)
     }
@@ -185,6 +195,106 @@ fn highlight_json(code: &str) -> String {
         .to_string()
 }
 
+fn highlight_c(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_C_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(//[^\n]*|/\*.*?\*/)|(\b(?:int|char|void|float|double|long|short|unsigned|signed|struct|union|enum|typedef|const|static|extern|volatile|register|auto|sizeof|return|if|else|for|while|do|switch|case|default|break|continue|goto|include|define|ifdef|ifndef|endif|pragma|error|NULL|true|false|size_t|ssize_t|uint8_t|uint16_t|uint32_t|uint64_t|int8_t|int16_t|int32_t|int64_t|bool|printf|scanf|malloc|calloc|realloc|free|fopen|fclose|fread|fwrite|fprintf|fscanf|fgets|fputs|fgetc|fputc|fseek|ftell|rewind|fprintf|sprintf|snprintf|strlen|strcpy|strcat|strcmp|strchr|strstr|memcpy|memmove|memset|memcmp|assert|FILE|NULL|EOF)\b)|("[^"]*"|'[^']*')"#).expect("invalid c regex")
+    });
+    RE_C_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
+        })
+        .to_string()
+}
+
+fn highlight_java(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_JAVA_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(//[^\n]*|/\*.*?\*/)|(\b(?:public|private|protected|static|final|class|interface|enum|extends|implements|abstract|synchronized|volatile|transient|native|strictfp|package|import|new|this|super|return|if|else|for|while|do|switch|case|default|break|continue|try|catch|finally|throw|throws|instanceof|boolean|byte|short|int|long|float|double|char|void|null|true|false|String|System|Math|List|Map|Set|ArrayList|HashMap|HashSet|Optional|Integer|Double|Boolean|Object|Exception|RuntimeException|Error|Thread|Runnable|Override|Deprecated|SuppressWarnings)\b)|("[^"]*"|'[^']*')"#).expect("invalid java regex")
+    });
+    RE_JAVA_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
+        })
+        .to_string()
+}
+
+fn highlight_ruby(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_RUBY_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(#[^\n]*|^=begin.*?^=end)|(\b(?:def|class|module|end|if|elsif|else|unless|case|when|then|for|while|until|do|yield|return|break|next|redo|retry|raise|rescue|ensure|begin|nil|true|false|self|super|and|or|not|in|is_a|respond_to|attr_accessor|attr_reader|attr_writer|require|include|extend|load|private|public|protected|lambda|proc|block_given|each|map|select|reject|reduce|inject|puts|print|p|require_relative|defined|catch|throw|fail|alias|undef)\b)|("[^"]*"|'[^']*'|`[^`]*`)"#).expect("invalid ruby regex")
+    });
+    RE_RUBY_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
+        })
+        .to_string()
+}
+
+fn highlight_php(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_PHP_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"(//[^\n]*|/\*.*?\*/|#[^\n]*)|(\b(?:echo|print|die|exit|include|include_once|require|require_once|class|function|return|if|else|elseif|for|foreach|while|do|switch|case|default|break|continue|try|catch|finally|throw|new|this|self|parent|public|private|protected|static|final|abstract|interface|implements|extends|trait|use|namespace|const|var|true|false|null|isset|unset|empty|array|list|as|or|and|xor|instanceof|clone|declare|global|goto|match|fn|int|float|string|bool|void|mixed|never|iterable|callable|array|object|resource|numeric)\b)|("[^"]*"|'[^']*'|`[^`]*`)"#).expect("invalid php regex")
+    });
+    RE_PHP_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
+        })
+        .to_string()
+}
+
+fn highlight_bash(code: &str) -> String {
+    let t = ui::theme::active();
+    static RE_BASH_ALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r##"(#[^\n]*)|(\b(?:if|then|else|elif|fi|for|while|do|done|case|esac|in|function|return|exit|break|continue|export|local|source|shift|read|echo|printf|set|unset|declare|typeset|alias|unalias|trap|exec|eval|select|until|cd|ls|mkdir|rm|cp|mv|chmod|chown|grep|sed|awk|cat|find|sort|uniq|wc|head|tail|cut|tr|tee|diff|patch|tar|gzip|gunzip|zip|unzip|make|cmake|npm|yarn|node|python|python3|pip|ruby|gem|cargo|rustc|go|docker|git|curl|wget|xargs|kill|ps|top|htop|systemctl|journalctl|sudo|su|which|whereis|whoami|env|true|false|yes|no|test|let|EQ|NE|LT|GT|LE|GE|Z|N|O)\b)|("[^"]*"|'[^']*'|`[^`]*`)"##).expect("invalid bash regex")
+    });
+    RE_BASH_ALL
+        .replace_all(code, |caps: &regex::Captures| {
+            if let Some(m) = caps.get(1) {
+                ui::theme::paint_dim(&t, m.as_str())
+            } else if let Some(m) = caps.get(2) {
+                ui::theme::paint(&t, "accent_info", m.as_str(), true)
+            } else if let Some(m) = caps.get(3) {
+                ui::theme::paint_success_label(&t, m.as_str())
+            } else {
+                caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default()
+            }
+        })
+        .to_string()
+}
+
 fn highlight_generic(code: &str) -> String {
     code.to_string()
 }
@@ -192,10 +302,34 @@ fn highlight_generic(code: &str) -> String {
 /// Heuristically detects language (html/css/js/rust/etc.) from code content.
 pub fn detect_language_from_content(code: &str) -> &str {
     let first_line = code.trim().lines().next().unwrap_or("");
+
+    // Shebang-based detection (must be first — unambiguous)
+    if first_line.starts_with("#!/") {
+        if first_line.contains("bash") || first_line.contains("sh") || first_line.contains("zsh") {
+            return "bash";
+        }
+        if first_line.contains("python") || first_line.contains("python3") {
+            return "python";
+        }
+        if first_line.contains("ruby") {
+            return "ruby";
+        }
+        if first_line.contains("node") || first_line.contains("deno") {
+            return "js";
+        }
+    }
+
+    // PHP open tag (must be before HTML's `<` check)
+    if first_line.starts_with("<?php") || first_line.starts_with("<?=") {
+        return "php";
+    }
+
+    // HTML doctype or tag
     if first_line.starts_with("<!") || first_line.starts_with("<") {
         return "html";
     }
-    // Rust-specific keywords (checked first for accuracy)
+
+    // Rust-specific keywords (checked early for accuracy)
     if first_line.starts_with("fn ")
         || first_line.starts_with("pub ")
         || first_line.starts_with("impl ")
@@ -213,23 +347,50 @@ pub fn detect_language_from_content(code: &str) -> &str {
     {
         return "rust";
     }
-    // JS/TS module import/export (check before Python's `import`)
-    if first_line.starts_with("import {")
-        || first_line.starts_with("import *")
-        || first_line.starts_with("import type")
-        || first_line.starts_with("export ")
+
+    // Java: class/interface/enum with optional visibility prefix or import/package
+    if first_line.starts_with("public class")
+        || first_line.starts_with("private class")
+        || first_line.starts_with("public interface")
+        || first_line.starts_with("public enum")
+        || first_line.starts_with("import java.")
+        || first_line.starts_with("import javax.")
+        || first_line.starts_with("package ") && first_line.trim_end().ends_with(';')
+        || first_line.starts_with("@Override")
+        || first_line.starts_with("@SuppressWarnings")
+        || first_line.starts_with("@Deprecated")
     {
-        return "js";
+        return "java";
     }
+
+    // Ruby (before Python since `def` and `class` overlap)
+    // Note: Ruby `class Name` has NO colon; Python `class Name:` has a colon — we check
+    // for colon-less class to avoid false-positive Ruby detection on Python classes.
+    if first_line.starts_with("def ") && !first_line.trim_end().ends_with(':')
+        || first_line.starts_with("class ") && !first_line.trim_end().ends_with(':')
+        || first_line.starts_with("module ")
+        || first_line.starts_with("require ")
+        || first_line.starts_with("attr_")
+        || first_line.starts_with("puts ")
+        || first_line.starts_with("unless ")
+        || first_line.starts_with("end")
+    {
+        return "ruby";
+    }
+
+    // Go (before Java since `package` and `import` are also Java keywords)
+    // `package` without semicolon → Go (`package main`);
+    // `package com.example;` (with semicolon) falls through to Java.
     if first_line.starts_with("func ")
-        || first_line.starts_with("package ")
+        || first_line.starts_with("package ") && !first_line.trim_end().ends_with(';')
         || first_line.starts_with("import \"")
         || first_line.starts_with("import (")
     {
         return "go";
     }
-    // Python: `def`, `print(`, `from`, `class X:`, `import ` with `;` absence
-    if first_line.starts_with("def ")
+
+    // Python: `def`, `print(`, `from`, `class X:`, `import ` without braces
+    if first_line.starts_with("def ") && first_line.trim_end().ends_with(':')
         || first_line.starts_with("print(")
         || first_line.starts_with("from ")
         || first_line.starts_with("class ") && first_line.trim_end().ends_with(':')
@@ -237,6 +398,21 @@ pub fn detect_language_from_content(code: &str) -> &str {
     {
         return "python";
     }
+
+    // Bash/shell (before JS since `export` matches both)
+    if first_line.starts_with("if ") && first_line.contains("then")
+        || first_line.starts_with("for ") && first_line.contains("in ")
+        || first_line.starts_with("while ") && first_line.contains("do ")
+        || first_line.starts_with("case ") && first_line.contains("in")
+        || first_line.starts_with("export ")
+        || first_line.starts_with("source ")
+        || first_line.starts_with("alias ")
+        || first_line.starts_with("echo ")
+        || first_line.starts_with("printf ")
+    {
+        return "bash";
+    }
+
     // C/C++ keywords
     if first_line.starts_with("#include")
         || first_line.starts_with("int ")
@@ -254,10 +430,12 @@ pub fn detect_language_from_content(code: &str) -> &str {
     {
         return "c";
     }
+
     // Rust const (checked after C since `const` is rare in C headers)
     if first_line.starts_with("const ") {
         return "rust";
     }
+
     // Rust keywords that overlap with C (checked after C for disambiguation)
     if first_line.starts_with("struct ") && first_line.contains('{')
         || first_line.starts_with("enum ") && first_line.contains('{')
@@ -265,14 +443,33 @@ pub fn detect_language_from_content(code: &str) -> &str {
     {
         return "rust";
     }
+
     // Fall through to C if struct/enum/union without braces (C style)
     if first_line.starts_with("struct ") || first_line.starts_with("enum ") || first_line.starts_with("union ") {
         return "c";
     }
+
+    // PHP: namespace, use, function (after other languages checked)
+    if first_line.starts_with("namespace ")
+        || first_line.starts_with("function ") && first_line.trim_end().ends_with('(')
+    {
+        return "php";
+    }
+
+    // JS/TS module import/export
+    if first_line.starts_with("import {")
+        || first_line.starts_with("import *")
+        || first_line.starts_with("import type")
+        || first_line.starts_with("export ")
+    {
+        return "js";
+    }
+
     // JS/TS general patterns (checked after more specific keywords)
     if first_line.starts_with("function ") {
         return "js";
     }
+
     // JSON: starts with { or [
     let trimmed = first_line.trim();
     if trimmed.starts_with('{') || trimmed.starts_with('[') {
@@ -525,5 +722,71 @@ mod tests {
         assert_eq!(lang, "go");
         let result = highlight_code(input, lang);
         assert!(result.contains("func"));
+    }
+
+    #[test]
+    fn highlight_c_wraps_in_colored_output() {
+        let result = highlight_code("int main() {\n    return 0;\n}", "c");
+        assert!(result.contains("int"));
+        assert!(result.contains("return"));
+    }
+
+    #[test]
+    fn highlight_java_wraps_in_colored_output() {
+        let result = highlight_code(
+            "public class Hello {\n    public static void main(String[] args) {}",
+            "java",
+        );
+        assert!(result.contains("public"));
+        assert!(result.contains("class"));
+    }
+
+    #[test]
+    fn highlight_ruby_wraps_in_colored_output() {
+        let result = highlight_code("def hello\n    puts 'hi'\nend", "ruby");
+        assert!(result.contains("def"));
+        assert!(result.contains("end"));
+    }
+
+    #[test]
+    fn highlight_php_wraps_in_colored_output() {
+        let result = highlight_code("<?php\necho 'hello';\n", "php");
+        assert!(result.contains("echo"));
+    }
+
+    #[test]
+    fn highlight_bash_wraps_in_colored_output() {
+        let result = highlight_code("#!/bin/bash\necho \"hello\"", "bash");
+        assert!(result.contains("echo"));
+    }
+
+    #[test]
+    fn detect_java_from_class() {
+        assert_eq!(detect_language_from_content("public class HelloWorld {"), "java");
+    }
+
+    #[test]
+    fn detect_java_from_package() {
+        assert_eq!(detect_language_from_content("package com.example;"), "java");
+    }
+
+    #[test]
+    fn detect_ruby_from_def() {
+        assert_eq!(detect_language_from_content("def hello"), "ruby");
+    }
+
+    #[test]
+    fn detect_php_from_open_tag() {
+        assert_eq!(detect_language_from_content("<?php"), "php");
+    }
+
+    #[test]
+    fn detect_bash_from_shebang() {
+        assert_eq!(detect_language_from_content("#!/bin/bash"), "bash");
+    }
+
+    #[test]
+    fn detect_bash_from_export() {
+        assert_eq!(detect_language_from_content("export PATH=$PATH:/usr/local/bin"), "bash");
     }
 }

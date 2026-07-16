@@ -30,6 +30,11 @@ async fn test_provider_kind_from_str() {
     assert_eq!(ProviderKind::from_str("anthropic"), ProviderKind::Anthropic);
     assert_eq!(ProviderKind::from_str("claude"), ProviderKind::Anthropic);
     assert_eq!(ProviderKind::from_str("azure"), ProviderKind::Azure);
+    assert_eq!(ProviderKind::from_str("deepseek"), ProviderKind::DeepSeek);
+    assert_eq!(ProviderKind::from_str("github"), ProviderKind::GitHub);
+    assert_eq!(ProviderKind::from_str("githubmodels"), ProviderKind::GitHub);
+    assert_eq!(ProviderKind::from_str("xai"), ProviderKind::XAI);
+    assert_eq!(ProviderKind::from_str("grok"), ProviderKind::XAI);
     assert_eq!(ProviderKind::from_str("openrouter"), ProviderKind::OpenRouter);
     assert_eq!(ProviderKind::from_str("unknown"), ProviderKind::Ollama);
 }
@@ -42,6 +47,9 @@ async fn test_provider_kind_as_str() {
     assert_eq!(ProviderKind::Anthropic.as_str(), "anthropic");
     assert_eq!(ProviderKind::Azure.as_str(), "azure");
     assert_eq!(ProviderKind::OpenRouter.as_str(), "openrouter");
+    assert_eq!(ProviderKind::DeepSeek.as_str(), "deepseek");
+    assert_eq!(ProviderKind::GitHub.as_str(), "github");
+    assert_eq!(ProviderKind::XAI.as_str(), "xai");
 }
 
 // ── Ollama ────────────────────────────────────────────────────────────
@@ -914,4 +922,243 @@ fn parse_json_fallback_invalid() {
 fn ollama_api_url_trailing_slash_base() {
     let url = ollama_api_url("http://localhost:11434/", "tags");
     assert_eq!(url, "http://localhost:11434/api/tags");
+}
+
+// ── DeepSeek ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_deepseek_list_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "deepseek-chat"}, {"id": "deepseek-reasoner"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::DeepSeek,
+        mock_server.uri(),
+        "deepseek-chat".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let models = provider.list_models().await.unwrap();
+    assert_eq!(models, vec!["deepseek-chat", "deepseek-reasoner"]);
+}
+
+#[tokio::test]
+async fn test_deepseek_complete_json() {
+    let mock_server = MockServer::start().await;
+    let response_str = r#"{"explanation":"deepseek test","code":"print('deepseek')","files":[],"commands":[],"checks":[],"caution":""}"#;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": response_str}}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::DeepSeek,
+        mock_server.uri(),
+        "deepseek-chat".to_string(),
+        30,
+        "Be helpful.".to_string(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let reply = provider.complete_json("write code").await.unwrap();
+    assert_eq!(reply.explanation, "deepseek test");
+    assert_eq!(reply.code, "print('deepseek')");
+}
+
+#[tokio::test]
+async fn test_deepseek_chat_stream() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" from DeepSeek\"}}]}\ndata: [DONE]\n"
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::DeepSeek,
+        mock_server.uri(),
+        "deepseek-chat".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
+    assert_eq!(result, "Hello from DeepSeek");
+}
+
+// ── GitHub Models ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_github_list_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::GitHub,
+        mock_server.uri(),
+        "gpt-4o".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let models = provider.list_models().await.unwrap();
+    assert_eq!(models, vec!["gpt-4o", "gpt-4o-mini"]);
+}
+
+#[tokio::test]
+async fn test_github_complete_json() {
+    let mock_server = MockServer::start().await;
+    let response_str =
+        r#"{"explanation":"github test","code":"print('github')","files":[],"commands":[],"checks":[],"caution":""}"#;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": response_str}}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::GitHub,
+        mock_server.uri(),
+        "gpt-4o".to_string(),
+        30,
+        "Be helpful.".to_string(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let reply = provider.complete_json("write code").await.unwrap();
+    assert_eq!(reply.explanation, "github test");
+    assert_eq!(reply.code, "print('github')");
+}
+
+#[tokio::test]
+async fn test_github_chat_stream() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" from GitHub\"}}]}\ndata: [DONE]\n"
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::GitHub,
+        mock_server.uri(),
+        "gpt-4o".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
+    assert_eq!(result, "Hello from GitHub");
+}
+
+// ── xAI Grok ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_xai_list_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "grok-2"}, {"id": "grok-2-vision"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::XAI,
+        mock_server.uri(),
+        "grok-2".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let models = provider.list_models().await.unwrap();
+    assert_eq!(models, vec!["grok-2", "grok-2-vision"]);
+}
+
+#[tokio::test]
+async fn test_xai_complete_json() {
+    let mock_server = MockServer::start().await;
+    let response_str =
+        r#"{"explanation":"xai test","code":"print('xai')","files":[],"commands":[],"checks":[],"caution":""}"#;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": response_str}}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::XAI,
+        mock_server.uri(),
+        "grok-2".to_string(),
+        30,
+        "Be helpful.".to_string(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let reply = provider.complete_json("write code").await.unwrap();
+    assert_eq!(reply.explanation, "xai test");
+    assert_eq!(reply.code, "print('xai')");
+}
+
+#[tokio::test]
+async fn test_xai_chat_stream() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" from xAI\"}}]}\ndata: [DONE]\n"
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::XAI,
+        mock_server.uri(),
+        "grok-2".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
+    assert_eq!(result, "Hello from xAI");
 }

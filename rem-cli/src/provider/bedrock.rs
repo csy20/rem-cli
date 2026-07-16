@@ -93,24 +93,40 @@ impl ProviderBackend for BedrockBackend {
         let client = bedrock_client().await?;
         let system_content = aws_sdk_bedrockruntime::types::SystemContentBlock::Text(system_prompt.to_string());
 
-        let mut prompt = String::new();
+        let mut bedrock_messages: Vec<aws_sdk_bedrockruntime::types::Message> = Vec::new();
         if !history.is_empty() {
-            prompt.push_str(&format!("[Previous conversation]:\n{}\n\n", history));
+            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
+                let user_content = aws_sdk_bedrockruntime::types::ContentBlock::Text(user_msg);
+                let user_msg = aws_sdk_bedrockruntime::types::Message::builder()
+                    .role(aws_sdk_bedrockruntime::types::ConversationRole::User)
+                    .content(user_content)
+                    .build()
+                    .map_err(|e| anyhow!("failed to build Bedrock user message: {}", e))?;
+                bedrock_messages.push(user_msg);
+                if !assistant_msg.is_empty() {
+                    let asst_content = aws_sdk_bedrockruntime::types::ContentBlock::Text(assistant_msg);
+                    let asst_msg = aws_sdk_bedrockruntime::types::Message::builder()
+                        .role(aws_sdk_bedrockruntime::types::ConversationRole::Assistant)
+                        .content(asst_content)
+                        .build()
+                        .map_err(|e| anyhow!("failed to build Bedrock assistant message: {}", e))?;
+                    bedrock_messages.push(asst_msg);
+                }
+            }
         }
-        prompt.push_str(user_prompt);
-        let content = aws_sdk_bedrockruntime::types::ContentBlock::Text(prompt);
-
-        let msg = aws_sdk_bedrockruntime::types::Message::builder()
+        let user_content = aws_sdk_bedrockruntime::types::ContentBlock::Text(user_prompt.to_string());
+        let final_msg = aws_sdk_bedrockruntime::types::Message::builder()
             .role(aws_sdk_bedrockruntime::types::ConversationRole::User)
-            .content(content)
+            .content(user_content)
             .build()
-            .map_err(|e| anyhow!("failed to build Bedrock message: {}", e))?;
+            .map_err(|e| anyhow!("failed to build Bedrock user message: {}", e))?;
+        bedrock_messages.push(final_msg);
 
         let output = client
             .converse_stream()
             .model_id(&ctx.model)
             .system(system_content)
-            .messages(msg)
+            .set_messages(Some(bedrock_messages))
             .inference_config(
                 aws_sdk_bedrockruntime::types::InferenceConfiguration::builder()
                     .max_tokens(crate::constants::DEFAULT_MAX_TOKENS as i32)

@@ -163,6 +163,112 @@ pub fn retrieve_relevant_chunks<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    // ── Property-based tests for tokenize ─────────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_tokenize_all_tokens_have_length_gt_1(ref s in ".*") {
+            let tokens = tokenize(s);
+            for t in &tokens {
+                assert!(t.len() > 1, "token '{}' should have length > 1", t);
+            }
+        }
+
+        #[test]
+        fn prop_tokenize_all_tokens_are_lowercase(ref s in ".*") {
+            let tokens = tokenize(s);
+            for t in &tokens {
+                assert_eq!(t, &t.to_lowercase(), "token '{}' should be lowercase", t);
+            }
+        }
+
+        #[test]
+        fn prop_tokenize_no_alphanumeric_yields_empty(
+            s in proptest::string::string_regex(r"[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]{1,20}").unwrap(),
+        ) {
+            // Only ASCII punctuation (which is never is_alphanumeric())
+            let tokens = tokenize(&s);
+            assert!(tokens.is_empty(), "input '{:?}' should yield no tokens", s);
+        }
+
+        #[test]
+        fn prop_tokenize_empty_string(ref s in "") {
+            let tokens = tokenize(s);
+            assert!(tokens.is_empty());
+        }
+
+        #[test]
+        fn prop_tokenize_null_bytes_do_not_cause_panic(ref s in ".*\0.*") {
+            let tokens = tokenize(s);
+            // Must not panic; any output is acceptable
+            for t in &tokens {
+                assert!(!t.contains('\0'), "null byte should not appear in token '{}'", t);
+            }
+        }
+
+        #[test]
+        fn prop_tokenize_deterministic(ref s in ".*") {
+            let a = tokenize(s);
+            let b = tokenize(s);
+            assert_eq!(a, b, "tokenize should be deterministic for '{}'", s);
+        }
+
+        #[test]
+        fn prop_build_inverted_index_contains_all_chunk_tokens(
+            words in proptest::collection::vec("[a-z]{2,10}", 0..20),
+        ) {
+            if words.is_empty() {
+                return Ok(());
+            }
+            let content = words.join(" ");
+            let chunks = vec![IndexChunk {
+                path: "test.rs".into(),
+                name: "test.rs".into(),
+                chunk_type: "file".into(),
+                content: content.clone(),
+                start_line: 1,
+                end_line: 1,
+                embedding: None,
+                token_counts: HashMap::new(),
+            }];
+            let mut doc_freqs = HashMap::new();
+            let inverted = build_inverted_index(&chunks, &mut doc_freqs);
+            for w in &words {
+                let wl = w.to_lowercase();
+                if wl.len() > 1 {
+                    assert!(inverted.contains_key(&wl), "token '{}' should be in inverted index for content '{}'", wl, content);
+                }
+            }
+        }
+
+        #[test]
+        fn prop_retrieve_relevant_always_subset_of_chunks(
+            words in proptest::collection::vec("[a-z]{2,10}", 1..5),
+            query in "[a-z]{2,15}",
+        ) {
+            let content = words.join(" ");
+            let chunks = vec![IndexChunk {
+                path: "test.rs".into(),
+                name: "test.rs".into(),
+                chunk_type: "file".into(),
+                content,
+                start_line: 1,
+                end_line: 1,
+                embedding: None,
+                token_counts: HashMap::new(),
+            }];
+            let index = make_index(chunks);
+            let results = retrieve_relevant_chunks(&index, &query, 5, 10000);
+            for c in &results {
+                // Each result must come from the index's chunk list
+                assert!(index.chunks.iter().any(|ic| ic.path == c.path && ic.content == c.content));
+            }
+        }
+    }
+
+    // ── Traditional unit tests ─────────────────────────────────────────
 
     #[test]
     fn tokenize_empty() {

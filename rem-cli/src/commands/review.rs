@@ -9,8 +9,6 @@ use crate::types::{file_icon, BackupEntry};
 use crate::ui;
 use similar::{ChangeTag, TextDiff};
 use std::fs;
-use std::path::PathBuf;
-
 pub(crate) fn handle_diff(session: &ChatSession) {
     let t = ui::theme::active();
     if session.code_out.last_files.is_empty() {
@@ -39,14 +37,9 @@ pub(crate) fn handle_diff(session: &ChatSession) {
         if f.path.is_empty() {
             continue;
         }
-        let rel_path = PathBuf::from(&f.path);
-        let abs_path = if rel_path.is_relative() {
-            base_dir.join(&rel_path)
-        } else {
-            match crate::types::resolve_safe_path(&base_dir, &f.path) {
-                Some(p) => p,
-                None => continue,
-            }
+        let abs_path = match crate::types::resolve_safe_path(&base_dir, &f.path) {
+            Some(p) => p,
+            None => continue,
         };
 
         let icon = file_icon(&f.path);
@@ -201,11 +194,18 @@ pub(crate) fn handle_apply(session: &mut ChatSession) {
             original,
         });
 
-        // Write the file
+        // Write the file atomically via temp file + rename
         if let Some(parent) = abs_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        match fs::write(&abs_path, &f.content) {
+        let tmp_path = abs_path.with_extension(format!(".rem-tmp-{}", std::process::id()));
+        let write_result = match fs::write(&tmp_path, &f.content) {
+            Ok(()) => fs::rename(&tmp_path, &abs_path).inspect_err(|_| {
+                let _ = fs::remove_file(&tmp_path);
+            }),
+            Err(e) => Err(e),
+        };
+        match write_result {
             Ok(()) => {
                 let icon = file_icon(&f.path);
                 let path_display = ui::theme::paint_bright(&t, &f.path);

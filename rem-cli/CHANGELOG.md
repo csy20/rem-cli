@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.7.0 (unreleased)
+
+### Bug Fixes
+
+- **Safe Mmap**: Added SAFETY comments to both `Mmap::map` calls in `indexer/mod.rs`. (#P6)
+- **Gemini API key redaction**: All 4 `parse_api_error` calls now pass `Some(ctx.api_key_str())` instead of `None`. (#P6)
+- **Config TOCTOU race**: Added generation counter to detect stale cache entries in `load_config`/`save_config`. (#B8)
+- **Language detection ordering**: Fixed `detect_language_from_content` in `highlight.rs` — Ruby `class` check no longer matches Python classes (lacked colon check); Go `package` check excludes Java-style `package com.example;`. (#B9)
+
+### New Features
+
+- **Session auto-restore**: REPL now auto-resumes the last saved session from `.rem/session.json.gz` on startup (opt-out via `auto_resume=false` in config). (#F5)
+- **Provider did-you-mean**: `/provider` and config validation suggest close provider names on typo (Levenshtein distance ≤ 2). (#U7)
+- **Web search cache**: In-memory cache with 5-minute TTL for search results, reducing duplicate network calls. (#O6)
+
+### UI/UX
+
+- **Index progress indicator**: Scanning phase shows elapsed time; chunking phase shows file count and duration. (#U8)
+- **Better HTTP error messages**: `parse_api_error` now includes canonical status text (e.g., "401 Unauthorized" instead of bare "401"). (#U9)
+- **Performance footer**: Shows model name instead of provider label; displays "? tok/s" when token count is unavailable. (#U10)
+- **Extended syntax highlighting**: Added highlighters for C, C++, Java, Ruby, PHP, Bash with corresponding auto-detection. (#U11)
+
+### Testing
+
+- **Property-based BM25 tests**: 7 new `proptest` cases for `tokenize` (length, lowercase, determinism, null-byte safety, no-alphanumeric) and `build_inverted_index`/`retrieve_relevant_chunks`. (#Q8)
+
+### Code Quality
+
+- **`levenshtein_distance`**: Extracted from private `repl.rs` function to `pub(crate)` in `text_util.rs` for reuse across modules. (#Q9)
+- **`status_code_text`**: Added helper mapping HTTP status codes to canonical text in `provider/mod.rs`. (#Q10)
+
 ## v0.6.0 (unreleased)
 
 ### New Features

@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -92,7 +93,12 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
     // Fast path: MessagePack format (preferred — 60-80% smaller, zero-copy capable)
     let msgpack_path = project_dir.join(".rem/codebase_index.msgpack");
     if let Ok(file) = fs::File::open(&msgpack_path) {
-        let mmap = unsafe { Mmap::map(&file).ok() };
+        let mmap = unsafe {
+            // SAFETY: The mapped file is read-only and not written to during
+            // the lifetime of the mapping. The data is validated immediately
+            // via rmp_serde::from_slice, which handles malformed input.
+            Mmap::map(&file).ok()
+        };
         if let Some(mmap) = mmap {
             match rmp_serde::from_slice::<CodebaseIndex>(&mmap) {
                 Ok(index) if !index.chunks.is_empty() => return Some(index),
@@ -188,8 +194,12 @@ fn try_mmap_read(path: &Path) -> Option<String> {
         return fs::read_to_string(path).ok();
     }
     // Try mmap first for fast zero-copy reads
-    if let Ok(mmap) = unsafe { Mmap::map(&file) } {
-        // Safety: we trust the file is valid UTF-8 (JSON)
+    if let Ok(mmap) = unsafe {
+        // SAFETY: The mapped file is read-only and not written to during
+        // the lifetime of the mapping. Data is validated via from_utf8
+        // before use.
+        Mmap::map(&file)
+    } {
         std::str::from_utf8(&mmap).ok().map(|s| s.to_string())
     } else {
         fs::read_to_string(path).ok()
@@ -251,6 +261,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     let mut file_mtimes: HashMap<String, u64> = HashMap::new();
     let mut changed_files = 0u32;
     let mut scanned_count = 0u32;
+    let scan_start = Instant::now();
 
     // Phase 1: Walk directory tree (sequential) — collect paths and metadata
     struct WalkEntry {
@@ -306,7 +317,14 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
         scanned_count += 1;
         if scanned_count.is_multiple_of(100) && std::io::stderr().is_terminal() {
             let changed = changed_files;
-            eprint!("\r  scanning... {} files ({} new/changed)", scanned_count, changed);
+            let elapsed = scan_start.elapsed();
+            eprint!(
+                "\r  \u{1F50D} {} files scanned ({} new/changed, {}.{:02}s)",
+                scanned_count,
+                changed,
+                elapsed.as_secs(),
+                elapsed.subsec_millis() / 10
+            );
             let _ = std::io::stderr().flush();
         }
 
@@ -343,7 +361,7 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
 
     // Clear progress line
     if scanned_count >= 100 && std::io::stderr().is_terminal() {
-        eprint!("\r{}\r", " ".repeat(60));
+        eprint!("\r\x1b[2K");
         let _ = std::io::stderr().flush();
     }
 
@@ -374,8 +392,9 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
     };
 
     let num_files = file_entries.len();
+    let chunk_start = Instant::now();
     if num_files > 0 && std::io::stderr().is_terminal() {
-        eprint!("\r  chunking... {} files", num_files);
+        eprint!("\r  \u{2699} chunking {} files...", num_files);
         let _ = std::io::stderr().flush();
     }
     let mut new_chunks: Vec<IndexChunk> = if file_entries.len() > 100 {
@@ -390,7 +409,23 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
             .collect()
     };
     if num_files > 0 && std::io::stderr().is_terminal() {
-        eprint!("\r                                \r");
+        let chunk_elapsed = chunk_start.elapsed();
+        if new_chunks.len() > num_files {
+            eprint!(
+                "\r  \u{2705} chunked into {} chunks from {} files ({}.{:02}s)\n",
+                new_chunks.len(),
+                num_files,
+                chunk_elapsed.as_secs(),
+                chunk_elapsed.subsec_millis() / 10
+            );
+        } else {
+            eprint!(
+                "\r  \u{2705} {} files chunked ({}.{:02}s)\n",
+                num_files,
+                chunk_elapsed.as_secs(),
+                chunk_elapsed.subsec_millis() / 10
+            );
+        }
         let _ = std::io::stderr().flush();
     }
 

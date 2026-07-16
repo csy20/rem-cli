@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::json;
@@ -127,18 +127,7 @@ pub(super) struct OpenAIBackend;
 #[async_trait]
 impl ProviderBackend for OpenAIBackend {
     async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
-        let url = super::openai_models_url(&ctx.base_url);
-        let resp = super::add_openai_auth(ctx.client.get(&url), ctx.api_key_str(), ctx.kind)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(super::ProviderError::Other(format!(
-                "OpenAI API unreachable at {}",
-                ctx.base_url
-            ))));
-        }
-        let parsed: OpenAIModelsResponse = resp.json().await.context("invalid models response")?;
-        Ok(parsed.data.into_iter().map(|m| m.id).collect())
+        super::openai_compat_list_models(ctx, "OpenAI").await
     }
 
     async fn complete_json(
@@ -164,22 +153,12 @@ impl ProviderBackend for OpenAIBackend {
         let no_stream = crate::reasoning::requires_non_streaming(&ctx.model);
         let lower = ctx.model.to_lowercase();
 
-        let mut messages: Vec<serde_json::Value> = vec![];
-        if !history.is_empty() {
-            for (user_msg, assistant_msg) in super::parse_history_turns(history) {
-                messages.push(json!({"role": "user", "content": user_msg}));
-                if !assistant_msg.is_empty() {
-                    messages.push(json!({"role": "assistant", "content": assistant_msg}));
-                }
-            }
-        }
-        if no_system {
+        let messages = if no_system {
             let combined = format!("{system_prompt}\n\n{user_prompt}");
-            messages.push(json!({"role": "user", "content": combined}));
+            super::build_messages_from_history(history, &combined, None)
         } else {
-            messages.push(json!({"role": "system", "content": system_prompt}));
-            messages.push(json!({"role": "user", "content": user_prompt}));
-        }
+            super::build_messages_from_history(history, user_prompt, Some(system_prompt))
+        };
 
         let mut payload = serde_json::Map::new();
         payload.insert("model".into(), json!(&ctx.model));

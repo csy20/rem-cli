@@ -74,6 +74,7 @@ impl HistoryManager {
         let tokens = crate::token_count::estimate_tokens(&assistant);
         self.assistant_token_cache.push(tokens);
         self.history.push((user, assistant));
+        self.messages_since_save += 1;
         // Trim by turn count (hard cap)
         if self.history.len() > crate::constants::MAX_HISTORY_TURNS {
             self.history.remove(0);

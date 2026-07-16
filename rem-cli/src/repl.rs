@@ -2,13 +2,10 @@
 //! The [`run_chat`] function handles user input, dispatches slash commands,
 //! calls the LLM provider, and manages the conversational workflow.
 
+use anyhow::Result;
 use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
-use std::sync::LazyLock;
-use std::sync::Mutex;
-
-use anyhow::Result;
 
 use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
@@ -31,6 +28,7 @@ use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
 use crate::session_io::{build_prompt, language_specific_guidance, validate_chat_response};
+use crate::text_util::levenshtein_distance;
 use crate::token_count::estimate_tokens;
 use crate::types::{extract_code_blocks_with_names, file_icon};
 use crate::ui;
@@ -661,7 +659,6 @@ fn handle_llm_response(
 
     if !cleaned.is_empty() {
         session.history_mgr.push_turn(trimmed.to_string(), cleaned);
-        session.history_mgr.messages_since_save += 1;
         if session.history_mgr.messages_since_save >= crate::constants::AUTO_SAVE_INTERVAL {
             session.auto_save_session();
             session.history_mgr.messages_since_save = 0;
@@ -678,6 +675,19 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
     crate::REPL_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut session = initialize_session(client, cfg)?;
     let t = ui::theme::active();
+
+    // Auto-restore previous session if enabled and session file exists
+    if cfg.auto_resume {
+        let dir = session
+            .ctx
+            .project_dir
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let session_file = dir.join(".rem/session.json.gz");
+        if session_file.exists() {
+            handle_resume_session(&mut session);
+        }
+    }
 
     // Pre-warm the HTTP client so the first API call doesn't pay lazy-init cost
     let _ = crate::provider::HTTP_CLIENT.clone();
@@ -984,23 +994,9 @@ fn terminal_width() -> usize {
     fallback.saturating_sub(4)
 }
 
-/// Cache for last rendered markdown output to avoid re-rendering identical content.
-static DISPLAY_CACHE: LazyLock<Mutex<Option<(String, String)>>> = LazyLock::new(|| Mutex::new(None));
-
 /// Prints plain text output line by line, using pager for long output.
 /// Auto-detects code blocks and applies syntax highlighting.
-/// Caches the last rendered output to avoid re-rendering identical content.
 fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
-    // Check cache
-    if let Ok(cache) = DISPLAY_CACHE.lock() {
-        if let Some((prev, rendered)) = cache.as_ref() {
-            if prev == cleaned {
-                print!("{}", rendered);
-                return;
-            }
-        }
-    }
-
     let rail_chr = || ui::theme::paint(t, "accent", "\u{258C}", true);
     let max_width = terminal_width();
     let processed = crate::ui::markdown::render_markdown(cleaned, t);
@@ -1016,8 +1012,6 @@ fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
                     in_code = true;
                     lang = stripped.trim();
                 }
-                result.push_str(line);
-                result.push('\n');
                 continue;
             }
             if in_code && !lang.is_empty() {
@@ -1051,60 +1045,38 @@ fn display_text_output(cleaned: &str, t: &crate::ui::theme::Theme) {
         return;
     }
     print!("{}", buf);
-    // Update cache
-    if let Ok(mut cache) = DISPLAY_CACHE.lock() {
-        *cache = Some((cleaned.to_string(), buf));
-    }
 }
 
-/// Prints provider, elapsed time, tokens-per-second, session duration, and total tokens.
+/// Prints model, elapsed time, tokens-per-second, session duration, and total tokens.
 fn display_performance_stats(
     client: &Provider,
     session: &ChatSession,
     elapsed: std::time::Duration,
     t: &crate::ui::theme::Theme,
 ) {
-    let tps = if elapsed.as_secs_f64() > 0.0 {
+    let tps = if elapsed.as_secs_f64() > 0.0 && session.last_tokens > 0 {
         session.last_tokens as f64 / elapsed.as_secs_f64()
     } else {
         0.0
     };
     let session_dur = session.session_start.elapsed();
     let rail = ui::theme::paint_rail_empty(t);
-    let provider_tag = ui::theme::paint_chip(t, client.kind.as_str());
+    let model_tag = ui::theme::paint_dim(t, &client.ctx.model);
     let dur = ui::theme::paint_dim(t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
-    let speed = ui::theme::paint_dim(t, &format!("{:.0} tok/s", tps));
+    let speed = if session.last_tokens > 0 {
+        ui::theme::paint_dim(t, &format!("{:.0} tok/s", tps))
+    } else {
+        ui::theme::paint_dim(t, "? tok/s")
+    };
     let total = ui::theme::paint_dim(t, &format!("\u{2211}{} tok", session.total_tokens));
     let sess = ui::theme::paint_dim(t, &format!("\u{29d6}{:.0}m", session_dur.as_secs_f64() / 60.0));
     let dot = ui::theme::paint_dim(t, "\u{00B7}");
     println!("{rail}");
-    println!("{rail} {provider_tag} {dot} {dur} {dot} {speed} {dot} {total} {dot} {sess}");
+    println!("{rail} {model_tag} {dot} {dur} {dot} {speed} {dot} {total} {dot} {sess}");
     println!("{rail}");
 }
 
 /// Simple Levenshtein distance for "did you mean?" suggestions.
-fn levenshtein_distance(a: &str, b: &str) -> usize {
-    let a_len = a.len();
-    let b_len = b.len();
-    if a_len == 0 {
-        return b_len;
-    }
-    if b_len == 0 {
-        return a_len;
-    }
-    let mut prev: Vec<usize> = (0..=b_len).collect();
-    let mut curr: Vec<usize> = vec![0; b_len + 1];
-    for (i, ca) in a.chars().enumerate() {
-        curr[0] = i + 1;
-        for (j, cb) in b.chars().enumerate() {
-            let cost = if ca == cb { 0 } else { 1 };
-            curr[j + 1] = std::cmp::min(std::cmp::min(curr[j] + 1, prev[j + 1] + 1), prev[j] + cost);
-        }
-        std::mem::swap(&mut prev, &mut curr);
-    }
-    prev[b_len]
-}
-
 /// Suggests a close command name when an unknown `/command` is entered.
 fn did_you_mean(input: &str) -> Option<String> {
     let cmd_name = input.split(' ').next().unwrap_or(input);

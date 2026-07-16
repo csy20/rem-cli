@@ -4,22 +4,35 @@
 
 use crate::cli::{AppConfig, PartialConfig};
 use crate::provider::{Provider, ProviderKind};
+use crate::text_util::levenshtein_distance;
 use crate::ui;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 use std::sync::RwLock;
 use tracing::warn;
 
-/// Cached config to avoid repeated TOML parsing from disk.
-static CONFIG_CACHE: LazyLock<RwLock<Option<AppConfig>>> = LazyLock::new(|| RwLock::new(None));
+/// Generation counter incremented on every save to detect stale cache entries.
+static CONFIG_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Returns the cached config, or `None` if not yet loaded.
+/// Cached config to avoid repeated TOML parsing from disk.
+/// Stores (config, generation_at_load) to detect stale entries.
+static CONFIG_CACHE: LazyLock<RwLock<Option<(AppConfig, u64)>>> = LazyLock::new(|| RwLock::new(None));
+
+/// Returns the cached config if it is fresh (same generation as current).
+/// Returns `None` if not loaded or stale (config was saved externally after load).
 pub(crate) fn get_cached_config() -> Option<AppConfig> {
-    CONFIG_CACHE.read().unwrap_or_else(|e| e.into_inner()).clone()
+    let cache = CONFIG_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    let (cfg, gen) = cache.as_ref()?;
+    if *gen == CONFIG_GENERATION.load(Ordering::SeqCst) {
+        Some(cfg.clone())
+    } else {
+        None
+    }
 }
 
 /// Returns the config directory path, checking XDG_CONFIG_HOME first.
@@ -44,14 +57,25 @@ pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
     }
     // Update cache directly instead of invalidating, to avoid re-reading from disk
     crate::pager::init_page_threshold(cfg.page_threshold);
+    let gen = CONFIG_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
-    *cache = Some(cfg.clone());
+    *cache = Some((cfg.clone(), gen));
     Ok(())
 }
 
 /// Interactive first-time setup that prompts for a workspace directory.
 pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
     let t = ui::theme::active();
+    if !std::io::stdin().is_terminal() {
+        cfg.workspace_dir = Some(
+            std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
+        );
+        save_config(cfg)?;
+        return Ok(None);
+    }
     println!();
     println!(
         "{} {}",
@@ -130,8 +154,10 @@ pub(crate) fn first_run_setup(cfg: &mut AppConfig) -> Result<Option<PathBuf>> {
 pub(crate) fn load_config() -> Result<AppConfig> {
     {
         let cache = CONFIG_CACHE.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref cached) = *cache {
-            return Ok(cached.clone());
+        if let Some((ref cached, gen)) = *cache {
+            if gen == CONFIG_GENERATION.load(Ordering::SeqCst) {
+                return Ok(cached.clone());
+            }
         }
     }
     let mut cfg = AppConfig::default();
@@ -150,8 +176,9 @@ pub(crate) fn load_config() -> Result<AppConfig> {
         cfg.apply_partial(partial);
     }
     crate::pager::init_page_threshold(cfg.page_threshold);
+    let gen = CONFIG_GENERATION.load(Ordering::SeqCst);
     let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
-    *cache = Some(cfg.clone());
+    *cache = Some((cfg.clone(), gen));
     Ok(cfg)
 }
 
@@ -317,11 +344,25 @@ pub(crate) fn validate_config(cfg: &AppConfig) -> Result<()> {
     let warn_prefix = ui::theme::paint_warning(&t, "config warning:");
 
     if !known_providers.contains(&cfg.provider.as_str()) {
-        let msg = format!(
+        let mut msg = format!(
             "unknown provider '{}'. Known: {}",
             cfg.provider,
             known_providers.join(", ")
         );
+        let mut best_dist = usize::MAX;
+        let mut best_name: Option<&str> = None;
+        for &name in &known_providers {
+            let dist = levenshtein_distance(&cfg.provider, name);
+            if dist > 0 && dist < best_dist {
+                best_dist = dist;
+                best_name = Some(name);
+            }
+        }
+        if let Some(suggestion) = best_name {
+            if best_dist <= 2 {
+                msg.push_str(&format!(". Did you mean '{}'?", suggestion));
+            }
+        }
         return Err(anyhow::anyhow!("{}", msg));
     }
 
@@ -348,13 +389,15 @@ pub(crate) fn validate_config(cfg: &AppConfig) -> Result<()> {
         eprintln!("  {} {msg}", warn_prefix);
     }
 
-    let url = cfg.ollama_url.trim();
-    if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
-        let msg = format!(
-            "ollama_url '{}' does not look like a valid URL (expected http:// or https://)",
-            url
-        );
-        return Err(anyhow::anyhow!("{}", msg));
+    if cfg.provider.to_lowercase() == "ollama" {
+        let url = cfg.ollama_url.trim();
+        if url.is_empty() || (!url.starts_with("http://") && !url.starts_with("https://")) {
+            let msg = format!(
+                "ollama_url '{}' does not look like a valid URL (expected http:// or https://)",
+                url
+            );
+            return Err(anyhow::anyhow!("{}", msg));
+        }
     }
 
     if let Some(ref effort) = cfg.reasoning_effort {
@@ -395,6 +438,7 @@ pub(crate) fn validate_config(cfg: &AppConfig) -> Result<()> {
 
 /// Invalidates the in-memory config cache so the next call to load_config re-reads from disk.
 pub(crate) fn invalidate_config_cache() {
+    CONFIG_GENERATION.fetch_add(1, Ordering::SeqCst);
     if let Ok(mut cache) = CONFIG_CACHE.write() {
         *cache = None;
     }
@@ -518,10 +562,21 @@ mod tests {
     #[test]
     fn validate_config_errors_on_bad_ollama_url() {
         let cfg = AppConfig {
+            provider: "ollama".into(),
             ollama_url: "not-a-url".into(),
             ..Default::default()
         };
         assert!(validate_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn validate_config_ignores_ollama_url_for_non_ollama() {
+        let cfg = AppConfig {
+            provider: "openai".into(),
+            ollama_url: "not-a-url".into(),
+            ..Default::default()
+        };
+        assert!(validate_config(&cfg).is_ok());
     }
 
     #[test]

@@ -685,13 +685,7 @@ pub(crate) fn handle_edit() -> Option<String> {
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vi".to_string());
     let tmp_path = std::env::temp_dir().join(format!("rem-edit-{}.md", std::process::id()));
-    match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{} \"$1\"", editor))
-        .arg("rem-edit")
-        .arg(&tmp_path)
-        .status()
-    {
+    match std::process::Command::new(&editor).arg(&tmp_path).status() {
         Ok(status) if status.success() => {
             let content = std::fs::read_to_string(&tmp_path).unwrap_or_default();
             let _ = std::fs::remove_file(&tmp_path);
@@ -942,13 +936,13 @@ fn read_maybe_gzip(path: &std::path::Path) -> std::io::Result<String> {
     if raw.first() == Some(&0x1f) && raw.get(1) == Some(&0x8b) {
         let mut decoder = GzDecoder::new(&raw[..]);
         let mut out = String::new();
-        decoder.read_to_string(&mut out).map_err(|e| {
-            if out.len() > 100_000_000 {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "decompressed data exceeds size limit")
-            } else {
-                e
-            }
-        })?;
+        decoder.read_to_string(&mut out)?;
+        if out.len() > 100_000_000 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "decompressed data exceeds size limit",
+            ));
+        }
         Ok(out)
     } else {
         String::from_utf8(raw).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -1140,18 +1134,10 @@ pub(crate) fn handle_export_session(session: &ChatSession, path: &str) {
             return;
         }
     };
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    if let Err(e) = encoder.write_all(json.as_bytes()) {
-        println!(
-            "{} compression failed: {}",
-            ui::theme::paint_error_label(&t, "\u{2717}"),
-            e
-        );
-        return;
-    }
-    let compressed = match encoder.finish() {
-        Ok(c) => c,
-        Err(e) => {
+    let is_gzip = out_path.extension().map(|e| e == "gz").unwrap_or(false);
+    let data: Vec<u8> = if is_gzip {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        if let Err(e) = encoder.write_all(json.as_bytes()) {
             println!(
                 "{} compression failed: {}",
                 ui::theme::paint_error_label(&t, "\u{2717}"),
@@ -1159,13 +1145,26 @@ pub(crate) fn handle_export_session(session: &ChatSession, path: &str) {
             );
             return;
         }
+        match encoder.finish() {
+            Ok(c) => c,
+            Err(e) => {
+                println!(
+                    "{} compression failed: {}",
+                    ui::theme::paint_error_label(&t, "\u{2717}"),
+                    e
+                );
+                return;
+            }
+        }
+    } else {
+        json.into_bytes()
     };
-    match fs::write(&out_path, &compressed) {
+    match fs::write(&out_path, &data) {
         Ok(()) => println!(
             "{} session exported to {} ({} bytes)",
             ui::theme::paint_success_label(&t, "\u{2713}"),
             out_path.display(),
-            compressed.len(),
+            data.len(),
         ),
         Err(e) => println!(
             "{} failed to export session: {}",

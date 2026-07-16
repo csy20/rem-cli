@@ -58,7 +58,9 @@ impl SpinnerGuard {
 
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
-        self.handle.take();
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
         eprint!("\r\x1b[2K{}\r", " ".repeat(*COLUMNS_WIDTH));
         let _ = io::stderr().flush();
     }

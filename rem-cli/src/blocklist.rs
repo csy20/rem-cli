@@ -51,6 +51,12 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     if normalized.is_empty() {
         return false;
     }
+    // Strip leading "sudo " to prevent bypass via sudo prefix
+    let normalized = if let Some(stripped) = normalized.strip_prefix("sudo ") {
+        stripped
+    } else {
+        &normalized
+    };
     // Exact dangerous command patterns (after normalization)
     // Uses word-boundary checks to avoid false positives on benign paths.
     // e.g. "rm -rf /" should match "rm -rf /" but not "rm -rf /tmp"
@@ -346,6 +352,13 @@ mod tests {
             !is_command_blocked("myddcommand"),
             "'dd' in middle of word should not be blocked"
         );
+    }
+
+    #[test]
+    fn blocks_sudo_rm_rf() {
+        assert!(is_command_blocked("sudo rm -rf /"), "sudo rm -rf / should be blocked");
+        assert!(is_command_blocked("sudo rm -rf /*"), "sudo rm -rf /* should be blocked");
+        assert!(is_command_blocked("SUDO rm -rf /"), "SUDO rm -rf / should be blocked");
     }
 
     #[test]

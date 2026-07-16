@@ -751,6 +751,24 @@ pub fn add_openai_auth(req: reqwest::RequestBuilder, api_key: &str, kind: Provid
     }
 }
 
+pub(super) async fn openai_compat_list_models(ctx: &ProviderContext, provider_name: &str) -> Result<Vec<String>> {
+    let url = openai_models_url(&ctx.base_url);
+    let resp = add_openai_auth(ctx.client.get(&url), ctx.api_key_str(), ctx.kind)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!(ProviderError::Other(format!(
+            "{provider_name} API unreachable at {}",
+            ctx.base_url
+        ))));
+    }
+    let parsed: openai::OpenAIModelsResponse = resp
+        .json()
+        .await
+        .with_context(|| format!("invalid {provider_name} models response"))?;
+    Ok(parsed.data.into_iter().map(|m| m.id).collect())
+}
+
 /// Applies lightweight inline Markdown formatting (code, bold, italic) using ANSI codes.
 /// Only formats non-code-fence lines. Uses simple character scanning (no regex dependency).
 fn render_inline_markdown(text: &str) -> String {
@@ -1076,6 +1094,25 @@ fn redact_api_key(msg: &str, api_key: Option<&str>) -> String {
     s
 }
 
+fn status_code_text(code: u16) -> &'static str {
+    match code {
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        402 => "Payment Required",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ => "",
+    }
+}
+
 pub(super) async fn parse_api_error(
     provider_name: &str,
     resp: reqwest::Response,
@@ -1088,24 +1125,30 @@ pub(super) async fn parse_api_error(
         .unwrap_or_else(|_| body.chars().take(crate::constants::API_ERROR_BODY_MAX_CHARS).collect());
     let err_msg = redact_api_key(&raw_msg, api_key);
     let code = status.as_u16();
+    let text = status_code_text(code);
+    let code_str = if text.is_empty() {
+        format!("{}", code)
+    } else {
+        format!("{} {}", code, text)
+    };
     match code {
         429 => {
-            let hint = " — try waiting and retrying";
+            let hint = " — reduce request rate or wait before retrying";
             anyhow!(ProviderError::RateLimit(format!(
-                "{provider_name} rate limited ({code}): {err_msg}{hint}"
+                "{provider_name} rate limited ({code_str}): {err_msg}{hint}"
             )))
         }
         401 | 403 => {
             let hint = " — check your API key in ~/.config/rem-cli/config.toml or the REMOTE_API_KEY env var";
             anyhow!(ProviderError::Auth(format!(
-                "{provider_name} auth failed ({code}): {err_msg}{hint}"
+                "{provider_name} auth failed ({code_str}): {err_msg}{hint}"
             )))
         }
         500..=504 => anyhow!(ProviderError::ServerError(format!(
-            "{provider_name} server error ({code}): {err_msg}"
+            "{provider_name} server error ({code_str}): {err_msg}"
         ))),
         _ => anyhow!(ProviderError::Other(format!(
-            "{provider_name} API failed ({status}): {err_msg}"
+            "{provider_name} API failed ({code_str}): {err_msg}"
         ))),
     }
 }

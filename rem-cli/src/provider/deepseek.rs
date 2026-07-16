@@ -32,18 +32,7 @@ struct DeepSeekDelta {
 #[async_trait]
 impl ProviderBackend for DeepSeekBackend {
     async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
-        let url = super::openai_models_url(&ctx.base_url);
-        let resp = super::add_openai_auth(ctx.client.get(&url), ctx.api_key_str(), ctx.kind)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(
-                "{}",
-                super::ProviderError::Other(format!("DeepSeek API unreachable at {}", ctx.base_url))
-            ));
-        }
-        let parsed: openai::OpenAIModelsResponse = resp.json().await.context("invalid DeepSeek models response")?;
-        Ok(parsed.data.into_iter().map(|m| m.id).collect())
+        super::openai_compat_list_models(ctx, "DeepSeek").await
     }
 
     async fn complete_json(
@@ -76,10 +65,15 @@ impl ProviderBackend for DeepSeekBackend {
                 .send()
                 .await?;
             if !resp.status().is_success() {
-                return Err(anyhow!("DeepSeek API error: {}", resp.status()));
+                return Err(super::parse_api_error("DeepSeek", resp, Some(ctx.api_key_str())).await);
             }
-            let text = resp.text().await?;
-            return super::parse_json_fallback(&text);
+            let parsed: openai::OpenAIResponse = resp.json().await.context("invalid DeepSeek response")?;
+            let content = parsed
+                .choices
+                .first()
+                .and_then(|c| c.message.content.as_deref())
+                .unwrap_or("");
+            return super::parse_json_fallback(content);
         }
         super::openai_compat_complete_json(ctx, ctx.kind, "DeepSeek", system_prompt, user_prompt).await
     }

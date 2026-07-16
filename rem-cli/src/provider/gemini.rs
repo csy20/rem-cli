@@ -129,7 +129,7 @@ impl ProviderBackend for GeminiBackend {
             .send()
             .await?;
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("Gemini", resp, None).await);
+            return Err(super::parse_api_error("Gemini", resp, Some(ctx.api_key_str())).await);
         }
 
         let parsed: GeminiResponse = resp.json().await.context("invalid Gemini response")?;
@@ -187,7 +187,7 @@ impl ProviderBackend for GeminiBackend {
             .context("failed to call Gemini API")?;
 
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("Gemini", resp, None).await);
+            return Err(super::parse_api_error("Gemini", resp, Some(ctx.api_key_str())).await);
         }
 
         super::stream_gemini_sse(resp).await
@@ -246,7 +246,7 @@ impl ProviderBackend for GeminiBackend {
             .context("failed to call Gemini vision API")?;
 
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("Gemini", resp, None).await);
+            return Err(super::parse_api_error("Gemini", resp, Some(ctx.api_key_str())).await);
         }
 
         super::stream_gemini_sse(resp).await
@@ -301,7 +301,7 @@ impl ProviderBackend for GeminiBackend {
             .context("failed to call Gemini API")?;
 
         if !resp.status().is_success() {
-            return Err(super::parse_api_error("Gemini", resp, None).await);
+            return Err(super::parse_api_error("Gemini", resp, Some(ctx.api_key_str())).await);
         }
 
         let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);

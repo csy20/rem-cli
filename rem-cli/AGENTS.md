@@ -17,15 +17,18 @@ src/
 ├── config.rs        — Config loading/saving (XDG support), provider construction
 ├── chat.rs          — ChatSession (history, state, serialization)
 ├── repl.rs          — Interactive REPL loop (multi-line input support)
-├── provider/        — LLM providers (Ollama, OpenAI, Anthropic, Gemini, Azure, Bedrock, OpenRouter)
-│   ├── mod.rs       — Provider enum, shared Client, stream handlers
+├── provider/        — LLM providers (10: Ollama, OpenAI, Anthropic, Gemini, Azure, Bedrock, OpenRouter, DeepSeek, GitHub, xAI)
+│   ├── mod.rs       — Provider enum, ProviderBackend trait, shared Client, stream handlers
 │   ├── ollama.rs    — Ollama-native tool calling via /api/chat
-│   ├── openai.rs    — OpenAI-compatible streaming
+│   ├── openai.rs    — OpenAI-compatible streaming + shared types
 │   ├── anthropic.rs — Anthropic Claude streaming + tool calls
 │   ├── gemini.rs    — Google Gemini streaming
 │   ├── azure.rs     — Azure OpenAI streaming
 │   ├── bedrock.rs   — AWS Bedrock streaming
 │   ├── openrouter.rs— OpenRouter streaming
+│   ├── deepseek.rs  — DeepSeek (including deepseek-reasoner with reasoning_content)
+│   ├── github.rs    — GitHub Models (OpenAI-compatible)
+│   ├── xai.rs       — xAI Grok (OpenAI-compatible)
 │   └── tools.rs     — Shared ToolCall type + provider tool support matrix
 ├── indexer/         — Codebase indexing (rem index), BM25 + embedding retrieval
 ├── intent.rs        — Query intent classification
@@ -48,7 +51,6 @@ src/
 ├── vision.rs        — Image encoding + /vision command handler
 ├── reasoning.rs     — DeepSeek reasoning extraction
 ├── blocklist.rs     — Command sanitization and blocking
-├── watcher.rs       — Live file watcher with debounce for auto-reindex
 ├── pager.rs         — Pager output
 ├── highlight.rs     — Syntax highlighting
 └── ui/              — Terminal UI
@@ -82,4 +84,3 @@ cargo check                   # Fast type-check only
 - Tests: `#[cfg(test)] mod tests { use super::*; }` at end of source file
 - New features must keep all tests passing and clippy clean
 - Logging: `tracing::warn!()` / `tracing::info!()` via `EnvFilter`, never raw `eprintln!`
-

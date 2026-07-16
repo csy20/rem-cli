@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 
 use super::tools::{ToolResponse, ToolSpec};
@@ -9,19 +9,7 @@ pub(super) struct OpenRouterBackend;
 #[async_trait]
 impl ProviderBackend for OpenRouterBackend {
     async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
-        let url = super::openai_models_url(&ctx.base_url);
-        let resp = super::add_openai_auth(ctx.client.get(&url), ctx.api_key_str(), ctx.kind)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!(super::ProviderError::Other(format!(
-                "OpenRouter API unreachable at {}",
-                ctx.base_url
-            ))));
-        }
-        let parsed: super::openai::OpenAIModelsResponse =
-            resp.json().await.context("invalid OpenRouter models response")?;
-        Ok(parsed.data.into_iter().map(|m| m.id).collect())
+        super::openai_compat_list_models(ctx, "OpenRouter").await
     }
 
     async fn complete_json(
