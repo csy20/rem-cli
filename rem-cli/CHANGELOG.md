@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.8.0 (unreleased)
+
+### New Features
+- **`/compare` command**: Send the same prompt to multiple models/providers and compare responses side-by-side. (#F6)
+- **`/session analytics`**: Export session analytics as JSON (provider, model, turn count, tokens, duration). (#F2)
+- **`/session list` enhancement**: Now shows timestamps, turn counts, token counts, and session duration. (#F3)
+- **`/git status`, `/git diff`, `/git log`**: Quick git workflow commands without leaving the REPL. (#F7)
+- **`/prompt` template system**: Save, load, list, and delete reusable prompt templates with `{{variable}}` substitution. (#F1)
+- **Plugin system v1**: Lightweight plugin trait with `PluginManager`, built-in `hello` plugin, and `/plugin` command. (#F8)
+- **Session model tracking**: `ChatSession` now stores the model name, persisted in session JSON and exported in analytics. (#F2)
+
+### Bug Fixes
+- **`visible_width()` rewrite**: Properly handles CSI, OSC, DCS, and two-byte ANSI sequences (was only handling sequences ending in `'m'`). (#B1)
+- **`looks_like_shell_command` restored**: Was incorrectly flagged as dead code and removed — now re-added with original implementation. (#B2)
+- **`execute_list_files` error handling**: Replaced `unwrap_or(false)` on `file_type()` with proper `match`. (#B3)
+- **`search.rs` regex safety**: `.expect()` calls replaced with `.ok()` + `Option<Selector>` pattern. (#B4)
+- **`NoopUserInteraction` borrow fix**: Changed from `let mut noop = ...` to inline reference. (#B5)
+- **Config field clone fix**: Used `.clone().unwrap_or_default()` to avoid moving from borrowed context in tool_executor. (#B6)
+
+### UI/UX
+- **Error display**: LLM errors now show the provider label alongside the error message.
+- **`/status` enhancement**: Now displays the provider's base URL.
+- **`/session analytics` enrichment**: Includes actual provider name instead of "unknown".
+- **`/session analytics` parameters**: Accepts optional file path to write JSON output.
+
+### Testing
+- **47 new unit tests**: Coverage expanded for completion, constants, providers (GitHub, xAI), visible_width/skip_ansi/word_wrap, session auto-restore, prompt commands, compare, git, plugin, and fuzz stress tests.
+- **3 fuzz-like property tests**: Random ANSI sequences for `visible_width`, random inputs for `word_wrap`, random brackets for `needs_continuation`.
+- **Total test count**: 660 unit tests + 18 integration tests = 678 total.
+
+### Architecture
+- **Plugin system**: Extensible `Plugin` trait with `PluginManager` registry, integrated into REPL via `/plugin` command. (#F8)
+- **CI benchmark gate**: Added `cargo bench --no-run` step to CI workflow.
+- **Fuzz-like tests**: Property-based stress tests for critical text processing functions.
+
 ## v0.7.0 (unreleased)
 
 ### Bug Fixes

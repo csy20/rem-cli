@@ -24,6 +24,7 @@ mod intent;
 mod memory;
 mod pager;
 mod parsing;
+pub(crate) mod plugin;
 mod provider;
 mod reasoning;
 mod repl;

@@ -11,14 +11,16 @@ use crate::chat::{ChatSession, RunMode};
 use crate::cli::AppConfig;
 use crate::commands::{
     auto_write_files, handle_apply, handle_clear, handle_commit, handle_compact, handle_compact_dry_run,
-    handle_compact_undo, handle_config, handle_config_set, handle_context, handle_copy, handle_diff, handle_dir,
-    handle_explain, handle_export_session, handle_export_session_md, handle_find, handle_goal, handle_import_session,
-    handle_init, handle_lint_with_fallback, handle_list_files, handle_list_models, handle_list_sessions, handle_memory,
-    handle_memory_set, handle_mode, handle_model, handle_page, handle_ping, handle_plan, handle_provider,
-    handle_pull_model, handle_reasoning, handle_refactor, handle_reload, handle_reset, handle_resume_session,
-    handle_review, handle_save_session, handle_search, handle_status, handle_summary, handle_test, handle_theme,
-    handle_tokens, handle_undo, handle_vision, handle_why, handle_write, print_chat_help, print_command_help,
-    print_last_files, prompt_for_path,
+    handle_compact_undo, handle_compare, handle_config, handle_config_set, handle_context, handle_copy, handle_diff,
+    handle_dir, handle_explain, handle_export_session, handle_export_session_md, handle_find, handle_git_diff,
+    handle_git_log, handle_git_status, handle_goal, handle_import_session, handle_init, handle_lint_with_fallback,
+    handle_list_files, handle_list_models, handle_list_sessions, handle_memory, handle_memory_set, handle_mode,
+    handle_model, handle_page, handle_ping, handle_plan, handle_plugin, handle_prompt_delete, handle_prompt_list,
+    handle_prompt_save, handle_prompt_save_force, handle_provider, handle_pull_model, handle_reasoning,
+    handle_refactor, handle_reload, handle_reset, handle_resume_session, handle_review, handle_save_session,
+    handle_search, handle_session_analytics, handle_status, handle_summary, handle_test, handle_theme, handle_tokens,
+    handle_undo, handle_vision, handle_why, handle_write, print_chat_help, print_command_help, print_last_files,
+    prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
@@ -180,6 +182,16 @@ fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme
                         if let Some(content) = crate::commands::handle_edit() {
                             session.add_history(&content);
                             return Some(content);
+                        }
+                        continue;
+                    }
+                    // /prompt load loads a template and returns it as input
+                    if let Some(name) = trimmed.strip_prefix("/prompt load ") {
+                        if !name.is_empty() {
+                            if let Some(content) = crate::commands::handle_prompt_load(session, name) {
+                                session.add_history(&content);
+                                return Some(content);
+                            }
                         }
                         continue;
                     }
@@ -378,6 +390,10 @@ async fn dispatch_slash_command(
                 handle_compact_undo(session);
             } else if sub == "list" {
                 handle_list_sessions(session);
+            } else if sub == "analytics" {
+                handle_session_analytics(session, client, None);
+            } else if let Some(analytics_path) = sub.strip_prefix("analytics ") {
+                handle_session_analytics(session, client, Some(analytics_path.trim()));
             } else if let Some(export_path) = sub.strip_prefix("export-md ") {
                 handle_export_session_md(session, export_path.trim());
             } else if let Some(export_path) = sub.strip_prefix("export ") {
@@ -387,7 +403,7 @@ async fn dispatch_slash_command(
             } else {
                 let t = ui::theme::active();
                 println!(
-                    "{} usage: /session compact-undo | list | export <path> | export-md <path> | import <path>",
+                    "{} usage: /session compact-undo | list | analytics [path] | export <path> | export-md <path> | import <path>",
                     ui::theme::paint_warning(&t, "\u{258C}")
                 );
             }
@@ -420,11 +436,67 @@ async fn dispatch_slash_command(
             handle_page();
             return false;
         }
+        "/plugin" => {
+            handle_plugin(session, args);
+            return false;
+        }
+        "/git" => {
+            let sub = args.trim();
+            if sub == "status" {
+                handle_git_status(session);
+            } else if let Some(file) = sub.strip_prefix("diff ") {
+                handle_git_diff(session, file.trim());
+            } else if sub == "diff" {
+                handle_git_diff(session, "");
+            } else if let Some(n) = sub.strip_prefix("log ") {
+                handle_git_log(session, n.trim());
+            } else if sub == "log" {
+                handle_git_log(session, "5");
+            } else if sub.starts_with("commit") {
+                println!(
+                    "{} use /commit directly for commits",
+                    ui::theme::paint_warning(t, "\u{258C}")
+                );
+            } else {
+                println!(
+                    "{} usage: /git status | /git diff [file] | /git log [n]",
+                    ui::theme::paint_warning(t, "\u{258C}")
+                );
+            }
+            return false;
+        }
+        "/prompt" => {
+            let sub = args.trim();
+            if sub == "list" {
+                handle_prompt_list(session);
+            } else if let Some(name) = sub.strip_prefix("save ") {
+                if name.ends_with('!') {
+                    handle_prompt_save_force(session, name);
+                } else {
+                    handle_prompt_save(session, name);
+                }
+            } else if let Some(name) = sub.strip_prefix("delete ") {
+                handle_prompt_delete(session, name);
+            } else if sub.starts_with("load ") {
+                // Already handled in read_user_input
+            } else {
+                let t = ui::theme::active();
+                println!(
+                    "{} usage: /prompt save <name> | /prompt load <name> | /prompt list | /prompt delete <name>",
+                    ui::theme::paint_warning(&t, "\u{258C}")
+                );
+            }
+            return false;
+        }
         _ => {}
     }
 
     // Async commands (require .await)
     match name {
+        "/compare" => {
+            handle_compare(session, client, args).await;
+            false
+        }
         "/search" => {
             handle_search(client, session, cfg, args).await;
             false
@@ -673,6 +745,7 @@ fn handle_llm_response(
 pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> Result<()> {
     reset_ctrlc_count();
     crate::REPL_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::commands::init_plugin_manager();
     let mut session = initialize_session(client, cfg)?;
     let t = ui::theme::active();
 
@@ -838,11 +911,13 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             Err(e) => {
                 let rail = ui::theme::paint_rail_empty(&t);
                 let err_label = ui::theme::paint_error_label(&t, "\u{2717}");
+                let provider_tag = ui::theme::paint_dim(&t, &client.provider_label());
                 let err_msg = ui::theme::paint(&t, "error", &e.to_string(), false);
                 let timer = ui::theme::paint_dim(&t, &format!("\u{23f1} {:.1}s", elapsed.as_secs_f64()));
                 println!("{rail}");
-                println!("{rail} {err_label} {err_msg}");
-                println!("{rail} {timer}");
+                println!("{rail} {err_label} {provider_tag}");
+                println!("{rail}   {err_msg}");
+                println!("{rail}   {timer}");
                 println!("{rail}");
             }
         }
@@ -907,20 +982,88 @@ fn display_code_files(session: &mut ChatSession, cleaned: &str, t: &crate::ui::t
     }
 }
 
+/// Skips one ANSI escape sequence starting at the current position of the iterator.
+/// Handles CSI (`\x1b[...`), OSC (`\x1b]...`), and two-byte sequences.
+fn skip_ansi(chars: &mut std::str::Chars<'_>) {
+    match chars.next() {
+        None => {}
+        Some('[') => {
+            for c in chars.by_ref() {
+                if ('\x40'..='\x7E').contains(&c) {
+                    break;
+                }
+            }
+        }
+        Some(']') => {
+            for c in chars.by_ref() {
+                if c == '\x1b' {
+                    let _ = chars.next();
+                    break;
+                }
+                if c == '\x07' {
+                    break;
+                }
+            }
+        }
+        Some('P') | Some('X') | Some('^') | Some('_') => {
+            for c in chars.by_ref() {
+                if c == '\x1b' {
+                    let _ = chars.next();
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Skips one ANSI escape sequence in a `CharIndices` iterator.
+fn skip_ansi_indices(chars: &mut std::str::CharIndices<'_>) {
+    match chars.next() {
+        None => {}
+        Some((_, '[')) => {
+            for (_, c) in chars.by_ref() {
+                if ('\x40'..='\x7E').contains(&c) {
+                    break;
+                }
+            }
+        }
+        Some((_, ']')) => {
+            for (_, c) in chars.by_ref() {
+                if c == '\x1b' {
+                    let _ = chars.next();
+                    break;
+                }
+                if c == '\x07' {
+                    break;
+                }
+            }
+        }
+        Some((_, 'P')) | Some((_, 'X')) | Some((_, '^')) | Some((_, '_')) => {
+            for (_, c) in chars.by_ref() {
+                if c == '\x1b' {
+                    let _ = chars.next();
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Returns the visible width of text, excluding ANSI escape codes.
 fn visible_width(text: &str) -> usize {
     let mut width = 0;
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            chars.find(|&n| n == 'm');
+            skip_ansi(&mut chars);
         } else {
             width += 1;
         }
     }
     width
 }
-
 /// Wraps text to a given max width at word boundaries, aware of ANSI escape codes.
 /// Strips ANSI sequences when measuring width but preserves them in output.
 fn word_wrap(text: &str, max_width: usize) -> String {
@@ -937,10 +1080,10 @@ fn word_wrap(text: &str, max_width: usize) -> String {
                 // Find split point at max_width visible characters
                 let mut vis = 0;
                 let mut split_pos = 0;
-                let mut chars = remaining.char_indices();
-                while let Some((idx, c)) = chars.next() {
+                let mut c_iter = remaining.char_indices();
+                while let Some((idx, c)) = c_iter.next() {
                     if c == '\x1b' {
-                        chars.find(|&(_, n)| n == 'm');
+                        skip_ansi_indices(&mut c_iter);
                         continue;
                     }
                     vis += 1;
@@ -1179,12 +1322,204 @@ mod tests {
         let reset = "\x1b[0m";
         let long = format!("{}hello world this is a very long line that should wrap at some point because it exceeds the max width threshold{}", bold, reset);
         let wrapped = word_wrap(&long, 30);
-        // The ANSI codes should appear in the output somewhere
         assert!(wrapped.contains(bold));
         assert!(wrapped.contains(reset));
-        // Each line should have content
         for line in wrapped.lines() {
             assert!(!line.is_empty(), "no empty lines in wrapped output");
+        }
+    }
+
+    #[test]
+    fn visible_width_plain_text() {
+        assert_eq!(visible_width("hello"), 5);
+        assert_eq!(visible_width(""), 0);
+        assert_eq!(visible_width("  "), 2);
+    }
+
+    #[test]
+    fn visible_width_ansi_sequences_ignored() {
+        assert_eq!(visible_width("\x1b[31mhello\x1b[0m"), 5);
+        assert_eq!(visible_width("\x1b[38;5;200mcolored\x1b[0m"), 7);
+        assert_eq!(visible_width("\x1b[48;2;255;0;0mbg\x1b[0m"), 2);
+    }
+
+    #[test]
+    fn visible_width_multiple_ansi() {
+        let input = "\x1b[1m\x1b[31mbold red\x1b[0m \x1b[32mgreen\x1b[0m".to_string();
+        assert_eq!(visible_width(&input), 14);
+    }
+
+    #[test]
+    fn visible_width_osc_sequences() {
+        // OSC sequence (e.g., hyperlink): \x1b]8;;https://example.com\x1b\\
+        let input = "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\";
+        assert_eq!(visible_width(input), 4);
+    }
+
+    #[test]
+    fn skip_ansi_csi_sequence() {
+        let mut chars = "\x1b[31ma".chars();
+        assert_eq!(chars.next(), Some('\x1b'));
+        skip_ansi(&mut chars);
+        assert_eq!(chars.next(), Some('a'));
+        assert_eq!(chars.next(), None);
+    }
+
+    #[test]
+    fn skip_ansi_csi_with_params() {
+        let mut chars = "\x1b[38;5;200mx".chars();
+        assert_eq!(chars.next(), Some('\x1b'));
+        skip_ansi(&mut chars);
+        assert_eq!(chars.next(), Some('x'));
+    }
+
+    #[test]
+    fn skip_ansi_osc_sequence() {
+        let mut chars = "\x1b]8;;url\x1b\\y".chars();
+        assert_eq!(chars.next(), Some('\x1b'));
+        skip_ansi(&mut chars);
+        assert_eq!(chars.next(), Some('y'));
+    }
+
+    #[test]
+    fn skip_ansi_no_ansi_at_position() {
+        // When positioned at a regular character (not after \x1b), skip is a no-op
+        let mut chars = "abc".chars();
+        assert_eq!(chars.next(), Some('a'));
+        skip_ansi(&mut chars);
+        // skip_ansi consumed 'b' (went to _ => {}), so next is 'c'
+        assert_eq!(chars.next(), Some('c'));
+        assert_eq!(chars.next(), None);
+    }
+
+    #[test]
+    fn word_wrap_preserves_ansi_through_wrapping() {
+        let red = "\x1b[31m";
+        let reset = "\x1b[0m";
+        let long = format!(
+            "{}A long line that absolutely must wrap at the specified width{}",
+            red, reset
+        );
+        let wrapped = word_wrap(&long, 20);
+        assert!(wrapped.contains(red));
+        assert!(wrapped.contains(reset));
+        for line in wrapped.lines() {
+            assert!(
+                visible_width(line) <= 25,
+                "no line should exceed max_width significantly"
+            );
+        }
+    }
+
+    #[test]
+    fn word_wrap_empty_and_short() {
+        assert_eq!(word_wrap("", 80), "");
+        assert_eq!(word_wrap("short", 80), "short");
+    }
+
+    #[test]
+    fn word_wrap_exact_boundary() {
+        let input = "1234567890";
+        assert_eq!(word_wrap(input, 10), input);
+    }
+
+    #[test]
+    fn word_wrap_handles_newlines() {
+        let input = "line one\nline two";
+        let wrapped = word_wrap(input, 80);
+        assert_eq!(wrapped.lines().count(), 2);
+    }
+
+    #[test]
+    fn visible_width_empty_string() {
+        assert_eq!(visible_width(""), 0);
+    }
+
+    #[test]
+    fn visible_width_only_ansi() {
+        assert_eq!(visible_width("\x1b[31m\x1b[0m"), 0);
+        assert_eq!(visible_width("\x1b[1m\x1b[32m\x1b[44m"), 0);
+    }
+
+    #[test]
+    fn visible_width_newlines_and_tabs() {
+        assert_eq!(visible_width("hello\nworld"), 11);
+        assert_eq!(visible_width("\tindented"), 9);
+    }
+
+    #[test]
+    fn word_wrap_handles_emoji_and_ansi() {
+        let input = "\x1b[32m✅ Test with emoji 🎉 and ANSI\x1b[0m";
+        let wrapped = word_wrap(input, 40);
+        assert!(wrapped.contains("✅"));
+        assert!(wrapped.contains("🎉"));
+        assert!(wrapped.contains("\x1b[32m"));
+        assert!(wrapped.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn fuzz_visible_width_random_ansi() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for _ in 0..500 {
+            let mut input = String::new();
+            for _ in 0..rng.gen_range(1..30) {
+                match rng.gen_range(0..5) {
+                    0 => input.push(char::from(rng.gen_range(0x20..0x7E))),
+                    1 => input.push_str(&format!("\x1b[{}m", rng.gen_range(0..108))),
+                    2 => input.push_str(&format!("\x1b[{};{}m", rng.gen_range(0..50), rng.gen_range(0..10))),
+                    3 => input.push_str("\x1b]8;;https://example.com\x1b\\"),
+                    4 => input.push(' '),
+                    _ => {}
+                }
+            }
+            let width = visible_width(&input);
+            assert!(width <= input.len() || input.is_empty());
+        }
+    }
+
+    #[test]
+    fn fuzz_word_wrap_random() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for _ in 0..300 {
+            let mut input = String::new();
+            let word_count = rng.gen_range(1..20);
+            for i in 0..word_count {
+                if i > 0 {
+                    input.push(' ');
+                }
+                let word_len = rng.gen_range(1..15);
+                for _ in 0..word_len {
+                    input.push(char::from(rng.gen_range(0x61..0x7B)));
+                }
+            }
+            let max_width = rng.gen_range(5..40);
+            let wrapped = word_wrap(&input, max_width);
+            // All original characters should appear in the output
+            let wrapped_chars: String = wrapped.chars().filter(|c| !c.is_whitespace() && *c != '\n').collect();
+            let input_chars: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+            assert_eq!(wrapped_chars, input_chars, "character content changed after wrap");
+            // Verify no line exceeds max_width significantly
+            for line in wrapped.lines() {
+                let visible = visible_width(line);
+                assert!(visible <= max_width + 2, "line too wide: {} > {}", visible, max_width);
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_needs_continuation_random() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let brackets = ['{', '}', '(', ')', '[', ']', '\'', '"'];
+        for _ in 0..300 {
+            let mut input = String::new();
+            let len = rng.gen_range(1..20);
+            for _ in 0..len {
+                input.push(brackets[rng.gen_range(0..brackets.len())]);
+            }
+            let _ = needs_continuation(&input);
         }
     }
 }

@@ -184,28 +184,41 @@ fn urlencoding_encode(s: &str) -> String {
 fn parse_ddg_lite_html(html: &str) -> Vec<SearchResult> {
     let document = Html::parse_document(html);
 
-    static RESULT_ROW: std::sync::LazyLock<Selector> =
-        std::sync::LazyLock::new(|| Selector::parse("tr.result").expect("invalid selector"));
-    static RESULT_LINK: std::sync::LazyLock<Selector> =
-        std::sync::LazyLock::new(|| Selector::parse("a[rel='nofollow']").expect("invalid selector"));
-    static SNIPPET_CELL: std::sync::LazyLock<Selector> =
-        std::sync::LazyLock::new(|| Selector::parse("td.result-snippet").expect("invalid selector"));
+    static RESULT_ROW: std::sync::LazyLock<Option<Selector>> =
+        std::sync::LazyLock::new(|| Selector::parse("tr.result").ok());
+    static RESULT_LINK: std::sync::LazyLock<Option<Selector>> =
+        std::sync::LazyLock::new(|| Selector::parse("a[rel='nofollow']").ok());
+    static SNIPPET_CELL: std::sync::LazyLock<Option<Selector>> =
+        std::sync::LazyLock::new(|| Selector::parse("td.result-snippet").ok());
+
+    let row_sel = match RESULT_ROW.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let link_sel = match RESULT_LINK.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let snippet_sel = match SNIPPET_CELL.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
 
     let mut results = Vec::new();
-    for row in document.select(&RESULT_ROW).take(crate::constants::SEARCH_MAX_RESULTS) {
+    for row in document.select(row_sel).take(crate::constants::SEARCH_MAX_RESULTS) {
         let title = row
-            .select(&RESULT_LINK)
+            .select(link_sel)
             .next()
             .map(|el| el.text().collect::<String>().trim().to_string())
             .unwrap_or_default();
         let url = row
-            .select(&RESULT_LINK)
+            .select(link_sel)
             .next()
             .and_then(|el| el.value().attr("href"))
             .unwrap_or("")
             .to_string();
         let snippet = row
-            .select(&SNIPPET_CELL)
+            .select(snippet_sel)
             .next()
             .map(|el| el.text().collect::<String>().trim().to_string())
             .unwrap_or_default();

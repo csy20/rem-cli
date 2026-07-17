@@ -3,10 +3,13 @@
 //! in the interactive chat session. The [`CommandInfo`] table provides
 //! O(1) name → handler lookup, replacing the previous if-else chain.
 
+pub mod compare;
 pub mod files;
 pub mod git;
 pub mod goal;
 pub mod help;
+pub mod plugin;
+pub mod prompt;
 pub mod repl;
 pub mod review;
 pub mod runner;
@@ -530,8 +533,8 @@ pub(crate) fn registry() -> CommandRegistry {
         (
             "/session",
             CommandInfo {
-                description: "Export or import a session",
-                usage: "/session export <path> | /session export-md <path> | /session import <path>",
+                description: "Manage sessions: export, import, list, analytics",
+                usage: "/session export <path> | /session list | /session analytics [path] | /session import <path>",
                 long_description: "",
             category: CommandCategory::Session,
             },
@@ -645,6 +648,15 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/plugin",
+            CommandInfo {
+                description: "List and run plugins",
+                usage: "/plugin list | /plugin <name> [args]",
+                long_description: "Extend rem-cli with custom plugin commands.\n  /plugin list        — list all registered plugins\n  /plugin <name>      — run a plugin (with optional args)\n  /plugin help        — show plugin help",
+            category: CommandCategory::System,
+            },
+        ),
+        (
             "/pull",
             CommandInfo {
                 description: "Pull a model from Ollama",
@@ -689,15 +701,47 @@ pub(crate) fn registry() -> CommandRegistry {
             category: CommandCategory::Session,
             },
         ),
+        (
+            "/prompt",
+            CommandInfo {
+                description: "Save, load, list, or delete prompt templates",
+                usage: "/prompt save <name> | /prompt load <name> | /prompt list | /prompt delete <name>",
+                long_description: "Save the current user input as a reusable prompt template.\nTemplates support {{variable}} placeholders for substitution.\n\nSubcommands:\n  save <name>    — save last input as template\n  save <name>!   — overwrite existing template\n  load <name>    — load and insert a template (prompts for variables)\n  list           — show all saved templates\n  delete <name>  — remove a template\n\nTemplates are stored in .rem/prompts/<name>.md",
+            category: CommandCategory::Session,
+            },
+        ),
+        (
+            "/compare",
+            CommandInfo {
+                description: "Compare responses across multiple models",
+                usage: "/compare <provider1/model1> <provider2/model2> ...",
+                long_description: "Reruns the last user message against one or more model/provider combinations.\nEach model receives the same prompt and system context, and the results are\ndisplayed side by side for comparison.\n\nExamples:\n  /compare anthropic/claude-sonnet-4-20250514 openai/gpt-4o\n  /compare deepseek-chat gemini/gemini-2.0-flash",
+            category: CommandCategory::Model,
+            },
+        ),
+        (
+            "/git",
+            CommandInfo {
+                description: "Git workflow commands: status, diff, log, commit",
+                usage: "/git status | /git diff [file] | /git log [n]",
+                long_description: "Quick git operations without leaving the REPL:\n  /git status    — show working tree status\n  /git diff      — show unstaged diff (optionally for a specific file)\n  /git log [n]   — show last N commits (default 5)",
+            category: CommandCategory::System,
+            },
+        ),
     ])
 }
 
 pub(crate) use crate::pager::handle_page;
 pub(crate) use crate::vision::handle_vision;
+pub(crate) use compare::handle_compare;
 pub(crate) use files::{auto_write_files, handle_copy, handle_undo, handle_write, print_last_files, prompt_for_path};
-pub(crate) use git::handle_commit;
+pub(crate) use git::{handle_commit, handle_git_diff, handle_git_log, handle_git_status};
 pub(crate) use goal::handle_goal;
 pub(crate) use help::{print_chat_help, print_command_help};
+pub(crate) use plugin::{handle_plugin, init_plugin_manager};
+pub(crate) use prompt::{
+    handle_prompt_delete, handle_prompt_list, handle_prompt_load, handle_prompt_save, handle_prompt_save_force,
+};
 pub(crate) use repl::{
     handle_clear, handle_list_models, handle_mode, handle_model, handle_ping, handle_plan, handle_provider,
     handle_pull_model, handle_reasoning, handle_reset, handle_status, handle_theme, handle_why,
@@ -707,7 +751,7 @@ pub(crate) use session::{
     handle_compact, handle_compact_dry_run, handle_compact_undo, handle_config, handle_config_set, handle_context,
     handle_dir, handle_edit, handle_export_session, handle_export_session_md, handle_import_session, handle_init,
     handle_list_files, handle_list_sessions, handle_memory, handle_memory_set, handle_reload, handle_resume_session,
-    handle_save_session, handle_summary, handle_tokens,
+    handle_save_session, handle_session_analytics, handle_summary, handle_tokens,
 };
 pub(crate) use tools::{
     handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_test,

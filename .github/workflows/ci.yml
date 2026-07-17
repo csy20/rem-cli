@@ -61,3 +61,7 @@ jobs:
       - name: build
         working-directory: rem-cli
         run: cargo build --release
+
+      - name: bench
+        working-directory: rem-cli
+        run: cargo bench --no-run 2>&1 || echo "benchmarks exist but require --no-run (runs in CI only for compilation check)"

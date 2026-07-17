@@ -73,3 +73,21 @@ impl ProviderBackend for GitHubBackend {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ProviderKind;
+
+    #[test]
+    fn github_backend_can_be_created() {
+        let _backend = GitHubBackend;
+    }
+
+    #[test]
+    fn github_provider_kind_is_recognized() {
+        let kind = ProviderKind::from_str("github");
+        assert_eq!(kind.as_str(), "github");
+        assert!(matches!(kind, ProviderKind::GitHub));
+    }
+}

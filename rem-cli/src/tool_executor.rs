@@ -197,11 +197,9 @@ async fn execute_web_search(tool_call: &ToolCall) -> ToolCallResult {
         if cfg.search_provider == "ddg" {
             None
         } else {
-            provider_from_config(
-                &cfg.search_provider,
-                &cfg.search_api_key.unwrap_or_default(),
-                &cfg.search_cse_id.unwrap_or_default(),
-            )
+            let api_key = cfg.search_api_key.clone().unwrap_or_default();
+            let cse_id = cfg.search_cse_id.clone().unwrap_or_default();
+            provider_from_config(&cfg.search_provider, &api_key, &cse_id)
         }
     });
     match perform_web_search(&client, &query, search_provider.as_ref()).await {
@@ -238,10 +236,9 @@ fn execute_list_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> To
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                content.push_str(&format!("{}/\n", name));
-            } else {
-                content.push_str(&format!("{}\n", name));
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => content.push_str(&format!("{}/\n", name)),
+                _ => content.push_str(&format!("{}\n", name)),
             }
         }
     } else {
@@ -564,8 +561,7 @@ pub(crate) async fn run_tool_loop(
                         let pd = project_dir.to_path_buf();
                         let c = call.clone();
                         parallel_handles.push(tokio::spawn(async move {
-                            let mut noop = NoopUserInteraction;
-                            execute_tool_call(&c, &pd, &mut noop, &tw).await
+                            execute_tool_call(&c, &pd, &mut crate::tool_executor::NoopUserInteraction, &tw).await
                         }));
                     }
                 }

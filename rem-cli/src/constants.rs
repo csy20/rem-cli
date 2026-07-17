@@ -220,3 +220,100 @@ RULES — follow strictly:
 
 8. End with: "Should I proceed with this plan? Type /mode to switch to CODE when ready."
 "##;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn response_byte_limit_is_sane() {
+        const _: () = assert!(MAX_RESPONSE_BYTES >= 1024 * 1024);
+        const _: () = assert!(MAX_RESPONSE_BYTES <= 100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn stream_chunk_timeout_is_reasonable() {
+        assert!(STREAM_CHUNK_TIMEOUT >= Duration::from_secs(10));
+        assert!(STREAM_CHUNK_TIMEOUT <= Duration::from_secs(300));
+    }
+
+    #[test]
+    fn retry_settings_are_reasonable() {
+        const _: () = assert!(LLM_RETRY_MAX_ATTEMPTS >= 1);
+        const _: () = assert!(LLM_RETRY_MAX_ATTEMPTS <= 10);
+        const _: () = assert!(LLM_RETRY_BASE_DELAY_MS >= 100);
+        const _: () = assert!(LLM_RETRY_BASE_DELAY_MS <= 5000);
+    }
+
+    #[test]
+    fn temperature_settings_are_in_range() {
+        assert!((0.0..=2.0).contains(&DEFAULT_TEMPERATURE));
+        assert!((0.0..=2.0).contains(&JSON_TEMPERATURE));
+        const _: () = assert!(JSON_TEMPERATURE <= DEFAULT_TEMPERATURE);
+    }
+
+    #[test]
+    fn max_tokens_are_positive() {
+        const _: () = assert!(DEFAULT_MAX_TOKENS > 0);
+        const _: () = assert!(JSON_MAX_TOKENS > 0);
+        const _: () = assert!(JSON_MAX_TOKENS <= DEFAULT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn index_settings_are_reasonable() {
+        const _: () = assert!(INDEX_MAX_FILE_BYTES >= 1024);
+        const _: () = assert!(INDEX_TARGET_CHUNK_BYTES >= 256);
+        const _: () = assert!(INDEX_MAX_DEPTH >= 1 && INDEX_MAX_DEPTH <= 32);
+    }
+
+    #[test]
+    fn history_and_auto_save_settings() {
+        const _: () = assert!(MAX_HISTORY_TURNS >= 1);
+        const _: () = assert!(AUTO_SAVE_INTERVAL >= 1);
+        const _: () = assert!(MAX_HISTORY_ENTRIES >= 100);
+    }
+
+    #[test]
+    fn tool_execution_settings() {
+        const _: () = assert!(MAX_TOOL_ROUNDS >= 1 && MAX_TOOL_ROUNDS <= 50);
+        const _: () = assert!(TOOL_COMMAND_STDOUT_MAX >= 256);
+        const _: () = assert!(TOOL_COMMAND_STDERR_MAX >= 256);
+        const _: () = assert!(TOOL_RESULT_MAX_CHARS >= 256);
+        assert!(TOOL_COMMAND_TIMEOUT >= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn goal_loop_settings() {
+        const _: () = assert!(GOAL_MAX_ITERATIONS >= 1);
+        assert!(GOAL_ITERATION_TIMEOUT >= Duration::from_secs(10));
+        const _: () = assert!(GOAL_TOOL_OUTPUT_MAX_CHARS >= 256);
+    }
+
+    #[test]
+    fn pipe_input_max_is_reasonable() {
+        const _: () = assert!(PIPE_INPUT_MAX_BYTES >= 4096);
+        const _: () = assert!(PIPE_INPUT_MAX_BYTES <= 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn vision_image_limit_is_reasonable() {
+        const _: () = assert!(MAX_VISION_IMAGE_BYTES >= 1024 * 1024);
+        const _: () = assert!(MAX_VISION_IMAGE_BYTES <= 500 * 1024 * 1024);
+    }
+
+    #[test]
+    fn system_prompts_are_non_empty() {
+        assert!(!DEFAULT_SYSTEM_PROMPT.is_empty());
+        assert!(!CHAT_SYSTEM_PROMPT_CONVERSATIONAL.is_empty());
+        assert!(!CHAT_SYSTEM_PROMPT_CODE.is_empty());
+        assert!(!CHAT_SYSTEM_PROMPT_PLAN.is_empty());
+    }
+
+    #[test]
+    fn system_prompts_have_mode_markers() {
+        assert!(CHAT_SYSTEM_PROMPT_CONVERSATIONAL.contains("[MODE: CHAT]"));
+        assert!(CHAT_SYSTEM_PROMPT_CODE.contains("[MODE: CODE]"));
+        assert!(CHAT_SYSTEM_PROMPT_PLAN.contains("[MODE: PLAN]"));
+    }
+}

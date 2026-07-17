@@ -35,9 +35,12 @@ Now with 30+ slash commands, persistent project memory, pipe mode, and autonomou
 | `/session export <path>` | Export session as gzipped JSON |
 | `/session export-md <path>` | Export session as Markdown |
 | `/session import <path>` | Import a previously exported session |
+| `/session list` | List saved sessions with metadata |
+| `/session analytics [path]` | Export session analytics as JSON |
 | `/summary [save-path]` | LLM-generated session summary |
 | `/compact` | Summarize history to free context window |
 | `/compact-dry-run` | Preview compaction without calling LLM |
+| `/prompt save/load/list/delete` | Reusable prompt templates |
 | `/page` | Re-view last output through system pager |
 | `exit` / `quit` | Exit REM |
 
@@ -46,6 +49,7 @@ Now with 30+ slash commands, persistent project memory, pipe mode, and autonomou
 |---|---|
 | `/model <name>` | Show or switch the active model |
 | `/provider <name>` | Show or switch LLM provider |
+| `/compare <m1> <m2> ...` | Compare responses across models |
 | `/reasoning [on\|off\|effort]` | Configure reasoning/thinking mode |
 | `/models` | List available models from provider |
 | `/pull <model>` | Pull a model (Ollama only) |
@@ -62,7 +66,11 @@ Now with 30+ slash commands, persistent project memory, pipe mode, and autonomou
 | `/copy [N]` | Copy last N files to clipboard |
 | `/goal <condition>` | Autonomous loop until condition met |
 | `/vision <path>` | Analyze an image with the LLM |
+| `/git status` | Show working tree status |
+| `/git diff [file]` | Show unstaged diff |
+| `/git log [n]` | Show recent commits |
 | `/commit [message]` | Stage all and create a git commit |
+| `/plugin list` | List and run plugins |
 
 ### Project Context
 | Command | Description |

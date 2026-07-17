@@ -1270,6 +1270,7 @@ pub(crate) async fn handle_summary(client: &Provider, session: &mut ChatSession,
 }
 
 /// Lists saved session files in `.rem/` (`/session list`).
+/// Shows timestamps, duration, token counts, and turn counts from each session.
 pub(crate) fn handle_list_sessions(session: &ChatSession) {
     let t = ui::theme::active();
     let dir = session
@@ -1286,7 +1287,16 @@ pub(crate) fn handle_list_sessions(session: &ChatSession) {
         );
         return;
     }
-    let mut sessions: Vec<(String, u64)> = Vec::new();
+    #[derive(Default)]
+    struct SessionInfo {
+        name: String,
+        size: u64,
+        saved_at: Option<String>,
+        turn_count: Option<usize>,
+        total_tokens: Option<u64>,
+        duration_secs: Option<f64>,
+    }
+    let mut sessions: Vec<SessionInfo> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&rem_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1296,11 +1306,28 @@ pub(crate) fn handle_list_sessions(session: &ChatSession) {
                     .and_then(|s| s.to_str())
                     .is_some_and(|s| s.ends_with(".json"))
             {
-                if let Ok(meta) = entry.metadata() {
-                    let size = meta.len();
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    sessions.push((name, size));
+                let name = entry.file_name().to_string_lossy().to_string();
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let mut info = SessionInfo {
+                    name,
+                    size,
+                    ..Default::default()
+                };
+                if let Ok(raw) = std::fs::read(&path) {
+                    if raw.first() == Some(&0x1f) && raw.get(1) == Some(&0x8b) {
+                        let mut decoder = GzDecoder::new(&raw[..]);
+                        let mut out = String::new();
+                        if decoder.read_to_string(&mut out).is_ok() {
+                            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&out) {
+                                info.saved_at = data["saved_at"].as_str().map(String::from);
+                                info.turn_count = data["history"].as_array().map(|a| a.len());
+                                info.total_tokens = data["total_tokens"].as_u64();
+                                info.duration_secs = data["session_duration_secs"].as_f64();
+                            }
+                        }
+                    }
                 }
+                sessions.push(info);
             }
         }
     }
@@ -1312,19 +1339,95 @@ pub(crate) fn handle_list_sessions(session: &ChatSession) {
         );
         return;
     }
-    sessions.sort_by_key(|b| std::cmp::Reverse(b.1));
+    sessions.sort_by(|a, b| b.size.cmp(&a.size));
     println!("{}", ui::theme::paint_rail_header(&t, "SAVED SESSIONS"));
-    for (name, size) in &sessions {
-        let icon = file_icon(name);
-        println!(
-            "{} {} {} {}",
+    for info in &sessions {
+        let icon = file_icon(&info.name);
+        print!(
+            "{} {} {}",
             ui::theme::paint(&t, "accent", "\u{258C}", true),
             icon,
-            ui::theme::paint_bright(&t, name),
-            ui::theme::paint_dim(&t, &format!("({})", human_size(*size)))
+            ui::theme::paint_bright(&t, &info.name),
         );
+        if let Some(turns) = info.turn_count {
+            print!(" {}", ui::theme::paint_dim(&t, &format!("{} turns", turns)));
+        }
+        if let Some(tokens) = info.total_tokens {
+            print!(" {}", ui::theme::paint_dim(&t, &format!("{} tok", tokens)));
+        }
+        if let Some(dur) = info.duration_secs {
+            if dur > 60.0 {
+                print!(" {}", ui::theme::paint_dim(&t, &format!("{:.0}m", dur / 60.0)));
+            } else {
+                print!(" {}", ui::theme::paint_dim(&t, &format!("{:.0}s", dur)));
+            }
+        }
+        if let Some(ref ts) = info.saved_at {
+            print!(" {}", ui::theme::paint_dim(&t, &format!("@{}", ts)));
+        }
+        println!(" {}", ui::theme::paint_dim(&t, &format!("({})", human_size(info.size))));
     }
     println!("{}", ui::theme::paint_rail_empty(&t));
+}
+
+/// Exports session analytics as JSON (`/session analytics [path]`).
+/// If no path is given, prints to stdout.
+pub(crate) fn handle_session_analytics(session: &ChatSession, client: &Provider, path: Option<&str>) {
+    let t = ui::theme::active();
+    let analytics = serde_json::json!({
+        "provider": client.kind.as_str(),
+        "model": session.model,
+        "turn_count": session.history_mgr.history.len(),
+        "total_tokens": session.total_tokens,
+        "duration_secs": session.session_start.elapsed().as_secs_f64(),
+        "mode": session.mode.label(),
+        "tokens_per_turn": if session.history_mgr.history.is_empty() {
+            0.0
+        } else {
+            session.total_tokens as f64 / session.history_mgr.history.len() as f64
+        },
+    });
+    let json = match serde_json::to_string_pretty(&analytics) {
+        Ok(j) => j,
+        Err(e) => {
+            println!(
+                "{} serialization failed: {}",
+                ui::theme::paint_error_label(&t, "\u{2717}"),
+                e
+            );
+            return;
+        }
+    };
+    match path {
+        Some(p) => {
+            let base = session
+                .ctx
+                .project_dir
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let out_path = match crate::types::resolve_safe_path(base, p) {
+                Some(p) => p,
+                None => {
+                    println!(
+                        "  {} path traversal blocked",
+                        ui::theme::paint_error_label(&t, "\u{2717}")
+                    );
+                    return;
+                }
+            };
+            match std::fs::write(&out_path, &json) {
+                Ok(()) => println!(
+                    "{} analytics exported to {}",
+                    ui::theme::paint_success_label(&t, "\u{2713}"),
+                    out_path.display()
+                ),
+                Err(e) => println!("{} write failed: {}", ui::theme::paint_error_label(&t, "\u{2717}"), e),
+            }
+        }
+        None => {
+            println!("{}", analytics);
+        }
+    }
 }
 
 /// Exports the current session as human-readable Markdown (`/session export-md <path>`).
@@ -1529,8 +1632,94 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
 
-        // No backup exists — should print message but not panic
         handle_compact_undo(&mut session);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_resume_session_no_file_does_not_panic() {
+        let tmp = std::env::temp_dir().join(format!("rem-test-resume-no-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
+
+        // No session file exists — should not panic
+        handle_resume_session(&mut session);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_resume_session_restores_history() {
+        let tmp = std::env::temp_dir().join(format!("rem-test-resume-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let rem_dir = tmp.join(".rem");
+        let _ = std::fs::create_dir_all(&rem_dir);
+
+        // Create a session file with history
+        let session_data = serde_json::json!({
+            "history": [
+                {"user": "hello", "assistant": "hi there"},
+                {"user": "write code", "assistant": "sure!"}
+            ],
+            "mode": "CHAT"
+        });
+        use std::io::Write;
+        let json = serde_json::to_string(&session_data).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(json.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        std::fs::write(rem_dir.join("session.json.gz"), compressed).unwrap();
+
+        let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
+        assert_eq!(session.history_mgr.history.len(), 0);
+
+        handle_resume_session(&mut session);
+
+        assert_eq!(session.history_mgr.history.len(), 2, "should restore 2 turns");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_resume_session_with_malformed_file_does_not_panic() {
+        let tmp = std::env::temp_dir().join(format!("rem-test-resume-bad-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let rem_dir = tmp.join(".rem");
+        let _ = std::fs::create_dir_all(&rem_dir);
+
+        std::fs::write(rem_dir.join("session.json.gz"), "not valid gzip data").unwrap();
+
+        let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
+        handle_resume_session(&mut session);
+
+        assert_eq!(session.history_mgr.history.len(), 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn handle_resume_session_restores_mode() {
+        let tmp = std::env::temp_dir().join(format!("rem-test-resume-mode-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let rem_dir = tmp.join(".rem");
+        let _ = std::fs::create_dir_all(&rem_dir);
+
+        let session_data = serde_json::json!({
+            "history": [{"user": "hi", "assistant": "hello"}],
+            "mode": "CODE"
+        });
+        use std::io::Write;
+        let json = serde_json::to_string(&session_data).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(json.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        std::fs::write(rem_dir.join("session.json.gz"), compressed).unwrap();
+
+        let mut session = crate::chat::ChatSession::new("test", Some(tmp.clone())).unwrap();
+        assert_eq!(session.mode, crate::chat::RunMode::Chat);
+
+        handle_resume_session(&mut session);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

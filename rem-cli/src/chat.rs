@@ -300,6 +300,7 @@ pub(crate) struct ChatSession {
     pub(crate) history_mgr: HistoryManager,
     pub(crate) code_out: CodeOutput,
     pub(crate) ctx: ProjectContext,
+    pub(crate) model: String,
     pub(crate) last_search: Vec<SearchResult>,
     pub(crate) last_intent: TaskIntent,
     pub(crate) last_user_input: String,
@@ -314,11 +315,12 @@ pub(crate) struct ChatSession {
 
 impl ChatSession {
     /// Creates a new chat session with the given model and optional workspace.
-    pub(crate) fn new(_model: &str, workspace: Option<PathBuf>) -> Result<Self> {
+    pub(crate) fn new(model: &str, workspace: Option<PathBuf>) -> Result<Self> {
         Ok(Self {
             history_mgr: HistoryManager::new()?,
             code_out: CodeOutput::new(),
             ctx: ProjectContext::new(workspace),
+            model: model.to_string(),
             last_search: Vec::new(),
             last_intent: TaskIntent::FastAnswer,
             last_user_input: String::new(),
@@ -387,6 +389,7 @@ impl ChatSession {
             .collect();
         serde_json::json!({
             "history": self.history_mgr.history.iter().map(|(u, a)| serde_json::json!({"user": u, "assistant": a})).collect::<Vec<_>>(),
+            "model": self.model,
             "mode": self.mode.label(),
             "workspace": self.ctx.project_dir.as_ref().map(|d| d.display().to_string()),
             "saved_at": crate::format_timestamp(),

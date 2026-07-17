@@ -171,6 +171,8 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     false
 }
 
+/// Heuristic to detect whether a line of text looks like a shell command
+/// rather than code or natural language.
 pub(crate) fn looks_like_shell_command(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or_default();
     matches!(
@@ -384,29 +386,24 @@ mod tests {
 
     #[test]
     fn normalize_cmd_strips_control_and_backslash() {
-        // control chars are stripped entirely (no space inserted)
         assert_eq!(normalize_cmd("rm\x00 -rf /"), "rm -rf /");
         assert_eq!(normalize_cmd("echo\u{0000}hello"), "echohello");
-        // regular whitespace normalization
         assert_eq!(normalize_cmd("  ls   -la  "), "ls -la");
         assert_eq!(normalize_cmd("rm   -rf  /"), "rm -rf /");
     }
 
     #[test]
     fn blocks_unicode_confusables_in_dangerous_commands() {
-        // Lowercase normalization catches mixed-case dangerous commands
         assert!(is_command_blocked("RM -RF /"), "uppercase RM should be blocked");
         assert!(is_command_blocked("Chmod 777 /"), "capitalized Chmod should be blocked");
     }
 
     #[test]
     fn blocks_zero_width_characters_in_patterns() {
-        // Zero-width space embedded in dangerous command (stripped by normalize_cmd)
         assert!(
             is_command_blocked("rm\u{200B} -rf /"),
             "zero-width space should not bypass"
         );
-        // Zero-width non-joiner
         assert!(
             is_command_blocked("rm\u{200C} -rf /"),
             "zero-width non-joiner should not bypass"
@@ -415,9 +412,7 @@ mod tests {
 
     #[test]
     fn blocks_mixed_script_attack_attempts() {
-        // Mix of Cyrillic 'е' and Latin letters in command
         assert!(is_command_blocked("rm -rf /"), "basic rm -rf / still blocked");
-        // Command starts with dangerous pattern even with unicode normalization
         assert!(is_command_blocked("chmod 777 /"), "chmod 777 / still blocked");
         assert!(is_command_blocked("dd if=/dev/zero of=/dev/sda"), "dd still blocked");
     }

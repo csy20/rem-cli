@@ -73,3 +73,21 @@ impl ProviderBackend for XAIBackend {
         .await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ProviderKind;
+
+    #[test]
+    fn xai_backend_can_be_created() {
+        let _backend = XAIBackend;
+    }
+
+    #[test]
+    fn xai_provider_kind_is_recognized() {
+        let kind = ProviderKind::from_str("xai");
+        assert_eq!(kind.as_str(), "xai");
+        assert!(matches!(kind, ProviderKind::XAI));
+    }
+}

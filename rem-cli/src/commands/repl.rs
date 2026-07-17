@@ -442,6 +442,12 @@ pub(crate) async fn handle_status(session: &crate::chat::ChatSession, client: &P
         ui::theme::paint_dim(&t, session.mode.label())
     );
     println!(
+        "{}   {:<16} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, "base url:"),
+        ui::theme::paint_dim(&t, &client.ctx.base_url)
+    );
+    println!(
         "{}   {:<16} {}K ctx",
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         ui::theme::paint_bright(&t, "model ctx:"),

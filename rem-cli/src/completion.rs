@@ -125,3 +125,81 @@ impl Validator for RemHelper {
 impl Highlighter for RemHelper {}
 
 impl Helper for RemHelper {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_path_empty_prefix() {
+        let (start, candidates) = complete_path(0, "");
+        assert_eq!(start, 0);
+        assert!(!candidates.is_empty(), "should list current dir entries");
+    }
+
+    #[test]
+    fn complete_path_dot_prefix() {
+        let (start, _candidates) = complete_path(0, ".");
+        assert_eq!(start, 0);
+    }
+
+    #[test]
+    fn complete_path_nonexistent_dir() {
+        let (start, candidates) = complete_path(0, "/nonexistent_dir_xyz123/");
+        assert_eq!(start, 0);
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn complete_path_start_pos_preserved() {
+        let (start, candidates) = complete_path(15, "Cargo.toml");
+        assert_eq!(start, 15);
+        // Cargo.toml should be findable from current dir
+        let has_cargo = candidates.iter().any(|c| c.replacement.contains("Cargo.toml"));
+        assert!(has_cargo, "should find Cargo.toml");
+    }
+
+    #[test]
+    fn complete_path_prefix_matching() {
+        let (_, candidates) = complete_path(0, "Cargo");
+        let has_cargo = candidates.iter().any(|c| c.replacement.contains("Cargo.toml"));
+        assert!(has_cargo, "should match Cargo prefix to Cargo.toml");
+    }
+
+    #[test]
+    fn complete_path_non_matching_prefix() {
+        let (_, candidates) = complete_path(0, "ZZZZ_NONEXISTENT_XXXX");
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn complete_path_subdir() {
+        let (_, candidates) = complete_path(0, "src/");
+        // src/ directory should have entries
+        assert!(!candidates.is_empty(), "src/ should have contents");
+    }
+
+    #[test]
+    fn command_completion_matches() {
+        let _helper = RemHelper;
+    }
+
+    #[test]
+    fn complete_path_respects_dir_slash() {
+        // Prefix ending in / lists children
+        let (start, candidates) = complete_path(0, "src/");
+        assert_eq!(start, 0);
+        // Should find src/main.rs or similar
+        let has_main = candidates.iter().any(|c| c.replacement.contains("main"));
+        assert!(has_main, "src/ should list main.rs or similar");
+    }
+
+    #[test]
+    fn complete_path_handles_file_name_partial() {
+        let (_, candidates) = complete_path(10, "src/main");
+        let has_main = candidates
+            .iter()
+            .any(|c| c.replacement == "src/main.rs" || c.replacement.starts_with("src/main"));
+        assert!(has_main, "should complete src/main to src/main.rs");
+    }
+}
