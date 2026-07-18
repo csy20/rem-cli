@@ -112,6 +112,8 @@ pub const REVIEW_DIFF_MAX_LINES: usize = 30;
 
 /// Max uncompressed bytes for session files beyond which auto-save warns.
 pub const MAX_SESSION_FILE_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+/// Max age for session files before auto-cleanup (30 days).
+pub const MAX_SESSION_AGE_DAYS: u64 = 30;
 
 // ── Config ───────────────────────────────────────────────────────────────────
 

@@ -11,6 +11,7 @@ use crate::intent::TaskIntent;
 use crate::provider::Provider;
 use crate::text_util::levenshtein_distance;
 use crate::ui;
+use std::io::IsTerminal;
 
 pub(crate) fn handle_theme(cfg: &mut AppConfig, tail: Option<&str>) {
     let t = ui::theme::active();
@@ -190,8 +191,29 @@ pub(crate) fn handle_plan(session: &mut ChatSession, cfg: &mut AppConfig) {
     println!("{rail}");
 }
 
+/// Prompts the user for confirmation before a destructive action.
+/// Returns true if the user confirms (y/yes), false otherwise.
+/// In non-interactive mode, auto-confirms.
+fn confirm_destructive(session: &mut ChatSession, action: &str) -> bool {
+    if !std::io::stdin().is_terminal() {
+        return true;
+    }
+    let t = ui::theme::active();
+    println!(
+        "{} {} {}",
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint_warning(&t, &format!("{action}?")),
+        ui::theme::paint_dim(&t, "[y/N]")
+    );
+    let input = session.readline("rem> ").unwrap_or_default().trim().to_lowercase();
+    input == "y" || input == "yes"
+}
+
 pub(crate) fn handle_clear(session: &mut ChatSession) {
     let t = ui::theme::active();
+    if !confirm_destructive(session, "Clear entire conversation history") {
+        return;
+    }
     session.history_mgr.clear_turns();
     session.last_search.clear();
     session.last_tokens = 0;
@@ -204,6 +226,9 @@ pub(crate) fn handle_clear(session: &mut ChatSession) {
 
 pub(crate) fn handle_reset(session: &mut ChatSession) {
     let t = ui::theme::active();
+    if !confirm_destructive(session, "Reset entire session") {
+        return;
+    }
     session.history_mgr.clear_turns();
     session.last_search.clear();
     session.last_tokens = 0;

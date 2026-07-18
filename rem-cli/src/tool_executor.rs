@@ -31,18 +31,18 @@ pub(crate) async fn execute_tool_call(
     tracked_writes: &Mutex<Vec<String>>,
 ) -> ToolCallResult {
     match tool_call.name.as_str() {
-        "read_file" => execute_read_file(tool_call, project_dir),
-        "write_file" => execute_write_file(tool_call, project_dir, tracked_writes),
-        "search_files" => execute_search_files(tool_call, project_dir),
+        "read_file" => execute_read_file(tool_call, project_dir).await,
+        "write_file" => execute_write_file(tool_call, project_dir, tracked_writes).await,
+        "search_files" => execute_search_files(tool_call, project_dir).await,
         "run_lint" => execute_tool_lint(tool_call, project_dir).await,
         "run_test" => execute_tool_test(tool_call, project_dir).await,
         "web_search" => execute_web_search(tool_call).await,
-        "list_files" => execute_list_files(tool_call, project_dir),
+        "list_files" => execute_list_files(tool_call, project_dir).await,
         "run_command" => execute_run_command(tool_call, project_dir, user).await,
-        "edit_file" => execute_edit_file(tool_call, project_dir, tracked_writes),
-        "git_status" => execute_git_command("status", None, project_dir, tool_call.id.as_str()),
-        "git_diff" => execute_git_diff(tool_call, project_dir),
-        "git_log" => execute_git_log(tool_call, project_dir),
+        "edit_file" => execute_edit_file(tool_call, project_dir, tracked_writes).await,
+        "git_status" => execute_git_command("status", None, project_dir, tool_call.id.as_str()).await,
+        "git_diff" => execute_git_diff(tool_call, project_dir).await,
+        "git_log" => execute_git_log(tool_call, project_dir).await,
         "ask_user" => execute_ask_user(tool_call, user).await,
 
         name => ToolCallResult {
@@ -59,7 +59,7 @@ fn extract_arg(tool_call: &ToolCall, key: &str) -> Option<String> {
     args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
-fn execute_read_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_read_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let path_str = match extract_arg(tool_call, "path") {
         Some(p) => p,
         None => return err_result(tool_call, "missing 'path' argument"),
@@ -68,7 +68,7 @@ fn execute_read_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> Too
         Some(p) => p,
         None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
     };
-    match std::fs::read_to_string(&path) {
+    match tokio::fs::read_to_string(&path).await {
         Ok(content) => ToolCallResult {
             call_id: tool_call.id.clone(),
             name: "read_file".into(),
@@ -79,7 +79,7 @@ fn execute_read_file(tool_call: &ToolCall, project_dir: &std::path::Path) -> Too
     }
 }
 
-fn execute_write_file(
+async fn execute_write_file(
     tool_call: &ToolCall,
     project_dir: &std::path::Path,
     tracked_writes: &Mutex<Vec<String>>,
@@ -97,9 +97,9 @@ fn execute_write_file(
         None => return err_result(tool_call, &format!("path traversal blocked: {}", path_str)),
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = tokio::fs::create_dir_all(parent).await;
     }
-    match std::fs::write(&path, content) {
+    match tokio::fs::write(&path, content).await {
         Ok(()) => {
             if let Ok(mut writes) = tracked_writes.lock() {
                 writes.push(path.to_string_lossy().to_string());
@@ -115,12 +115,21 @@ fn execute_write_file(
     }
 }
 
-fn execute_search_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_search_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let query = match extract_arg(tool_call, "query") {
         Some(q) => q,
         None => return err_result(tool_call, "missing 'query' argument"),
     };
-    let report = find_matches(project_dir, &query, &FindOptions::default());
+    let pd = project_dir.to_path_buf();
+    let report = tokio::task::spawn_blocking(move || find_matches(&pd, &query, &FindOptions::default()))
+        .await
+        .unwrap_or_else(|_| crate::find::FindReport {
+            matches: Vec::new(),
+            files_scanned: 0,
+            files_skipped: 0,
+            elapsed_ms: 0,
+            truncated: false,
+        });
     let mut content = format!(
         "Found {} matches in {} files:\n",
         report.matches.len(),
@@ -222,7 +231,7 @@ async fn execute_web_search(tool_call: &ToolCall) -> ToolCallResult {
     }
 }
 
-fn execute_list_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_list_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let path_str = extract_arg(tool_call, "path").unwrap_or_else(|| ".".to_string());
     let path = match resolve_path(project_dir, &path_str) {
         Some(p) => p,
@@ -230,16 +239,20 @@ fn execute_list_files(tool_call: &ToolCall, project_dir: &std::path::Path) -> To
     };
     let mut content = String::new();
     if path.is_dir() {
-        let entries = match std::fs::read_dir(&path) {
+        let mut entries = match tokio::fs::read_dir(&path).await {
             Ok(entries) => entries,
             Err(e) => return err_result(tool_call, &format!("cannot list '{}': {}", path.display(), e)),
         };
-        for entry in entries.flatten() {
+        let mut file_names = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let name = entry.file_name().to_string_lossy().to_string();
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => content.push_str(&format!("{}/\n", name)),
-                _ => content.push_str(&format!("{}\n", name)),
+            match entry.file_type().await {
+                Ok(ft) if ft.is_dir() => file_names.push(format!("{}/\n", name)),
+                _ => file_names.push(format!("{}\n", name)),
             }
+        }
+        for name in file_names {
+            content.push_str(&name);
         }
     } else {
         content = format!("Not a directory: {}", path.display());
@@ -326,7 +339,7 @@ async fn execute_run_command(
     }
 }
 
-fn execute_edit_file(
+async fn execute_edit_file(
     tool_call: &ToolCall,
     project_dir: &std::path::Path,
     tracked_writes: &Mutex<Vec<String>>,
@@ -347,7 +360,7 @@ fn execute_edit_file(
         Some(p) => p,
         None => return err_result(tool_call, &format!("path traversal blocked: {}", file_path)),
     };
-    let content = match std::fs::read_to_string(&path) {
+    let content = match tokio::fs::read_to_string(&path).await {
         Ok(c) => c,
         Err(e) => return err_result(tool_call, &format!("failed to read {}: {}", path.display(), e)),
     };
@@ -367,7 +380,7 @@ fn execute_edit_file(
         new_string,
         &content[pos + old_string.len()..]
     );
-    if let Err(e) = std::fs::write(&path, &new_content) {
+    if let Err(e) = tokio::fs::write(&path, &new_content).await {
         return err_result(tool_call, &format!("failed to write {}: {}", path.display(), e));
     }
     if let Ok(mut writes) = tracked_writes.lock() {
@@ -384,16 +397,17 @@ fn execute_edit_file(
     }
 }
 
-fn execute_git_command(
+async fn execute_git_command(
     name: &str,
     extra_args: Option<&[&str]>,
     project_dir: &std::path::Path,
     call_id: &str,
 ) -> ToolCallResult {
-    let output = std::process::Command::new("git")
+    let output = tokio::process::Command::new("git")
         .args(extra_args.unwrap_or(&[]))
         .current_dir(project_dir)
-        .output();
+        .output()
+        .await;
     match output {
         Ok(out) => {
             let mut content = String::new();
@@ -419,16 +433,16 @@ fn execute_git_command(
     }
 }
 
-fn execute_git_diff(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_git_diff(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let path = extract_arg(tool_call, "path");
     let mut args = vec!["diff"];
     if let Some(ref p) = path {
         args.push(p);
     }
-    execute_git_command("diff", Some(&args), project_dir, tool_call.id.as_str())
+    execute_git_command("diff", Some(&args), project_dir, tool_call.id.as_str()).await
 }
 
-fn execute_git_log(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
+async fn execute_git_log(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolCallResult {
     let max_count = tool_call
         .arguments
         .get("max_count")
@@ -441,6 +455,7 @@ fn execute_git_log(tool_call: &ToolCall, project_dir: &std::path::Path) -> ToolC
         project_dir,
         tool_call.id.as_str(),
     )
+    .await
 }
 
 async fn execute_ask_user(tool_call: &ToolCall, user: &mut dyn UserInteraction) -> ToolCallResult {

@@ -344,7 +344,7 @@ pub(crate) async fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
     );
 
     let refreshing = indexer::load_codebase_index(&dir).is_some();
-    let (mut chunks, file_mtimes) = indexer::generate_codebase_index(&dir)?;
+    let (chunks, file_mtimes) = indexer::generate_codebase_index(&dir)?;
     if chunks.is_empty() {
         println!(
             "{} {} no indexable files found (after skips)",
@@ -352,22 +352,6 @@ pub(crate) async fn run_index(args: IndexArgs, cfg: &AppConfig) -> Result<()> {
             theme::paint_warning(&t, "\u{26A0}")
         );
         return Ok(());
-    }
-
-    if args.embeddings {
-        println!(
-            "{} {} computing embeddings (nomic-embed-text via Ollama)...",
-            theme::paint(&t, "accent", "\u{258C}", true),
-            theme::paint_dim(&t, "\u{2699}")
-        );
-        indexer::compute_embeddings(&mut chunks, &cfg.ollama_url).await;
-        let embedded = chunks.iter().filter(|c| c.embedding.is_some()).count();
-        println!(
-            "{} {} {} chunks embedded",
-            theme::paint(&t, "accent", "\u{258C}", true),
-            theme::paint_success_label(&t, "\u{2713}"),
-            embedded
-        );
     }
 
     if args.dry_run {

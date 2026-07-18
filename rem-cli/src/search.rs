@@ -3,8 +3,7 @@
 //! otherwise falls back to DuckDuckGo HTML scraping.
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Instant;
 
 use crate::ui;
@@ -14,12 +13,83 @@ use scraper::{Html, Selector};
 
 /// Time-to-live for cached search results.
 const SEARCH_CACHE_TTL_SECS: u64 = 300;
+/// Maximum number of cached search results before evicting oldest entries.
+const SEARCH_CACHE_MAX_ENTRIES: usize = 256;
 
-type SearchCache = HashMap<String, (Instant, Vec<SearchResult>)>;
+/// Combined cache entry with insertion order for LRU-like eviction.
+/// Results are wrapped in Arc to avoid deep cloning on cache hits.
+struct CacheEntry {
+    results: Arc<Vec<SearchResult>>,
+    cached_at: Instant,
+}
 
 /// In-memory cache for web search results keyed by normalized query.
-/// Each entry stores the results and the time they were cached.
-static SEARCH_CACHE: LazyLock<Mutex<SearchCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Uses a single Mutex to avoid dual-lock contention and simplify eviction.
+static SEARCH_CACHE: LazyLock<Mutex<SearchCacheInner>> = LazyLock::new(|| {
+    Mutex::new(SearchCacheInner {
+        entries: HashMap::new(),
+        order: Vec::new(),
+    })
+});
+
+struct SearchCacheInner {
+    entries: HashMap<String, CacheEntry>,
+    order: Vec<String>,
+}
+
+impl SearchCacheInner {
+    fn get(&mut self, key: &str) -> Option<Vec<SearchResult>> {
+        // First check if expired and remove
+        let is_expired = self
+            .entries
+            .get(key)
+            .is_some_and(|e| e.cached_at.elapsed().as_secs() >= SEARCH_CACHE_TTL_SECS);
+        if is_expired {
+            self.entries.remove(key);
+            self.order.retain(|k| k != key);
+            return None;
+        }
+        // Return results from cache hit (cheap Arc clone)
+        if let Some(entry) = self.entries.get(key) {
+            self.order.retain(|k| k != key);
+            self.order.push(key.to_string());
+            return Some(Arc::clone(&entry.results).as_ref().clone());
+        }
+        None
+    }
+
+    fn insert(&mut self, key: String, results: Vec<SearchResult>) {
+        // Evict oldest if at capacity
+        if !self.entries.contains_key(&key) && self.entries.len() >= SEARCH_CACHE_MAX_ENTRIES {
+            if let Some(oldest) = self.order.first().cloned() {
+                self.entries.remove(&oldest);
+                self.order.retain(|k| k != &oldest);
+            }
+        }
+        self.entries.insert(
+            key.clone(),
+            CacheEntry {
+                results: Arc::new(results),
+                cached_at: Instant::now(),
+            },
+        );
+        self.order.retain(|k| k != &key);
+        self.order.push(key);
+    }
+
+    fn purge_expired(&mut self) {
+        let expired: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.cached_at.elapsed().as_secs() >= SEARCH_CACHE_TTL_SECS)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &expired {
+            self.entries.remove(k);
+            self.order.retain(|key| key != k);
+        }
+    }
+}
 
 /// A single web search result with title, snippet, and URL.
 #[derive(Debug, Clone)]
@@ -47,20 +117,20 @@ pub(crate) async fn perform_web_search(
 
     // Check cache first
     {
-        let cache = SEARCH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((cached_at, cached_results)) = cache.get(&cache_key) {
-            if cached_at.elapsed().as_secs() < SEARCH_CACHE_TTL_SECS {
-                return Ok(cached_results.clone());
-            }
+        let mut cache = SEARCH_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(results) = cache.get(&cache_key) {
+            return Ok(results);
         }
+        // Purge expired entries opportunistically
+        cache.purge_expired();
     }
 
     // Perform the search
     let results = perform_web_search_uncached(client, query, provider).await?;
 
-    // Store in cache
+    // Store in cache with LRU-like eviction (single lock)
     if let Ok(mut cache) = SEARCH_CACHE.lock() {
-        cache.insert(cache_key, (Instant::now(), results.clone()));
+        cache.insert(cache_key, results.clone());
     }
 
     Ok(results)
@@ -158,13 +228,15 @@ async fn search_ddg(client: &Client, query: &str) -> Result<Vec<SearchResult>> {
     Ok(parse_ddg_lite_html(&html))
 }
 
-/// Minimal URL encoding for search queries (spaces → +, keep most chars).
+/// RFC 3986 percent-encoding for search query strings.
+/// Encodes all characters except unreserved ones (ALPHA, DIGIT, -, ., _, ~).
+/// Uses application/x-www-form-urlencoded convention: space → +.
 fn urlencoding_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             ' ' => out.push('+'),
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => out.push(c),
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '.' | '_' | '~' => out.push(c),
             _ => {
                 for b in c.to_string().bytes() {
                     out.push_str(&format!("%{:02X}", b));
@@ -301,5 +373,83 @@ mod tests {
     #[test]
     fn provider_from_config_google_missing_key() {
         assert!(provider_from_config("google", "", "").is_none());
+    }
+
+    #[test]
+    fn search_cache_inner_get_returns_none_for_missing() {
+        let mut cache = SearchCacheInner {
+            entries: HashMap::new(),
+            order: Vec::new(),
+        };
+        assert!(cache.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn search_cache_inner_insert_and_get() {
+        let mut cache = SearchCacheInner {
+            entries: HashMap::new(),
+            order: Vec::new(),
+        };
+        let result = vec![SearchResult {
+            title: "test".into(),
+            snippet: "test".into(),
+            url: "https://test.com".into(),
+        }];
+        cache.insert("key".to_string(), result.clone());
+        let got = cache.get("key");
+        assert!(got.is_some(), "should find cached entry");
+        assert_eq!(got.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn search_cache_inner_evicts_oldest_when_full() {
+        let mut cache = SearchCacheInner {
+            entries: HashMap::new(),
+            order: Vec::new(),
+        };
+        let result = vec![SearchResult {
+            title: "test".into(),
+            snippet: "test".into(),
+            url: "https://test.com".into(),
+        }];
+        // Fill to max
+        for i in 0..SEARCH_CACHE_MAX_ENTRIES {
+            cache.insert(format!("key{}", i), result.clone());
+        }
+        // Insert one more
+        cache.insert("overflow".to_string(), result);
+        assert_eq!(cache.entries.len(), SEARCH_CACHE_MAX_ENTRIES);
+        // "key0" should have been evicted (oldest)
+        assert!(!cache.entries.contains_key("key0"), "oldest entry should be evicted");
+        assert!(cache.entries.contains_key("overflow"), "new entry should be present");
+    }
+
+    #[test]
+    fn purge_expired_entries_removes_stale_data() {
+        let mut cache = SearchCacheInner {
+            entries: HashMap::new(),
+            order: Vec::new(),
+        };
+        let result = vec![SearchResult {
+            title: "x".into(),
+            snippet: "x".into(),
+            url: "https://x.com".into(),
+        }];
+        // Insert a fresh entry
+        cache.insert("fresh".to_string(), result.clone());
+        // Insert an entry with expired timestamp
+        cache.entries.insert(
+            "stale".to_string(),
+            CacheEntry {
+                results: Arc::new(result),
+                cached_at: Instant::now() - std::time::Duration::from_secs(SEARCH_CACHE_TTL_SECS + 1),
+            },
+        );
+        cache.order.push("stale".to_string());
+
+        cache.purge_expired();
+
+        assert!(cache.entries.contains_key("fresh"), "fresh entry should remain");
+        assert!(!cache.entries.contains_key("stale"), "stale entry should be purged");
     }
 }

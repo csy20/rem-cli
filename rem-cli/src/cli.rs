@@ -3,6 +3,7 @@
 //! and serializable config structs ([`AppConfig`], [`PartialConfig`]).
 
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -24,7 +25,7 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        help = "Provider: ollama (default), openai, anthropic, gemini, azure, bedrock, openrouter"
+        help = "Provider: ollama (default), openai, anthropic, gemini, azure, bedrock, openrouter, deepseek, github, xai"
     )]
     pub provider: Option<String>,
     #[arg(long, global = true, help = "API key for OpenAI-compatible providers")]
@@ -103,8 +104,6 @@ pub struct IndexArgs {
     pub dir: Option<PathBuf>,
     #[arg(long, help = "Preview what would be indexed without writing any files")]
     pub dry_run: bool,
-    #[arg(long, help = "Compute embeddings (Ollama required) for semantic retrieval")]
-    pub embeddings: bool,
 }
 
 /// Arguments for `rem theme`.
@@ -123,7 +122,7 @@ pub struct PullArgs {
 
 /// Per-provider configuration overrides.
 /// Values here override the top-level `AppConfig` fields when the matching provider is active.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderSettings {
     pub model: Option<String>,
@@ -134,8 +133,21 @@ pub struct ProviderSettings {
     pub reasoning_model: Option<bool>,
 }
 
+impl fmt::Debug for ProviderSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderSettings")
+            .field("model", &self.model)
+            .field("api_url", &self.api_url)
+            .field("api_key", &self.api_key.as_deref().map(|_| "***"))
+            .field("timeout_s", &self.timeout_s)
+            .field("model_ctx", &self.model_ctx)
+            .field("reasoning_model", &self.reasoning_model)
+            .finish()
+    }
+}
+
 /// Global and local merged configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub model: String,
@@ -172,6 +184,40 @@ pub struct AppConfig {
     pub page_threshold: usize,
     #[serde(default = "default_auto_resume")]
     pub auto_resume: bool,
+    #[serde(default = "default_true")]
+    pub show_perf: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("model", &self.model)
+            .field("ollama_url", &self.ollama_url)
+            .field("timeout_s", &self.timeout_s)
+            .field("max_context_bytes", &self.max_context_bytes)
+            .field("model_ctx", &self.model_ctx)
+            .field("prompts_dir", &self.prompts_dir)
+            .field("workspace_dir", &self.workspace_dir)
+            .field("provider", &self.provider)
+            .field("api_url", &self.api_url)
+            .field("api_key", &self.api_key.as_deref().map(|_| "***"))
+            .field("theme", &self.theme)
+            .field("mode", &self.mode)
+            .field("providers", &self.providers)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("thinking_budget", &self.thinking_budget)
+            .field("search_provider", &self.search_provider)
+            .field("search_api_key", &self.search_api_key.as_deref().map(|_| "***"))
+            .field("search_cse_id", &self.search_cse_id)
+            .field("page_threshold", &self.page_threshold)
+            .field("auto_resume", &self.auto_resume)
+            .field("show_perf", &self.show_perf)
+            .finish()
+    }
 }
 
 fn default_page_threshold() -> usize {
@@ -217,13 +263,14 @@ impl Default for AppConfig {
             search_cse_id: None,
             page_threshold: default_page_threshold(),
             auto_resume: default_auto_resume(),
+            show_perf: default_true(),
         }
     }
 }
 
 /// Partial config for incremental merging (from TOML files).
 /// Unknown fields are rejected to catch typos early.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartialConfig {
     pub model: Option<String>,
@@ -247,6 +294,35 @@ pub struct PartialConfig {
     pub search_cse_id: Option<String>,
     pub page_threshold: Option<usize>,
     pub auto_resume: Option<bool>,
+    pub show_perf: Option<bool>,
+}
+
+impl fmt::Debug for PartialConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PartialConfig")
+            .field("model", &self.model)
+            .field("ollama_url", &self.ollama_url)
+            .field("timeout_s", &self.timeout_s)
+            .field("max_context_bytes", &self.max_context_bytes)
+            .field("model_ctx", &self.model_ctx)
+            .field("prompts_dir", &self.prompts_dir)
+            .field("workspace_dir", &self.workspace_dir)
+            .field("provider", &self.provider)
+            .field("api_url", &self.api_url)
+            .field("api_key", &self.api_key.as_deref().map(|_| "***"))
+            .field("theme", &self.theme)
+            .field("mode", &self.mode)
+            .field("providers", &self.providers)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("thinking_budget", &self.thinking_budget)
+            .field("search_provider", &self.search_provider)
+            .field("search_api_key", &self.search_api_key.as_deref().map(|_| "***"))
+            .field("search_cse_id", &self.search_cse_id)
+            .field("page_threshold", &self.page_threshold)
+            .field("auto_resume", &self.auto_resume)
+            .field("show_perf", &self.show_perf)
+            .finish()
+    }
 }
 
 impl AppConfig {
@@ -312,6 +388,9 @@ impl AppConfig {
         if let Some(v) = part.auto_resume {
             self.auto_resume = v;
         }
+        if let Some(v) = part.show_perf {
+            self.show_perf = v;
+        }
     }
 }
 
@@ -370,6 +449,7 @@ mod tests {
             search_cse_id: Some("sci".to_string()),
             page_threshold: Some(75),
             auto_resume: Some(true),
+            show_perf: Some(true),
         };
         config.apply_partial(partial);
         assert_eq!(config.model, "m1");
@@ -470,5 +550,11 @@ mod tests {
     #[test]
     fn test_default_search_provider() {
         assert_eq!(default_search_provider(), "ddg");
+    }
+
+    #[test]
+    fn test_show_perf_defaults_to_true() {
+        let config = AppConfig::default();
+        assert!(config.show_perf);
     }
 }

@@ -25,6 +25,7 @@ fn no_color() -> bool {
 
 /// Custom theme definition for loading from TOML files.
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CustomThemeDef {
     name: String,
     bg: String,

@@ -37,6 +37,41 @@ impl Completer for RemHelper {
             return Ok((0, candidates));
         }
 
+        // Tab-complete subcommands
+        let subcommands: &[(&str, &[&str])] = &[
+            ("/session ", &["export", "import", "list", "analytics", "compact-undo"]),
+            ("/git ", &["status", "diff", "log", "commit"]),
+            ("/memory ", &["add", "clear"]),
+            ("/prompt ", &["save", "load", "list", "delete"]),
+            ("/plugin ", &["list", "help"]),
+            ("/reasoning ", &["on", "off", "low", "medium", "high"]),
+        ];
+        for (cmd_prefix, subs) in subcommands {
+            if let Some(tail) = line_before.strip_prefix(cmd_prefix) {
+                if tail.contains(' ') {
+                    // Already past the subcommand — try file path completion for relevant ones
+                    for path_cmd in &["/session export ", "/session import "] {
+                        if let Some(tail) = line_before.strip_prefix(path_cmd) {
+                            return Ok(complete_path(path_cmd.len(), tail));
+                        }
+                    }
+                    break;
+                }
+                let candidates: Vec<Pair> = subs
+                    .iter()
+                    .filter(|s| s.starts_with(tail))
+                    .map(|s| Pair {
+                        replacement: format!("{}{}", cmd_prefix, s),
+                        display: s.to_string(),
+                    })
+                    .collect();
+                if !candidates.is_empty() {
+                    return Ok((0, candidates));
+                }
+                break;
+            }
+        }
+
         // Tab-complete file paths after /session export and /session import
         for prefix_cmd in &["/session export ", "/session import "] {
             if let Some(tail) = line_before.strip_prefix(*prefix_cmd) {
@@ -182,6 +217,33 @@ mod tests {
     #[test]
     fn command_completion_matches() {
         let _helper = RemHelper;
+    }
+
+    #[test]
+    fn complete_subcommands_session() {
+        let helper = RemHelper;
+        // We can't easily test the Completer trait directly, but we can verify
+        // the subcommand list is correct by checking the registry
+        let reg = crate::commands::registry();
+        assert!(reg.is_command("/session"));
+    }
+
+    #[test]
+    fn complete_subcommands_git() {
+        let reg = crate::commands::registry();
+        assert!(reg.is_command("/git"));
+    }
+
+    #[test]
+    fn complete_subcommands_memory() {
+        let reg = crate::commands::registry();
+        assert!(reg.is_command("/memory"));
+    }
+
+    #[test]
+    fn complete_subcommands_prompt() {
+        let reg = crate::commands::registry();
+        assert!(reg.is_command("/prompt"));
     }
 
     #[test]

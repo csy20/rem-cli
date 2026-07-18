@@ -1,7 +1,11 @@
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use crate::chat::ChatSession;
 use crate::ui;
+
+/// Pre-compiled regex for matching prompt template variables like {{name}}.
+static TEMPLATE_VAR_RE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\{\{(\w+)\}\}").unwrap());
 
 fn prompts_dir(session: &ChatSession) -> Option<PathBuf> {
     let dir = session.ctx.project_dir.as_ref()?;
@@ -103,10 +107,9 @@ pub(crate) fn handle_prompt_load(session: &ChatSession, name: &str) -> Option<St
             return None;
         }
     };
-    // Substitute {{variable}} placeholders
-    let re = regex::Regex::new(r"\{\{(\w+)\}\}").unwrap();
+    // Substitute {{variable}} placeholders using pre-compiled regex
     let mut result = content.clone();
-    for cap in re.captures_iter(&content) {
+    for cap in TEMPLATE_VAR_RE.captures_iter(&content) {
         let var_name = cap.get(1).unwrap().as_str();
         print!("{} value for '{}': ", ui::theme::paint_bright(&t, "?"), var_name);
         let _ = std::io::Write::flush(&mut std::io::stdout());

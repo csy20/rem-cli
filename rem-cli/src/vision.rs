@@ -141,7 +141,7 @@ fn detect_mime_type(path: &Path) -> String {
 pub(crate) fn is_image_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp")
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "ico" | "tiff" | "tif")
     )
 }
 

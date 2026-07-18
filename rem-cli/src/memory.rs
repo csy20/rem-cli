@@ -3,6 +3,7 @@
 //! persists across chat sessions. Includes starter generation per language.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -47,7 +48,7 @@ impl ProjectMemory {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).context("failed to create .rem directory")?;
         }
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
@@ -55,8 +56,12 @@ impl ProjectMemory {
             .context("failed to open memory file for writing")?;
         file.lock_exclusive()
             .context("failed to acquire exclusive lock on memory file")?;
-        let result = fs::write(&self.path, &self.content).context("failed to write memory file");
-        let _ = file.unlock();
+        // Write through the locked file handle (not fs::write, which opens a new handle)
+        let result = file
+            .write_all(self.content.as_bytes())
+            .and_then(|_| file.sync_all())
+            .context("failed to write memory file");
+        // File handle is closed on drop, releasing the lock
         result
     }
 

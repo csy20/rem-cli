@@ -15,17 +15,13 @@ use serde_json::json;
 use tokio::time::{sleep, timeout, Duration};
 
 pub mod anthropic;
-pub mod azure;
-#[cfg(feature = "bedrock")]
 pub mod bedrock;
 pub mod deepseek;
 pub mod gemini;
-pub mod github;
 pub mod ollama;
 pub mod openai;
-pub mod openrouter;
+pub(crate) mod openai_compat;
 pub mod tools;
-pub mod xai;
 
 #[cfg(test)]
 mod tests;
@@ -219,6 +215,7 @@ impl std::fmt::Debug for ProviderContext {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
+#[non_exhaustive]
 pub enum ProviderKind {
     Ollama,
     OpenAI,
@@ -229,6 +226,7 @@ pub enum ProviderKind {
     OpenRouter,
     DeepSeek,
     GitHub,
+    Groq,
     XAI,
 }
 
@@ -244,6 +242,7 @@ impl ProviderKind {
             ProviderKind::OpenRouter => "openrouter",
             ProviderKind::DeepSeek => "deepseek",
             ProviderKind::GitHub => "github",
+            ProviderKind::Groq => "groq",
             ProviderKind::XAI => "xai",
         }
     }
@@ -258,6 +257,7 @@ impl ProviderKind {
             "openrouter" => ProviderKind::OpenRouter,
             "deepseek" => ProviderKind::DeepSeek,
             "github" | "githubmodels" => ProviderKind::GitHub,
+            "groq" | "groqcloud" => ProviderKind::Groq,
             "xai" | "grok" => ProviderKind::XAI,
             _ => ProviderKind::Ollama,
         }
@@ -329,6 +329,7 @@ const DEFAULT_BASE_URLS: &[(ProviderKind, &str)] = &[
     (ProviderKind::OpenRouter, "https://openrouter.ai/api/v1"),
     (ProviderKind::DeepSeek, "https://api.deepseek.com"),
     (ProviderKind::GitHub, "https://models.inference.ai.azure.com"),
+    (ProviderKind::Groq, "https://api.groq.com/openai/v1"),
     (ProviderKind::XAI, "https://api.x.ai/v1"),
 ];
 
@@ -339,6 +340,7 @@ pub(crate) const DEFAULT_MODELS: &[(ProviderKind, &str)] = &[
     (ProviderKind::OpenRouter, "openai/gpt-4o"),
     (ProviderKind::DeepSeek, "deepseek-chat"),
     (ProviderKind::GitHub, "gpt-4o"),
+    (ProviderKind::Groq, "llama-3.3-70b-versatile"),
     (ProviderKind::XAI, "grok-2"),
 ];
 
@@ -363,6 +365,7 @@ pub(crate) const API_KEY_ENV_VARS: &[(ProviderKind, &str)] = &[
     (ProviderKind::OpenRouter, "OPENROUTER_API_KEY"),
     (ProviderKind::DeepSeek, "DEEPSEEK_API_KEY"),
     (ProviderKind::GitHub, "GITHUB_TOKEN"),
+    (ProviderKind::Groq, "GROQ_API_KEY"),
     (ProviderKind::XAI, "XAI_API_KEY"),
 ];
 
@@ -449,15 +452,31 @@ impl Provider {
             ProviderKind::OpenAI => Box::new(openai::OpenAIBackend),
             ProviderKind::Gemini => Box::new(gemini::GeminiBackend),
             ProviderKind::Anthropic => Box::new(anthropic::AnthropicBackend::new(Arc::clone(&last_usage))),
-            ProviderKind::Azure => Box::new(azure::AzureBackend),
+            ProviderKind::Azure => Box::new(openai_compat::OpenAICompatBackend {
+                display_name: "Azure OpenAI",
+                supports_list_models: false,
+            }),
             #[cfg(feature = "bedrock")]
             ProviderKind::Bedrock => Box::new(bedrock::BedrockBackend),
             #[cfg(not(feature = "bedrock"))]
             ProviderKind::Bedrock => Box::new(UnsupportedBackend),
-            ProviderKind::OpenRouter => Box::new(openrouter::OpenRouterBackend),
+            ProviderKind::OpenRouter => Box::new(openai_compat::OpenAICompatBackend {
+                display_name: "OpenRouter",
+                supports_list_models: true,
+            }),
             ProviderKind::DeepSeek => Box::new(deepseek::DeepSeekBackend),
-            ProviderKind::GitHub => Box::new(github::GitHubBackend),
-            ProviderKind::XAI => Box::new(xai::XAIBackend),
+            ProviderKind::GitHub => Box::new(openai_compat::OpenAICompatBackend {
+                display_name: "GitHub Models",
+                supports_list_models: true,
+            }),
+            ProviderKind::Groq => Box::new(openai_compat::OpenAICompatBackend {
+                display_name: "Groq",
+                supports_list_models: true,
+            }),
+            ProviderKind::XAI => Box::new(openai_compat::OpenAICompatBackend {
+                display_name: "xAI",
+                supports_list_models: true,
+            }),
         };
         Self {
             kind,
@@ -488,6 +507,7 @@ impl Provider {
             ProviderKind::OpenRouter => format!("openrouter/{}", self.ctx.model),
             ProviderKind::DeepSeek => format!("deepseek/{}", self.ctx.model),
             ProviderKind::GitHub => format!("github/{}", self.ctx.model),
+            ProviderKind::Groq => format!("groq/{}", self.ctx.model),
             ProviderKind::XAI => format!("xai/{}", self.ctx.model),
         }
     }
@@ -1120,10 +1140,15 @@ pub(super) async fn parse_api_error(
 ) -> anyhow::Error {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    let raw_msg = serde_json::from_str::<LlmErrorResponse>(&body)
+    let redacted_body = redact_api_key(&body, api_key);
+    let err_msg = serde_json::from_str::<LlmErrorResponse>(&redacted_body)
         .map(|v| v.error.to_string())
-        .unwrap_or_else(|_| body.chars().take(crate::constants::API_ERROR_BODY_MAX_CHARS).collect());
-    let err_msg = redact_api_key(&raw_msg, api_key);
+        .unwrap_or_else(|_| {
+            redacted_body
+                .chars()
+                .take(crate::constants::API_ERROR_BODY_MAX_CHARS)
+                .collect()
+        });
     let code = status.as_u16();
     let text = status_code_text(code);
     let code_str = if text.is_empty() {

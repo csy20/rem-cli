@@ -35,6 +35,8 @@ async fn test_provider_kind_from_str() {
     assert_eq!(ProviderKind::from_str("githubmodels"), ProviderKind::GitHub);
     assert_eq!(ProviderKind::from_str("xai"), ProviderKind::XAI);
     assert_eq!(ProviderKind::from_str("grok"), ProviderKind::XAI);
+    assert_eq!(ProviderKind::from_str("groq"), ProviderKind::Groq);
+    assert_eq!(ProviderKind::from_str("groqcloud"), ProviderKind::Groq);
     assert_eq!(ProviderKind::from_str("openrouter"), ProviderKind::OpenRouter);
     assert_eq!(ProviderKind::from_str("unknown"), ProviderKind::Ollama);
 }
@@ -50,6 +52,7 @@ async fn test_provider_kind_as_str() {
     assert_eq!(ProviderKind::DeepSeek.as_str(), "deepseek");
     assert_eq!(ProviderKind::GitHub.as_str(), "github");
     assert_eq!(ProviderKind::XAI.as_str(), "xai");
+    assert_eq!(ProviderKind::Groq.as_str(), "groq");
 }
 
 // ── Ollama ────────────────────────────────────────────────────────────
@@ -873,6 +876,12 @@ fn default_base_url_ollama() {
 }
 
 #[test]
+fn default_base_url_groq() {
+    let url = default_base_url(ProviderKind::Groq);
+    assert_eq!(url, "https://api.groq.com/openai/v1");
+}
+
+#[test]
 fn default_base_url_openai() {
     let url = default_base_url(ProviderKind::OpenAI);
     assert_eq!(url, "https://api.openai.com/v1");
@@ -893,6 +902,7 @@ fn api_key_env_var_lookup() {
         None,
         "Ollama has no API key env var"
     );
+    assert_eq!(api_key_env_var(ProviderKind::Groq), Some("GROQ_API_KEY"));
 }
 
 #[test]
@@ -1161,4 +1171,84 @@ async fn test_xai_chat_stream() {
 
     let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
     assert_eq!(result, "Hello from xAI");
+}
+
+// ── Groq ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_groq_list_models() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "llama-3.3-70b-versatile"}, {"id": "mixtral-8x7b-32768"}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::Groq,
+        mock_server.uri(),
+        "llama-3.3-70b-versatile".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let models = provider.list_models().await.unwrap();
+    assert_eq!(models, vec!["llama-3.3-70b-versatile", "mixtral-8x7b-32768"]);
+}
+
+#[tokio::test]
+async fn test_groq_complete_json() {
+    let mock_server = MockServer::start().await;
+    let response_str =
+        r#"{"explanation":"groq test","code":"print('groq')","files":[],"commands":[],"checks":[],"caution":""}"#;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": response_str}}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::Groq,
+        mock_server.uri(),
+        "llama-3.3-70b-versatile".to_string(),
+        30,
+        "Be helpful.".to_string(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let reply = provider.complete_json("write code").await.unwrap();
+    assert_eq!(reply.explanation, "groq test");
+    assert_eq!(reply.code, "print('groq')");
+}
+
+#[tokio::test]
+async fn test_groq_chat_stream() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\" from Groq\"}}]}\ndata: [DONE]\n"
+        ))
+        .mount(&mock_server)
+        .await;
+
+    let provider = Provider::new(
+        ProviderKind::Groq,
+        mock_server.uri(),
+        "llama-3.3-70b-versatile".to_string(),
+        30,
+        String::new(),
+        Some("test-key".to_string()),
+        4096,
+    );
+
+    let result = provider.complete_chat_stream("hi", "", "").await.unwrap();
+    assert_eq!(result, "Hello from Groq");
 }

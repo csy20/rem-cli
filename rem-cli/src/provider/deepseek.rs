@@ -44,11 +44,7 @@ impl ProviderBackend for DeepSeekBackend {
         let is_reasoner = ctx.model.contains("deepseek-reasoner");
         if is_reasoner {
             let url = super::openai_chat_url(&ctx.base_url, ctx.kind, &ctx.model);
-            let system = if ctx.model.contains("deepseek-reasoner") {
-                None
-            } else {
-                Some(system_prompt)
-            };
+            let system: Option<&str> = None;
             let mut messages: Vec<serde_json::Value> = Vec::new();
             if let Some(sp) = system {
                 messages.push(serde_json::json!({"role": "system", "content": sp}));

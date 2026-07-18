@@ -28,6 +28,7 @@ impl ReasoningEffort {
 
 /// Configuration for thinking/reasoning models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReasoningConfig {
     /// Whether to enable reasoning/thinking mode.
     pub enabled: bool,

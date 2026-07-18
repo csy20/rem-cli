@@ -4,12 +4,21 @@ use async_trait::async_trait;
 use super::tools::{ToolResponse, ToolSpec};
 use super::{ProviderBackend, ProviderContext};
 
-pub(super) struct GitHubBackend;
+/// A single backend for all OpenAI-compatible providers (Azure, OpenRouter, GitHub, xAI).
+/// Eliminates 4 nearly-identical backend files by parameterizing the display name.
+pub(super) struct OpenAICompatBackend {
+    pub(super) display_name: &'static str,
+    pub(super) supports_list_models: bool,
+}
 
 #[async_trait]
-impl ProviderBackend for GitHubBackend {
+impl ProviderBackend for OpenAICompatBackend {
     async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>> {
-        super::openai_compat_list_models(ctx, "GitHub Models").await
+        if self.supports_list_models {
+            super::openai_compat_list_models(ctx, self.display_name).await
+        } else {
+            Ok(vec![ctx.model.clone()])
+        }
     }
 
     async fn complete_json(
@@ -18,7 +27,7 @@ impl ProviderBackend for GitHubBackend {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<crate::ModelReply> {
-        super::openai_compat_complete_json(ctx, ctx.kind, "GitHub Models", system_prompt, user_prompt).await
+        super::openai_compat_complete_json(ctx, ctx.kind, self.display_name, system_prompt, user_prompt).await
     }
 
     async fn complete_chat_stream(
@@ -28,7 +37,7 @@ impl ProviderBackend for GitHubBackend {
         user_prompt: &str,
         history: &str,
     ) -> Result<String> {
-        super::openai_compat_chat_stream(ctx, ctx.kind, "GitHub Models", user_prompt, system_prompt, history).await
+        super::openai_compat_chat_stream(ctx, ctx.kind, self.display_name, user_prompt, system_prompt, history).await
     }
 
     async fn complete_chat_stream_with_vision(
@@ -43,7 +52,7 @@ impl ProviderBackend for GitHubBackend {
         super::openai_compat_chat_stream_with_vision(
             ctx,
             ctx.kind,
-            "GitHub Models",
+            self.display_name,
             user_prompt,
             system_prompt,
             history,
@@ -64,30 +73,12 @@ impl ProviderBackend for GitHubBackend {
         super::openai_compat_chat_stream_with_tools(
             ctx,
             ctx.kind,
-            "GitHub Models",
+            self.display_name,
             user_prompt,
             system_prompt,
             history,
             tool_specs,
         )
         .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::provider::ProviderKind;
-
-    #[test]
-    fn github_backend_can_be_created() {
-        let _backend = GitHubBackend;
-    }
-
-    #[test]
-    fn github_provider_kind_is_recognized() {
-        let kind = ProviderKind::from_str("github");
-        assert_eq!(kind.as_str(), "github");
-        assert!(matches!(kind, ProviderKind::GitHub));
     }
 }

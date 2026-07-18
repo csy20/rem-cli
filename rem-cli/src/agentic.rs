@@ -11,6 +11,7 @@ use crate::ui;
 
 /// Output of running an external tool (linter, test runner, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolOutput {
     pub tool_name: String,
     pub success: bool,

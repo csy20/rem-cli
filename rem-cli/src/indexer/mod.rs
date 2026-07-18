@@ -37,17 +37,15 @@ use crate::find;
 
 mod bm25;
 mod chunking;
-mod embedding;
-
 pub(crate) use bm25::build_inverted_index;
 pub use bm25::retrieve_relevant_chunks;
 pub(crate) use chunking::{guess_chunk_type, split_content_into_chunks};
-pub use embedding::compute_embeddings;
 
 const INDEX_VERSION: u32 = 2;
 
 /// The complete codebase index, including chunks and BM25 retrieval data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CodebaseIndex {
     pub version: u32,
     pub generated_at: String,
@@ -63,6 +61,7 @@ pub struct CodebaseIndex {
 
 /// Chunk of source code stored in the retrieval index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IndexChunk {
     pub path: String,
     pub name: String,
@@ -73,8 +72,6 @@ pub struct IndexChunk {
     pub start_line: usize,
     #[serde(default)]
     pub end_line: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedding: Option<Vec<f32>>,
     /// Pre-computed token → frequency map for BM25 scoring,
     /// avoiding O(chunks × query_terms) re-tokenization at query time.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
@@ -166,6 +163,7 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
                     let num_chunks = chunks.len();
                     let mut doc_freqs = HashMap::new();
                     let inverted_index = build_inverted_index(&chunks, &mut doc_freqs);
+                    let avg_dl = chunks.iter().map(|c| c.content.len() as f64).sum::<f64>() / num_chunks as f64;
                     return Some(CodebaseIndex {
                         version: INDEX_VERSION,
                         generated_at: String::new(),
@@ -174,7 +172,7 @@ pub fn load_codebase_index(project_dir: &Path) -> Option<CodebaseIndex> {
                         inverted_index,
                         doc_freqs,
                         num_chunks,
-                        avg_dl: 0.0,
+                        avg_dl,
                     });
                 }
             }
@@ -256,7 +254,7 @@ struct FileEntryToProcess {
 pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<String, u64>)> {
     let max_file_bytes: u64 = crate::constants::INDEX_MAX_FILE_BYTES;
     let target_chunk = crate::constants::INDEX_TARGET_CHUNK_BYTES;
-    let existing_mtimes = load_existing_mtimes(root);
+    let existing_mtimes = load_mtimes(root);
 
     let mut file_mtimes: HashMap<String, u64> = HashMap::new();
     let mut changed_files = 0u32;
@@ -461,6 +459,13 @@ pub fn generate_codebase_index(root: &Path) -> Result<(Vec<IndexChunk>, HashMap<
 fn chunk_file_entry(fe: FileEntryToProcess, target_chunk: usize) -> Vec<IndexChunk> {
     let mut local_chunks = Vec::new();
     let ctype = guess_chunk_type(&fe.rel_str, &fe.content);
+    let tokenize_for_chunk = |content: &str| -> std::collections::HashMap<String, usize> {
+        let mut map = std::collections::HashMap::new();
+        for t in bm25::tokenize(content) {
+            *map.entry(t).or_insert(0) += 1;
+        }
+        map
+    };
 
     if fe.content.len() <= target_chunk + 400 {
         local_chunks.push(IndexChunk {
@@ -470,8 +475,7 @@ fn chunk_file_entry(fe: FileEntryToProcess, target_chunk: usize) -> Vec<IndexChu
             content: fe.content.clone(),
             start_line: 1,
             end_line: fe.line_count,
-            embedding: None,
-            token_counts: HashMap::new(),
+            token_counts: tokenize_for_chunk(&fe.content),
         });
     } else {
         let parts = split_content_into_chunks(&fe.content, target_chunk);
@@ -484,6 +488,7 @@ fn chunk_file_entry(fe: FileEntryToProcess, target_chunk: usize) -> Vec<IndexChu
             } else {
                 guess_chunk_type(&fe.rel_str, &piece)
             };
+            let token_counts = tokenize_for_chunk(&piece);
             local_chunks.push(IndexChunk {
                 path: fe.rel_str.clone(),
                 name: fe.name.clone(),
@@ -491,8 +496,7 @@ fn chunk_file_entry(fe: FileEntryToProcess, target_chunk: usize) -> Vec<IndexChu
                 content: piece,
                 start_line: start_l,
                 end_line: end_l,
-                embedding: None,
-                token_counts: HashMap::new(),
+                token_counts,
             });
         }
     }
@@ -526,35 +530,74 @@ pub fn write_codebase_index(root: &Path, chunks: Vec<IndexChunk>, file_mtimes: H
         avg_dl,
     };
 
-    let text = serde_json::to_string_pretty(&index).context("failed to serialize index")?;
-    // Atomic write: write to temp file, then rename
+    // Save mtimes to a separate small file for fast loading without parsing full index
+    save_mtimes(root, &index.file_mtimes);
+
+    // Serialize to bytes once, share across format writers
+    let json_bytes = serde_json::to_vec_pretty(&index).context("failed to serialize index")?;
     let tmp_path = rem_dir.join("codebase_index.json.tmp");
-    fs::write(&tmp_path, &text).context("failed to write temp index")?;
-    fs::rename(&tmp_path, &out_path).context("failed to finalize index")?;
+    let out_path_clone = out_path.clone();
+    let msgpack_rem_dir = rem_dir.clone();
 
-    // Write compressed variant synchronously (background thread can cause stale reads)
-    let gz_path = rem_dir.join("codebase_index.json.gz");
-    match fs::File::create(&gz_path) {
-        Ok(file) => {
-            let mut encoder = GzEncoder::new(file, Compression::default());
-            if let Err(e) = encoder.write_all(text.as_bytes()) {
-                tracing::warn!("failed to write compressed index: {e}");
-            }
-        }
-        Err(e) => tracing::warn!("failed to create compressed index file: {e}"),
-    }
+    // Write all three formats in parallel for faster index generation
+    std::thread::scope(|s| {
+        // JSON (primary format) — write directly from bytes
+        s.spawn(|| {
+            let _ = fs::write(&tmp_path, &json_bytes);
+            let _ = fs::rename(&tmp_path, &out_path_clone);
+        });
 
-    // Write MessagePack variant for faster loading (60-80% smaller)
-    let msgpack_path = rem_dir.join("codebase_index.msgpack");
-    match rmp_serde::to_vec(&index) {
-        Ok(bytes) => {
-            if let Err(e) = fs::write(&msgpack_path, &bytes) {
-                tracing::warn!("failed to write msgpack index: {e}");
+        // Gzip compressed JSON
+        s.spawn(|| {
+            let gz_path = msgpack_rem_dir.join("codebase_index.json.gz");
+            if let Ok(file) = fs::File::create(&gz_path) {
+                let mut encoder = GzEncoder::new(file, Compression::default());
+                if let Err(e) = encoder.write_all(&json_bytes) {
+                    tracing::warn!("failed to write compressed index: {e}");
+                }
             }
-        }
-        Err(e) => tracing::warn!("failed to serialize msgpack index: {e}"),
-    }
+        });
+
+        // MessagePack (fastest load path)
+        s.spawn(|| {
+            let msgpack_path = msgpack_rem_dir.join("codebase_index.msgpack");
+            match rmp_serde::to_vec(&index) {
+                Ok(bytes) => {
+                    if let Err(e) = fs::write(&msgpack_path, &bytes) {
+                        tracing::warn!("failed to write msgpack index: {e}");
+                    }
+                }
+                Err(e) => tracing::warn!("failed to serialize msgpack index: {e}"),
+            }
+        });
+    });
     Ok(())
+}
+
+/// Saves file mtimes to a separate small JSON file for fast loading
+/// without parsing the full codebase index.
+fn save_mtimes(root: &Path, mtimes: &HashMap<String, u64>) {
+    let path = root.join(".rem/mtimes.json");
+    if let Ok(json) = serde_json::to_string(mtimes) {
+        let _ = fs::write(&path, &json);
+    }
+}
+
+/// Loads file mtimes from the separate mtimes file if available,
+/// falling back to parsing the full codebase index.
+fn load_mtimes(root: &Path) -> HashMap<String, u64> {
+    let path = root.join(".rem/mtimes.json");
+    if let Ok(text) = fs::read_to_string(&path) {
+        if let Ok(mtimes) = serde_json::from_str::<HashMap<String, u64>>(&text) {
+            // Detect second-precision values and convert to milliseconds
+            let is_seconds = mtimes.values().all(|v| *v < 10_000_000_000);
+            if is_seconds {
+                return mtimes.into_iter().map(|(k, v)| (k, v * 1000)).collect();
+            }
+            return mtimes;
+        }
+    }
+    load_existing_mtimes(root)
 }
 
 /// Returns the mtime of a file in milliseconds since epoch, or 0 if unavailable.
@@ -613,7 +656,6 @@ mod tests {
                 content: "fn main() {\n    println!(\"hello\");\n}".into(),
                 start_line: 1,
                 end_line: 3,
-                embedding: None,
                 token_counts: HashMap::new(),
             },
             IndexChunk {
@@ -623,7 +665,6 @@ mod tests {
                 content: "pub fn login() {}\npub fn logout() {}".into(),
                 start_line: 1,
                 end_line: 2,
-                embedding: None,
                 token_counts: HashMap::new(),
             },
             IndexChunk {
@@ -633,7 +674,6 @@ mod tests {
                 content: "# Project\nThis is a project about authentication.".into(),
                 start_line: 1,
                 end_line: 2,
-                embedding: None,
                 token_counts: HashMap::new(),
             },
         ];
@@ -933,7 +973,6 @@ mod tests {
                 content: "fn main() {}".into(),
                 start_line: 1,
                 end_line: 1,
-                embedding: None,
                 token_counts: HashMap::new(),
             },
             IndexChunk {
@@ -943,7 +982,6 @@ mod tests {
                 content: "# Documentation".into(),
                 start_line: 1,
                 end_line: 1,
-                embedding: None,
                 token_counts: HashMap::new(),
             },
         ];
@@ -959,5 +997,36 @@ mod tests {
     fn build_retrieved_empty_input_edge_cases() {
         assert_eq!(build_retrieved_context(&[], 0), "");
         assert_eq!(build_retrieved_context(&[], 1000), "");
+    }
+
+    #[test]
+    fn save_and_load_mtimes_roundtrip() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("rem-mtimes-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".rem")).unwrap();
+
+        let mut mtimes = HashMap::new();
+        mtimes.insert("src/main.rs".to_string(), 1234567890123u64);
+        mtimes.insert("src/lib.rs".to_string(), 1234567890456u64);
+
+        save_mtimes(&root, &mtimes);
+        assert!(root.join(".rem/mtimes.json").exists());
+
+        let loaded = load_mtimes(&root);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.get("src/main.rs"), Some(&1234567890123u64));
+        assert_eq!(loaded.get("src/lib.rs"), Some(&1234567890456u64));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_mtimes_falls_back_to_index_when_no_separate_file() {
+        let root = std::env::temp_dir().join(format!("rem-mtimes-fallback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // No .rem/mtimes.json exists — should return empty rather than panic
+        let loaded = load_mtimes(&root);
+        assert!(loaded.is_empty());
     }
 }

@@ -157,24 +157,126 @@ fn render_table(rows: &[&str], t: &crate::ui::theme::Theme) -> String {
     out
 }
 
-fn render_task_line(line: &str, t: &crate::ui::theme::Theme) -> String {
+fn render_heading(line: &str, t: &crate::ui::theme::Theme) -> Option<String> {
     let trimmed = line.trim_start();
     let indent = line.len() - trimmed.len();
     let prefix = &line[..indent];
-    if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
-        format!(
+    let level = trimmed.chars().take_while(|&c| c == '#').count();
+    if level == 0 || level > 6 || trimmed.as_bytes().get(level).copied() != Some(b' ') {
+        return None;
+    }
+    let content = trimmed[level + 1..].trim();
+    let marker = match level {
+        1 => "\u{2501}", // h1: bold accent
+        2 => "\u{2505}", // h2: accent
+        _ => "\u{2500}", // h3+: muted
+    };
+    let color = match level {
+        1 | 2 => "accent",
+        3 | 4 => "text_bright",
+        _ => "text_muted",
+    };
+    let bold = level <= 2;
+    Some(format!(
+        "{}{} {}",
+        prefix,
+        theme::paint(t, color, marker, bold),
+        theme::paint(t, color, content, bold)
+    ))
+}
+
+fn render_unordered_list(line: &str, t: &crate::ui::theme::Theme) -> Option<String> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let prefix = &line[..indent];
+    if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+        Some(format!(
+            "{}{} {}",
+            prefix,
+            theme::paint(t, "accent", "\u{2022}", false),
+            rest
+        ))
+    } else if let Some(rest) = trimmed.strip_prefix("- [ ] ") {
+        Some(format!(
             "{}{} {}",
             prefix,
             theme::paint(t, "text_muted", "\u{25CB}", false),
             rest
-        )
-    } else if let Some(rest) = trimmed.strip_prefix("- [x] ") {
-        format!("{}{} {}", prefix, theme::paint(t, "accent", "\u{2713}", false), rest)
-    } else if let Some(rest) = trimmed.strip_prefix("- [X] ") {
-        format!("{}{} {}", prefix, theme::paint(t, "accent", "\u{2713}", false), rest)
+        ))
     } else {
-        line.to_string()
+        trimmed
+            .strip_prefix("- [x] ")
+            .or_else(|| trimmed.strip_prefix("- [X] "))
+            .map(|rest| format!("{}{} {}", prefix, theme::paint(t, "accent", "\u{2713}", false), rest))
     }
+}
+
+fn render_ordered_list(line: &str, t: &crate::ui::theme::Theme) -> Option<String> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let prefix = &line[..indent];
+    // Match "1. ", "2. ", etc.
+    let dot_idx = trimmed.find(". ")?;
+    let num_part = &trimmed[..dot_idx];
+    if num_part.chars().all(|c| c.is_ascii_digit()) && !num_part.is_empty() {
+        let rest = &trimmed[dot_idx + 2..];
+        Some(format!(
+            "{}{} {}",
+            prefix,
+            theme::paint(t, "text_muted", &format!("{}.", num_part), false),
+            rest
+        ))
+    } else {
+        None
+    }
+}
+
+fn render_blockquote(line: &str, t: &crate::ui::theme::Theme) -> Option<String> {
+    let trimmed = line.trim_start();
+    let indent = line.len() - trimmed.len();
+    let prefix = &line[..indent];
+    if let Some(rest) = trimmed.strip_prefix("> ") {
+        let content = rest.trim();
+        Some(format!(
+            "{}{} {}",
+            prefix,
+            theme::paint(t, "text_faint", "\u{2502}", false),
+            theme::paint(t, "text_muted", content, false)
+        ))
+    } else if trimmed == ">" {
+        Some(String::new())
+    } else {
+        None
+    }
+}
+
+fn render_horizontal_rule(line: &str, t: &crate::ui::theme::Theme) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+        Some(theme::paint(t, "text_faint", &"\u{2500}".repeat(48), false).to_string())
+    } else {
+        None
+    }
+}
+
+fn render_task_line(line: &str, t: &crate::ui::theme::Theme) -> String {
+    // Try each renderer in order; if none matches, return the line as-is.
+    if let Some(rendered) = render_heading(line, t) {
+        return rendered;
+    }
+    if let Some(rendered) = render_horizontal_rule(line, t) {
+        return rendered;
+    }
+    if let Some(rendered) = render_blockquote(line, t) {
+        return rendered;
+    }
+    if let Some(rendered) = render_unordered_list(line, t) {
+        return rendered;
+    }
+    if let Some(rendered) = render_ordered_list(line, t) {
+        return rendered;
+    }
+    line.to_string()
 }
 
 #[cfg(test)]
@@ -238,5 +340,60 @@ mod tests {
         let t = theme::active();
         let result = render_markdown("hello world", &t);
         assert_eq!(result.trim(), "hello world");
+    }
+
+    #[test]
+    fn renders_heading_h1() {
+        let t = theme::active();
+        let result = render_markdown("# Title", &t);
+        assert!(result.contains("Title"));
+        assert!(!result.contains("# "));
+    }
+
+    #[test]
+    fn renders_heading_h2() {
+        let t = theme::active();
+        let result = render_markdown("## Subtitle", &t);
+        assert!(result.contains("Subtitle"));
+    }
+
+    #[test]
+    fn renders_heading_h3() {
+        let t = theme::active();
+        let result = render_markdown("### Section", &t);
+        assert!(result.contains("Section"));
+    }
+
+    #[test]
+    fn renders_unordered_list() {
+        let t = theme::active();
+        let result = render_markdown("- item one\n- item two", &t);
+        assert!(result.contains("item one"));
+        assert!(result.contains("item two"));
+        assert!(!result.contains("- item"));
+    }
+
+    #[test]
+    fn renders_ordered_list() {
+        let t = theme::active();
+        let result = render_markdown("1. first\n2. second", &t);
+        assert!(result.contains("first"));
+        assert!(result.contains("second"));
+    }
+
+    #[test]
+    fn renders_blockquote() {
+        let t = theme::active();
+        let result = render_markdown("> quoted text", &t);
+        assert!(result.contains("quoted text"));
+        assert!(!result.contains("> quoted"));
+    }
+
+    #[test]
+    fn renders_horizontal_rule() {
+        let t = theme::active();
+        let result = render_markdown("---", &t);
+        // Should not contain "---" literally (rendered as line)
+        assert!(!result.contains("---"));
     }
 }

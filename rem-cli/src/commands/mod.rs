@@ -247,8 +247,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Show this help message",
                 usage: "/help",
-                long_description: "",
-            category: CommandCategory::Session,
+                long_description: "Shows all available slash commands grouped by category.\nUse /help <command> for detailed help on a specific command.",
+                category: CommandCategory::Session,
             },
         ),
         (
@@ -256,8 +256,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Show this help message",
                 usage: "help",
-                long_description: "",
-            category: CommandCategory::Session,
+                long_description: "Shows all available slash commands grouped by category.\nUse /help <command> for detailed help on a specific command.",
+                category: CommandCategory::System,
             },
         ),
         (
@@ -265,8 +265,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Exit the REPL",
                 usage: "exit",
-                long_description: "",
-            category: CommandCategory::System,
+                long_description: "Exits the interactive REPL session. Equivalent to Ctrl+D or typing /quit.",
+                category: CommandCategory::System,
             },
         ),
         (
@@ -274,8 +274,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Exit the REPL",
                 usage: "quit",
-                long_description: "",
-            category: CommandCategory::System,
+                long_description: "Exits the interactive REPL session. Equivalent to Ctrl+D or typing exit.",
+                category: CommandCategory::System,
             },
         ),
         (
@@ -283,8 +283,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Change the color theme",
                 usage: "/theme [name]",
-                long_description: "",
-            category: CommandCategory::System,
+                long_description: "Switches the terminal color theme. Available themes:\n  GHOST, PHOSPHOR, MIST, EMBER, SAKURA, PAPER\n\nWithout arguments, lists all themes with a preview of each.",
+                category: CommandCategory::System,
             },
         ),
         (
@@ -292,8 +292,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Show or change the active model",
                 usage: "/model <name>",
-                long_description: "",
-            category: CommandCategory::Model,
+                long_description: "Switches the active LLM model for the current provider.\nUse /models to see available models from the active provider.\n\nExamples:\n  /model gpt-4o\n  /model claude-sonnet-4-20250514\n  /model rem-coder:latest",
+                category: CommandCategory::Model,
             },
         ),
         (
@@ -301,8 +301,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Show or change the LLM provider",
                 usage: "/provider <name>",
-                long_description: "",
-            category: CommandCategory::Model,
+                long_description: "Switches between supported LLM providers:\n  ollama, openai, anthropic, gemini, azure, bedrock, openrouter, deepseek, github, xai\n\nEach provider may require additional configuration in config.toml.\nSee /config for current settings.",
+                category: CommandCategory::Model,
             },
         ),
         (
@@ -310,8 +310,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Switch between chat and code mode",
                 usage: "/mode",
-                long_description: "",
-            category: CommandCategory::Session,
+                long_description: "Toggles between:\n  CHAT mode — conversational responses\n  CODE mode — generates runnable code files with /write auto-confirmation\n  PLAN mode — structured analysis output\n\nMode affects how REM interprets your input and formats responses.",
+                category: CommandCategory::Session,
             },
         ),
         (
@@ -319,8 +319,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Switch to plan mode for structured output",
                 usage: "/plan",
-                long_description: "",
-            category: CommandCategory::Session,
+                long_description: "Switches to PLAN mode for structured analysis and planning output.\nIn this mode, REM explores the codebase and provides detailed plans\nbefore writing any code. Use /mode to return to CHAT or CODE mode.",
+                category: CommandCategory::Session,
             },
         ),
         (
@@ -328,8 +328,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Clear the chat history",
                 usage: "/clear",
-                long_description: "",
-            category: CommandCategory::Session,
+                long_description: "Clears all conversation history from the current session.\nThe session configuration and project context are preserved.\nUse /reset to also clear configuration state.",
+                category: CommandCategory::Session,
             },
         ),
         (
@@ -337,8 +337,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Reset the session",
                 usage: "/reset",
-                long_description: "",
-            category: CommandCategory::Session,
+                long_description: "Completely resets the current session: clears history, resets mode to CHAT,\nand refreshes the system prompt. Use /clear to only clear history.",
+                category: CommandCategory::Session,
             },
         ),
         (
@@ -346,8 +346,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Explain the last response",
                 usage: "/why",
-                long_description: "",
-            category: CommandCategory::Session,
+                long_description: "Asks the LLM to explain its reasoning for the last response.\nUseful for understanding code generation decisions or debugging.",
+                category: CommandCategory::Session,
             },
         ),
         (
@@ -355,8 +355,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Show last generated files",
                 usage: "/code",
-                long_description: "",
-            category: CommandCategory::Code,
+                long_description: "Displays the list of files generated or modified by the last code action.\nShows file paths and their current status.",
+                category: CommandCategory::Code,
             },
         ),
         (
@@ -364,8 +364,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Undo last file write",
                 usage: "/undo",
-                long_description: "",
-            category: CommandCategory::Code,
+                long_description: "Reverts the most recent file write operation.\nBackups are stored in .rem/backups/ for recovery.\nUse multiple times to undo further back.",
+                category: CommandCategory::Code,
             },
         ),
         (
@@ -373,8 +373,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "List all project files",
                 usage: "/files",
-                long_description: "",
-            category: CommandCategory::Project,
+                long_description: "Lists all tracked project files in the current directory.\nShows file sizes and modification timestamps.",
+                category: CommandCategory::Project,
             },
         ),
         (
@@ -382,8 +382,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Show diff of last changes",
                 usage: "/diff",
-                long_description: "",
-            category: CommandCategory::Code,
+                long_description: "Shows a git-style diff of the most recent file changes.\nUse /apply to write these changes permanently.",
+                category: CommandCategory::Code,
             },
         ),
         (
@@ -391,8 +391,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Apply the last diff (write changed files with backup for undo)",
                 usage: "/apply",
-                long_description: "",
-            category: CommandCategory::Code,
+                long_description: "Writes the changes shown by /diff to disk.\nCreates automatic backups in .rem/backups/ for /undo support.\nConfirms before overwriting existing files.",
+                category: CommandCategory::Code,
             },
         ),
         (
@@ -400,8 +400,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Show token usage statistics",
                 usage: "/tokens",
-                long_description: "",
-            category: CommandCategory::System,
+                long_description: "Displays total token usage for the current session:\n  - Total tokens used\n  - Estimated cost (when provider pricing is available)\n  - Per-turn breakdown if verbose mode is enabled",
+                category: CommandCategory::System,
             },
         ),
         (
@@ -409,8 +409,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "View or update project memory",
                 usage: "/memory [key=value]",
-                long_description: "",
-            category: CommandCategory::Project,
+                long_description: "Manages persistent project memory key-value pairs.\nThese are injected into every prompt as context.\n\nUsage:\n  /memory            — list all stored values\n  /memory key=value  — set a value\n  /memory key=       — clear a specific key\n  /memory clear      — clear all memory",
+                category: CommandCategory::Project,
             },
         ),
         (
@@ -418,8 +418,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Initialize project scaffolding",
                 usage: "/init",
-                long_description: "",
-            category: CommandCategory::Project,
+                long_description: "Scaffolds a new project structure with recommended defaults.\nPrompts for project name, type (rust, python, js, go, etc.),\nand creates the initial directory layout.",
+                category: CommandCategory::Project,
             },
         ),
         (
@@ -427,8 +427,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Show or update configuration",
                 usage: "/config [key=value]",
-                long_description: "",
-            category: CommandCategory::Project,
+                long_description: "Displays current configuration or updates a specific key.\n\nUsage:\n  /config              — show all settings\n  /config key=value    — set a config value\n  /config provider=anthropic\n\nConfiguration is persisted to ~/.config/rem-cli/config.toml.",
+                category: CommandCategory::Project,
             },
         ),
         (
@@ -436,8 +436,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Lint the last written files or a specific path",
                 usage: "/lint [file]",
-                long_description: "",
-            category: CommandCategory::Tools,
+                long_description: "Runs the appropriate linter on the specified file or the most recently written files.\nSupported formats: Rust (clippy), Python (ruff), JavaScript (eslint).\nWithout arguments, lints all files written in the last code action.",
+                category: CommandCategory::Tools,
             },
         ),
         (
@@ -445,8 +445,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Search text inside the project",
                 usage: "/find <query>",
-                long_description: "",
-            category: CommandCategory::Tools,
+                long_description: "Full-text search across all project files. Skips .git, node_modules, target, and binary files.\nSupports case-insensitive search and regex patterns.\n\nExamples:\n  /find fn handle_\n  /find -i TODO\n  /find --regex 'fn \\w+'",
+                category: CommandCategory::Tools,
             },
         ),
         (
@@ -454,8 +454,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Write content to a file",
                 usage: "/write <path>",
-                long_description: "",
-            category: CommandCategory::Code,
+                long_description: "Writes content to a file at the specified path relative to the project directory.\nCreates parent directories automatically. Backups existing files for /undo.\n\nExamples:\n  /write src/main.rs\nthen paste or describe the content to write.",
+                category: CommandCategory::Code,
             },
         ),
         (
@@ -463,8 +463,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Save the session or write content to a file",
                 usage: "/save [<path>]",
-                long_description: "",
-            category: CommandCategory::Session,
+                long_description: "Without arguments: saves the current session to .rem/session.json.gz for later /resume.\nWith a path: writes the last response content to the specified file.",
+                category: CommandCategory::Session,
             },
         ),
         (
@@ -472,8 +472,8 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Change the project directory",
                 usage: "/dir <path>",
-                long_description: "",
-            category: CommandCategory::Project,
+                long_description: "Changes the working project directory. All file operations (@file references,\n/write, /find, indexing) will use this directory as the root.\n\nExample:\n  /dir ~/projects/my-app",
+                category: CommandCategory::Project,
             },
         ),
         (
@@ -490,7 +490,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Copy last N files to clipboard",
                 usage: "/copy [N]",
-                long_description: "",
+                long_description: "Copies the content of the most recently generated files to the system clipboard.\nUse /copy 5 to copy the last 5 files. Uses xclip, xsel, wl-clipboard, or pbcopy.",
             category: CommandCategory::Code,
             },
         ),
@@ -499,7 +499,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Resume a saved session",
                 usage: "/resume",
-                long_description: "",
+                long_description: "Lists saved sessions from .rem/ and prompts to resume one.\nSessions are auto-saved and can be restored with full history.",
             category: CommandCategory::Session,
             },
         ),
@@ -508,7 +508,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Compact the chat context",
                 usage: "/compact",
-                long_description: "",
+                long_description: "Summarizes the conversation history into a compact bullet-point summary\nto save context window space. The original history is backed up to\n.rem/compact_backup.json.gz for recovery via /compact-undo.",
             category: CommandCategory::Session,
             },
         ),
@@ -535,7 +535,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Manage sessions: export, import, list, analytics",
                 usage: "/session export <path> | /session list | /session analytics [path] | /session import <path>",
-                long_description: "",
+                long_description: "Advanced session management subcommands:\n  export <path>    — save session to a portable JSON file\n  import <path>    — load a previously exported session\n  list             — show all saved sessions\n  analytics [path] — display token usage and duration stats\n  compact-undo     — restore history from last /compact backup",
             category: CommandCategory::Session,
             },
         ),
@@ -544,7 +544,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Search the web",
                 usage: "/search <query>",
-                long_description: "",
+                long_description: "Performs a web search using the configured provider (DuckDuckGo, Google, or Bing).\nResults are displayed as clickable links with snippets.\n\nConfigure the search provider in config.toml:\n  search_provider = \"google\"\n  search_api_key = \"...\"\n  search_cse_id = \"...\"",
             category: CommandCategory::Tools,
             },
         ),
@@ -553,7 +553,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Explain the selected code",
                 usage: "/explain <code>",
-                long_description: "",
+                long_description: "Sends the provided code snippet to the LLM for explanation.\nUseful for understanding unfamiliar code or algorithms.\n\nExample:\n  /explain fn map_err(|e| e.into_inner())",
             category: CommandCategory::Tools,
             },
         ),
@@ -562,7 +562,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Generate tests for the selected code",
                 usage: "/test <file>",
-                long_description: "",
+                long_description: "Generates unit tests for the specified file using the LLM.\nAnalyzes the code and produces idiomatic test cases.\n\nExample:\n  /test src/parser.rs",
             category: CommandCategory::Tools,
             },
         ),
@@ -571,7 +571,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Refactor the selected code",
                 usage: "/refactor <file>",
-                long_description: "",
+                long_description: "Suggests refactoring improvements for the specified file.\nConsiders: code clarity, DRY principle, performance, error handling,\nand idiomatic patterns for the language.",
             category: CommandCategory::Tools,
             },
         ),
@@ -580,7 +580,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Review changes for quality issues",
                 usage: "/review",
-                long_description: "",
+                long_description: "Performs a comprehensive code review of the most recent changes.\nChecks for: logic errors, security issues, performance problems,\nstyle violations, and missing edge cases.",
             category: CommandCategory::Tools,
             },
         ),
@@ -589,7 +589,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Run autonomous goal-driven loop",
                 usage: "/goal <condition>",
-                long_description: "",
+                long_description: "Starts an autonomous loop where REM works toward a goal condition.\nThe LLM iteratively plans, executes, and checks progress.\n\nExample:\n  /goal all tests pass\n  /goal implement user authentication",
             category: CommandCategory::Code,
             },
         ),
@@ -598,7 +598,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Analyze an image with the LLM",
                 usage: "/vision <path>",
-                long_description: "",
+                long_description: "Sends an image file to the LLM for visual analysis.\nSupported formats: PNG, JPG, GIF, WebP.\nRequires a provider with vision capabilities (OpenAI, Anthropic, Gemini).",
             category: CommandCategory::Code,
             },
         ),
@@ -607,7 +607,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Configure reasoning/thinking mode",
                 usage: "/reasoning [on|off|effort]",
-                long_description: "",
+                long_description: "Controls LLM reasoning and thinking features:\n  on       — enable reasoning mode\n  off      — disable reasoning mode\n  effort   — set reasoning effort (low/medium/high)\n\nSupported by: DeepSeek (deepseek-reasoner), OpenAI (o-series).",
             category: CommandCategory::Model,
             },
         ),
@@ -616,7 +616,7 @@ pub(crate) fn registry() -> CommandRegistry {
             CommandInfo {
                 description: "Watch files for changes and auto-retry",
                 usage: "/watch",
-                long_description: "",
+                long_description: "Watches project files for changes and automatically re-runs the last command.\nUseful for test-driven development: edit tests in your editor and\nREM auto-runs them on save.",
             category: CommandCategory::Tools,
             },
         ),

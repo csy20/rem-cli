@@ -3,6 +3,7 @@ use serde_json::Value;
 
 /// A tool/function specification sent to the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
@@ -40,6 +41,7 @@ impl ToolSpec {
 
 /// A tool call requested by the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -48,6 +50,7 @@ pub struct ToolCall {
 
 /// Result of executing a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolResult {
     pub call_id: String,
     pub name: String,
@@ -274,6 +277,7 @@ pub fn provider_supports_tools(kind: &super::ProviderKind) -> bool {
             | super::ProviderKind::Ollama
             | super::ProviderKind::DeepSeek
             | super::ProviderKind::GitHub
+            | super::ProviderKind::Groq
             | super::ProviderKind::XAI
     )
 }

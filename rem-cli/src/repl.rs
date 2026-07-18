@@ -686,6 +686,7 @@ fn handle_llm_response(
     elapsed: std::time::Duration,
     client: &Provider,
     verbose: bool,
+    show_perf: bool,
     t: &crate::ui::theme::Theme,
 ) {
     if verbose {
@@ -727,7 +728,9 @@ fn handle_llm_response(
         display_text_output(&cleaned, t);
     }
 
-    display_performance_stats(client, session, elapsed, t);
+    if show_perf {
+        display_performance_stats(client, session, elapsed, t);
+    }
 
     if !cleaned.is_empty() {
         session.history_mgr.push_turn(trimmed.to_string(), cleaned);
@@ -781,7 +784,8 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             continue;
         }
 
-        if trimmed == session.last_user_input && !trimmed.starts_with('/') {
+        let last_input = session.last_user_input.clone();
+        if trimmed == last_input && !trimmed.starts_with('/') {
             println!(
                 "  {} duplicate input ignored (same as last message)",
                 ui::theme::paint_dim(&t, "!")
@@ -860,7 +864,8 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             format!("{}{}", system_prompt, lang_guidance).into()
         };
 
-        if session.mode == RunMode::Chat && intent == TaskIntent::CodeAction {
+        if session.mode == RunMode::Chat && intent == TaskIntent::CodeAction && session.hints_shown & 1 == 0 {
+            session.hints_shown |= 1;
             let rail = ui::theme::paint_rail_empty(&t);
             let hint_label = ui::theme::paint_warning(&t, "hint:");
             let hint_msg = ui::theme::paint(
@@ -873,7 +878,8 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             println!("{rail}  {hint_label} {hint_msg}");
             println!("{rail}");
         }
-        if session.mode == RunMode::Plan && intent == TaskIntent::CodeAction {
+        if session.mode == RunMode::Plan && intent == TaskIntent::CodeAction && session.hints_shown & 2 == 0 {
+            session.hints_shown |= 2;
             let rail = ui::theme::paint_rail_empty(&t);
             let hint_label = ui::theme::paint_warning(&t, "hint:");
             let hint_msg = ui::theme::paint(
@@ -906,9 +912,21 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
 
         match result {
             Ok(text) => {
-                handle_llm_response(&mut session, trimmed, text, &intent, elapsed, client, verbose, &t);
+                session.last_user_input = trimmed.to_string();
+                handle_llm_response(
+                    &mut session,
+                    trimmed,
+                    text,
+                    &intent,
+                    elapsed,
+                    client,
+                    verbose,
+                    cfg.show_perf,
+                    &t,
+                );
             }
             Err(e) => {
+                session.last_user_input.clear();
                 let rail = ui::theme::paint_rail_empty(&t);
                 let err_label = ui::theme::paint_error_label(&t, "\u{2717}");
                 let provider_tag = ui::theme::paint_dim(&t, &client.provider_label());
@@ -1052,14 +1070,16 @@ fn skip_ansi_indices(chars: &mut std::str::CharIndices<'_>) {
 }
 
 /// Returns the visible width of text, excluding ANSI escape codes.
+/// Uses unicode-width for accurate CJK double-width character measurement.
 fn visible_width(text: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
     let mut width = 0;
     let mut chars = text.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             skip_ansi(&mut chars);
         } else {
-            width += 1;
+            width += c.width().unwrap_or(0);
         }
     }
     width
@@ -1443,8 +1463,22 @@ mod tests {
 
     #[test]
     fn visible_width_newlines_and_tabs() {
-        assert_eq!(visible_width("hello\nworld"), 11);
-        assert_eq!(visible_width("\tindented"), 9);
+        // Newlines and tabs are control characters (zero visible width)
+        assert_eq!(visible_width("hello\nworld"), 10);
+        assert_eq!(visible_width("\tindented"), 8);
+    }
+
+    #[test]
+    fn visible_width_cjk_double_width() {
+        // CJK characters are double-width: 你好 = 4, 世界 = 4
+        assert_eq!(visible_width("\u{4f60}\u{597d}"), 4);
+        assert_eq!(visible_width("\u{4e16}\u{754c}"), 4);
+        assert_eq!(visible_width("hello\u{4e16}\u{754c}"), 9);
+    }
+
+    #[test]
+    fn visible_width_mixed_ansi_and_cjk() {
+        assert_eq!(visible_width("\x1b[31m\u{4f60}\u{597d}\x1b[0m"), 4);
     }
 
     #[test]

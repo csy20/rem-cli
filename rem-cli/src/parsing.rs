@@ -66,20 +66,20 @@ pub fn guess_filename(lines: &[&str]) -> String {
         {
             return "index.ts".to_string();
         }
-        if trimmed.starts_with("def ")
-            || trimmed.starts_with("import ")
-            || trimmed.starts_with("from ")
-            || trimmed.starts_with("class ")
-            || trimmed.starts_with("if __name__")
-        {
-            return "main.py".to_string();
-        }
         if trimmed.starts_with("package ")
             || trimmed.starts_with("func ")
             || trimmed.starts_with("type ")
             || trimmed.starts_with("var (")
         {
             return "main.go".to_string();
+        }
+        if trimmed.starts_with("def ")
+            || trimmed.starts_with("from ")
+            || trimmed.starts_with("class ")
+            || trimmed.starts_with("if __name__")
+            || trimmed.starts_with("import ")
+        {
+            return "main.py".to_string();
         }
         if trimmed.starts_with("interface ")
             || trimmed.starts_with("export type")

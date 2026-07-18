@@ -26,6 +26,7 @@ const ITERATION_TIMEOUT: Duration = crate::constants::GOAL_ITERATION_TIMEOUT;
 
 /// Checkpoint state for multi-turn goal resume.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GoalCheckpoint {
     condition: String,
     iteration: usize,
@@ -386,7 +387,6 @@ pub(crate) async fn handle_goal(client: &Provider, session: &mut ChatSession, co
                         action: "test".into(),
                     }
                 };
-                println!("{}", format_tool_output(&lint_result));
 
                 tool_results.push_str(&build_tool_context(Some(&lint_result), Some(&test_result), None));
             }

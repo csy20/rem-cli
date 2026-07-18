@@ -16,6 +16,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use std::fs;
+use std::io::IsTerminal;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -547,6 +548,18 @@ pub(crate) fn handle_memory(session: &ChatSession) {
 pub(crate) fn handle_memory_set(session: &mut ChatSession, args: &str) {
     let t = ui::theme::active();
     if args.eq_ignore_ascii_case("clear") {
+        if std::io::stdin().is_terminal() {
+            println!(
+                "{} {} {}",
+                ui::theme::paint_rail_empty(&t),
+                ui::theme::paint_warning(&t, "Clear all project memory?"),
+                ui::theme::paint_dim(&t, "[y/N]")
+            );
+            let input = session.readline("rem> ").unwrap_or_default().trim().to_lowercase();
+            if input != "y" && input != "yes" {
+                return;
+            }
+        }
         session.ctx.project_memory.content.clear();
         session.ctx.project_memory.loaded = false;
         let _ = session.ctx.project_memory.save();
@@ -687,7 +700,19 @@ pub(crate) fn handle_edit() -> Option<String> {
     let tmp_path = std::env::temp_dir().join(format!("rem-edit-{}.md", std::process::id()));
     match std::process::Command::new(&editor).arg(&tmp_path).status() {
         Ok(status) if status.success() => {
-            let content = std::fs::read_to_string(&tmp_path).unwrap_or_default();
+            let content = match std::fs::read_to_string(&tmp_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    let t = crate::ui::theme::active();
+                    eprintln!(
+                        "{} failed to read editor output: {}",
+                        crate::ui::theme::paint_error_label(&t, "err:"),
+                        e
+                    );
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return None;
+                }
+            };
             let _ = std::fs::remove_file(&tmp_path);
             let trimmed = content.trim().to_string();
             if trimmed.is_empty() {
@@ -827,7 +852,7 @@ pub(crate) async fn handle_compact(client: &Provider, session: &mut ChatSession)
         ui::theme::paint(&t, "accent", "\u{258C}", true),
         session.history_mgr.history.len()
     );
-    let saved_history = session.history_mgr.history.clone();
+    let saved_history = std::mem::take(&mut session.history_mgr.history);
     // Persist backup before compacting (for /compact --undo)
     let dir = session
         .ctx
@@ -1037,11 +1062,16 @@ pub(crate) fn handle_resume_session(session: &mut ChatSession) {
                     );
                 }
                 if let Some(m) = data["mode"].as_str() {
+                    session.mode = match m.to_uppercase().as_str() {
+                        "CODE" => crate::chat::RunMode::Code,
+                        "PLAN" => crate::chat::RunMode::Plan,
+                        _ => crate::chat::RunMode::Chat,
+                    };
                     println!(
                         "{} {} {}",
                         ui::theme::paint_dim(&t, "\u{258C}"),
-                        ui::theme::paint_dim(&t, "saved mode:"),
-                        ui::theme::paint_bright(&t, m)
+                        ui::theme::paint_dim(&t, "restored mode:"),
+                        ui::theme::paint_bright(&t, session.mode.label())
                     );
                 }
                 if let Some(code) = data["last_code"].as_str() {
@@ -1269,9 +1299,58 @@ pub(crate) async fn handle_summary(client: &Provider, session: &mut ChatSession,
     }
 }
 
+/// Removes session files older than MAX_SESSION_AGE_DAYS.
+/// Called automatically when listing sessions and during startup.
+fn cleanup_stale_sessions(session: &ChatSession) {
+    let dir = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let rem_dir = dir.join(".rem");
+    if !rem_dir.exists() {
+        return;
+    }
+    let max_age = std::time::Duration::from_secs(crate::constants::MAX_SESSION_AGE_DAYS * 86400);
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&rem_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("gz") {
+                continue;
+            }
+            if !path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.ends_with(".json"))
+            {
+                continue;
+            }
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if now.duration_since(modified).unwrap_or_default() > max_age {
+                        let _ = std::fs::remove_file(&path);
+                        removed += 1;
+                    }
+                }
+            }
+        }
+    }
+    if removed > 0 {
+        let t = crate::ui::theme::active();
+        eprintln!(
+            "  {} auto-cleaned {} stale session file(s)",
+            crate::ui::theme::paint_dim(&t, "\u{258C}"),
+            removed
+        );
+    }
+}
+
 /// Lists saved session files in `.rem/` (`/session list`).
 /// Shows timestamps, duration, token counts, and turn counts from each session.
 pub(crate) fn handle_list_sessions(session: &ChatSession) {
+    cleanup_stale_sessions(session);
     let t = ui::theme::active();
     let dir = session
         .ctx

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
@@ -79,9 +80,13 @@ pub fn retrieve_relevant_chunks<'a>(
             let mut score = 0.0f64;
             let dl = c.content.len() as f64;
 
-            // Build token frequency map once per chunk (avoids O(q_words × tokens) scan)
-            let token_counts: std::collections::HashMap<String, usize> = {
-                let mut map = std::collections::HashMap::new();
+            // Use pre-computed token_counts from the index (avoids O(q_words × tokens) scan)
+            // For legacy indexes without pre-computed counts, compute on the fly.
+            // Cow avoids cloning the HashMap when counts are already available.
+            let token_counts: Cow<'_, HashMap<String, usize>> = if !c.token_counts.is_empty() {
+                Cow::Borrowed(&c.token_counts)
+            } else {
+                let mut map = HashMap::new();
                 for t in c
                     .content
                     .split(|ch: char| !ch.is_alphanumeric())
@@ -89,7 +94,7 @@ pub fn retrieve_relevant_chunks<'a>(
                 {
                     *map.entry(t.to_lowercase()).or_insert(0) += 1;
                 }
-                map
+                Cow::Owned(map)
             };
             let name_lower = c.name.to_lowercase();
             let path_lower = c.path.to_lowercase();
@@ -230,7 +235,6 @@ mod tests {
                 content: content.clone(),
                 start_line: 1,
                 end_line: 1,
-                embedding: None,
                 token_counts: HashMap::new(),
             }];
             let mut doc_freqs = HashMap::new();
@@ -256,7 +260,6 @@ mod tests {
                 content,
                 start_line: 1,
                 end_line: 1,
-                embedding: None,
                 token_counts: HashMap::new(),
             }];
             let index = make_index(chunks);
@@ -326,7 +329,6 @@ mod tests {
             content: "fn hello() {}".into(),
             start_line: 1,
             end_line: 1,
-            embedding: None,
             token_counts: HashMap::new(),
         }];
         let mut doc_freqs = HashMap::new();
@@ -346,7 +348,6 @@ mod tests {
                 content: "hello world".into(),
                 start_line: 1,
                 end_line: 1,
-                embedding: None,
                 token_counts: HashMap::new(),
             },
             IndexChunk {
@@ -356,7 +357,6 @@ mod tests {
                 content: "hello there".into(),
                 start_line: 1,
                 end_line: 1,
-                embedding: None,
                 token_counts: HashMap::new(),
             },
         ];
@@ -425,12 +425,48 @@ mod tests {
             content: "hello world".into(),
             start_line: 1,
             end_line: 1,
-            embedding: None,
             token_counts: HashMap::new(),
         };
         let index = make_index(vec![chunk]);
         let result = retrieve_relevant_chunks(&index, "", 5, 1000);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn retrieve_relevant_uses_precomputed_token_counts() {
+        let mut freq = HashMap::new();
+        freq.insert("hello".to_string(), 3usize);
+        freq.insert("world".to_string(), 2usize);
+        let chunk = IndexChunk {
+            path: "test.rs".into(),
+            name: "test.rs".into(),
+            chunk_type: "file".into(),
+            content: "hello hello hello world world".into(),
+            start_line: 1,
+            end_line: 1,
+            token_counts: freq, // pre-computed
+        };
+        let index = make_index(vec![chunk]);
+        // Query matching a term with pre-computed count
+        let result = retrieve_relevant_chunks(&index, "hello", 5, 1000);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].path, "test.rs");
+    }
+
+    #[test]
+    fn retrieve_relevant_computes_token_counts_on_the_fly() {
+        let chunk = IndexChunk {
+            path: "test.rs".into(),
+            name: "test.rs".into(),
+            chunk_type: "file".into(),
+            content: "hello world hello again".into(),
+            start_line: 1,
+            end_line: 1,
+            token_counts: HashMap::new(), // empty = compute on the fly
+        };
+        let index = make_index(vec![chunk]);
+        let result = retrieve_relevant_chunks(&index, "hello", 5, 1000);
+        assert_eq!(result.len(), 1);
     }
 
     #[test]
@@ -442,7 +478,6 @@ mod tests {
             content: "some code here".into(),
             start_line: 1,
             end_line: 1,
-            embedding: None,
             token_counts: HashMap::new(),
         };
         let index = make_index(vec![chunk]);
