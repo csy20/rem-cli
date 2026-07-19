@@ -64,15 +64,15 @@ fn setup_global_ctrlc_handler() {
             match tokio::signal::ctrl_c().await {
                 Ok(()) => {
                     consecutive_errors = 0;
-                    provider::STREAM_CANCELLED.store(true, Ordering::SeqCst);
+                    provider::STREAM_CANCELLED.store(true, Ordering::Relaxed);
                     // When REPL is active, the REPL handler owns counting via
                     // a local flag in read_user_input — never touch CTRL_C_COUNT.
-                    if REPL_ACTIVE.load(Ordering::SeqCst) {
+                    if REPL_ACTIVE.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let count = CTRL_C_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+                    let count = CTRL_C_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                     if count >= 2 {
-                        SHOULD_EXIT.store(true, Ordering::SeqCst);
+                        SHOULD_EXIT.store(true, Ordering::Release);
                     }
                 }
                 Err(e) => {
@@ -88,14 +88,14 @@ fn setup_global_ctrlc_handler() {
 
 /// Resets the Ctrl+C state (called before entering the REPL loop).
 pub(crate) fn reset_ctrlc_count() {
-    CTRL_C_COUNT.store(0, Ordering::SeqCst);
-    SHOULD_EXIT.store(false, Ordering::SeqCst);
-    crate::provider::STREAM_CANCELLED.store(false, Ordering::SeqCst);
+    CTRL_C_COUNT.store(0, Ordering::Relaxed);
+    SHOULD_EXIT.store(false, Ordering::Release);
+    crate::provider::STREAM_CANCELLED.store(false, Ordering::Relaxed);
 }
 
 /// Returns `true` if the user pressed Ctrl+C twice and wants to exit.
 pub(crate) fn exit_requested() -> bool {
-    SHOULD_EXIT.load(Ordering::SeqCst)
+    SHOULD_EXIT.load(Ordering::Acquire)
 }
 
 // ── Entry point ────────────────────────────────────────────────────────────
@@ -114,6 +114,14 @@ fn init_tracing() {
 async fn main() -> Result<()> {
     init_tracing();
     setup_global_ctrlc_handler();
+
+    // Load .env file (if present) before config so env vars are available for API keys
+    if let Err(e) = dotenvy::dotenv() {
+        // .env file is optional — only log at debug level if not found
+        if !e.not_found() {
+            tracing::warn!("failed to load .env file: {e}");
+        }
+    }
 
     let cli = Cli::parse();
     let verbose = cli.verbose;
@@ -151,7 +159,7 @@ async fn main() -> Result<()> {
     // Commands that don't need a provider — handle early
     let _handled = matches!(
         cli.command,
-        Some(Commands::New(_)) | Some(Commands::Index(_)) | Some(Commands::Pull(_))
+        Some(Commands::New(_)) | Some(Commands::Index(_)) | Some(Commands::Pull(_)) | Some(Commands::Completions(_))
     );
     if let Some(Commands::New(args)) = cli.command {
         return run_new(args, &cfg);
@@ -161,6 +169,9 @@ async fn main() -> Result<()> {
     }
     if let Some(Commands::Pull(args)) = cli.command {
         return run_pull(args, &cfg);
+    }
+    if let Some(Commands::Completions(args)) = cli.command {
+        return run_completions(args);
     }
 
     let system_prompt = load_system_prompt(cfg.prompts_dir.as_deref());
@@ -193,8 +204,11 @@ async fn main() -> Result<()> {
         Some(Commands::Explain(args)) => run_explain(&client, args).await,
         Some(Commands::Patch(args)) => run_patch(&client, &cfg, args).await,
         Some(Commands::Theme(args)) => run_theme(args),
-        Some(Commands::New(_)) | Some(Commands::Pull(_)) | Some(Commands::Index(_)) => {
-            unreachable!("New/Pull/Index handled by early return before client creation")
+        Some(Commands::New(_))
+        | Some(Commands::Pull(_))
+        | Some(Commands::Index(_))
+        | Some(Commands::Completions(_)) => {
+            unreachable!("New/Pull/Index/Completions handled by early return before client creation")
         }
         None => {
             let is_pipe = !std::io::stdin().is_terminal();

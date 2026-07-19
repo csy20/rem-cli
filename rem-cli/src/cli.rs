@@ -55,6 +55,8 @@ pub enum Commands {
     Pull(PullArgs),
     #[command(about = "List or switch color themes")]
     Theme(ThemeArgs),
+    #[command(about = "Generate shell completion scripts")]
+    Completions(CompletionsArgs),
 }
 
 /// Arguments for `rem ask`.
@@ -118,6 +120,13 @@ pub struct ThemeArgs {
 pub struct PullArgs {
     #[arg(help = "Model name to pull (e.g. qwen2.5-coder:1.5b)")]
     pub model: Option<String>,
+}
+
+/// Arguments for `rem completions`.
+#[derive(Args, Debug)]
+pub struct CompletionsArgs {
+    #[arg(help = "Shell type: bash, zsh, fish, powershell, elvish")]
+    pub shell: String,
 }
 
 /// Per-provider configuration overrides.

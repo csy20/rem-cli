@@ -14,6 +14,11 @@ pub mod repl;
 pub mod review;
 pub mod runner;
 pub mod session;
+pub mod session_compact;
+pub mod session_config;
+pub mod session_memory;
+pub mod session_persistence;
+pub mod session_workspace;
 pub mod tools;
 
 use std::borrow::Cow;
@@ -450,6 +455,15 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/semantic",
+            CommandInfo {
+                description: "Semantic code search using BM25",
+                usage: "/semantic <query>",
+                long_description: "Searches the codebase index using BM25 retrieval to find relevant code chunks\nbased on natural language queries. Requires a pre-built index (`rem index`).\n\nExamples:\n  /semantic user authentication\n  /semantic database connection pooling",
+                category: CommandCategory::Tools,
+            },
+        ),
+        (
             "/write",
             CommandInfo {
                 description: "Write content to a file",
@@ -754,7 +768,8 @@ pub(crate) use session::{
     handle_save_session, handle_session_analytics, handle_summary, handle_tokens,
 };
 pub(crate) use tools::{
-    handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_test,
+    handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_semantic,
+    handle_test,
 };
 
 #[cfg(test)]

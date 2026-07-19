@@ -43,7 +43,7 @@ impl SpinnerGuard {
         let label = theme::paint(&t, "text_faint", msg, false);
         let handle = tokio::spawn(async move {
             let mut i = 0usize;
-            while r.load(Ordering::SeqCst) {
+            while r.load(Ordering::Relaxed) {
                 eprint!("\r  {}  {}", glyph_cache[i], label);
                 let _ = io::stderr().flush();
                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
@@ -57,7 +57,7 @@ impl SpinnerGuard {
     }
 
     pub fn stop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
+        self.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }

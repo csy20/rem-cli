@@ -58,7 +58,9 @@ impl HistoryManager {
     pub(crate) fn new() -> Result<Self> {
         let mut rl = Editor::<RemHelper, DefaultHistory>::new().context("failed to start line editor")?;
         let history_path = Self::history_path();
-        let _ = rl.load_history(&history_path);
+        if let Err(e) = rl.load_history(&history_path) {
+            tracing::warn!("failed to load history from {}: {}", history_path.display(), e);
+        }
         rl.set_max_history_size(crate::constants::MAX_HISTORY_ENTRIES).ok();
         let _ = rl.bind_sequence(KeyEvent::ctrl('l'), Cmd::ClearScreen);
         Ok(Self {
@@ -98,9 +100,13 @@ impl HistoryManager {
     pub(crate) fn save_history(&mut self) {
         let path = Self::history_path();
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!("failed to create history parent dir: {}", e);
+            }
         }
-        let _ = self.rl.save_history(&path);
+        if let Err(e) = self.rl.save_history(&path) {
+            tracing::warn!("failed to save readline history: {}", e);
+        }
     }
 
     pub(crate) fn readline(&mut self, prompt: &str) -> io::Result<String> {

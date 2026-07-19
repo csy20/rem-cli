@@ -28,7 +28,7 @@ static CONFIG_CACHE: LazyLock<RwLock<Option<(AppConfig, u64)>>> = LazyLock::new(
 pub(crate) fn get_cached_config() -> Option<AppConfig> {
     let cache = CONFIG_CACHE.read().unwrap_or_else(|e| e.into_inner());
     let (cfg, gen) = cache.as_ref()?;
-    if *gen == CONFIG_GENERATION.load(Ordering::SeqCst) {
+    if *gen == CONFIG_GENERATION.load(Ordering::Relaxed) {
         Some(cfg.clone())
     } else {
         None
@@ -57,7 +57,7 @@ pub(crate) fn save_config(cfg: &AppConfig) -> Result<()> {
     }
     // Update cache directly instead of invalidating, to avoid re-reading from disk
     crate::pager::init_page_threshold(cfg.page_threshold);
-    let gen = CONFIG_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let gen = CONFIG_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
     *cache = Some((cfg.clone(), gen));
     Ok(())
@@ -155,7 +155,7 @@ pub(crate) fn load_config() -> Result<AppConfig> {
     {
         let cache = CONFIG_CACHE.read().unwrap_or_else(|e| e.into_inner());
         if let Some((ref cached, gen)) = *cache {
-            if gen == CONFIG_GENERATION.load(Ordering::SeqCst) {
+            if gen == CONFIG_GENERATION.load(Ordering::Relaxed) {
                 return Ok(cached.clone());
             }
         }
@@ -176,7 +176,7 @@ pub(crate) fn load_config() -> Result<AppConfig> {
         cfg.apply_partial(partial);
     }
     crate::pager::init_page_threshold(cfg.page_threshold);
-    let gen = CONFIG_GENERATION.load(Ordering::SeqCst);
+    let gen = CONFIG_GENERATION.load(Ordering::Relaxed);
     let mut cache = CONFIG_CACHE.write().unwrap_or_else(|e| e.into_inner());
     *cache = Some((cfg.clone(), gen));
     Ok(cfg)
@@ -438,7 +438,7 @@ pub(crate) fn validate_config(cfg: &AppConfig) -> Result<()> {
 
 /// Invalidates the in-memory config cache so the next call to load_config re-reads from disk.
 pub(crate) fn invalidate_config_cache() {
-    CONFIG_GENERATION.fetch_add(1, Ordering::SeqCst);
+    CONFIG_GENERATION.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut cache) = CONFIG_CACHE.write() {
         *cache = None;
     }

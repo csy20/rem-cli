@@ -33,6 +33,7 @@ pub struct OpenAIStreamChoice {
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAIStreamDelta {
+    #[allow(dead_code)]
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<OpenAIStreamToolCall>>,

@@ -488,7 +488,9 @@ fn cleanup_dirs(dirs_to_clean: Vec<PathBuf>) {
     dirs.sort_by_key(|b| std::cmp::Reverse(b.as_os_str().len()));
     for dir in &dirs {
         if dir.exists() {
-            let _ = fs::remove_dir(dir);
+            if let Err(e) = fs::remove_dir(dir) {
+                tracing::warn!("failed to remove empty dir {}: {}", dir.display(), e);
+            }
         }
     }
 }
@@ -623,6 +625,7 @@ enum CopyResult {
 }
 
 fn try_copy_to_clipboard(text: &str) -> CopyResult {
+    const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let clipboard_tools: Vec<(&str, &[&str])> = vec![
         #[cfg(target_os = "linux")]
         ("wl-copy", &[]),
@@ -651,9 +654,19 @@ fn try_copy_to_clipboard(text: &str) -> CopyResult {
         let _ = child.stdin.take().map(|mut stdin| {
             let _ = stdin.write_all(text.as_bytes());
         });
-        match child.wait() {
-            Ok(status) if status.success() => return CopyResult::Success,
-            _ => continue,
+
+        let pid = child.id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(child.wait());
+        });
+        match rx.recv_timeout(CLIPBOARD_TIMEOUT) {
+            Ok(Ok(status)) if status.success() => return CopyResult::Success,
+            _ => {
+                let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+                tracing::warn!("clipboard tool '{}' timed out, killed", tool);
+                continue;
+            }
         }
     }
     CopyResult::FallbackToConsole

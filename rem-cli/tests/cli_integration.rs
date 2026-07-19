@@ -305,3 +305,70 @@ fn version_flag_shows_version_number() {
     assert!(stdout.chars().any(|c| c.is_ascii_digit()), "stdout: {stdout}");
     assert!(stdout.contains('.'), "stdout: {stdout}");
 }
+
+#[test]
+fn help_shows_completions_subcommand() {
+    let output = Command::new(rem_binary())
+        .arg("--help")
+        .output()
+        .expect("failed to run rem --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("completions"), "stdout: {stdout}");
+}
+
+#[test]
+fn completions_bash_generates_output() {
+    let output = Command::new(rem_binary())
+        .args(["completions", "bash"])
+        .output()
+        .expect("failed to run rem completions bash");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("_rem"), "stdout: {stdout}");
+    assert!(stdout.contains("complete"), "stdout: {stdout}");
+}
+
+#[test]
+fn completions_fish_generates_output() {
+    let output = Command::new(rem_binary())
+        .args(["completions", "fish"])
+        .output()
+        .expect("failed to run rem completions fish");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("complete"), "stdout: {stdout}");
+}
+
+#[test]
+fn completions_zsh_generates_output() {
+    let output = Command::new(rem_binary())
+        .args(["completions", "zsh"])
+        .output()
+        .expect("failed to run rem completions zsh");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("_rem"), "stdout: {stdout}");
+}
+
+#[test]
+fn completions_powershell_generates_output() {
+    let output = Command::new(rem_binary())
+        .args(["completions", "powershell"])
+        .output()
+        .expect("failed to run rem completions powershell");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Register-ArgumentCompleter"), "stdout: {stdout}");
+}
+
+#[test]
+fn completions_elvish_generates_output() {
+    let output = Command::new(rem_binary())
+        .args(["completions", "elvish"])
+        .output()
+        .expect("failed to run rem completions elvish");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.is_empty(), "stdout should not be empty");
+}

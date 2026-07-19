@@ -408,6 +408,144 @@ fn format_find_matches(
     buf
 }
 
+/// Performs semantic code search (`/semantic` command).
+/// Uses BM25 retrieval against the codebase index.
+pub(crate) fn handle_semantic(session: &ChatSession, query: &str) {
+    let t = ui::theme::active();
+    if query.is_empty() {
+        println!("{}", ui::theme::paint_rail_empty(&t));
+        println!(
+            "{} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_bright(&t, "usage: /semantic <natural language query>")
+        );
+        println!(
+            "{}  {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, "search the codebase index using BM25 retrieval")
+        );
+        println!("{}", ui::theme::paint_rail_empty(&t));
+        return;
+    }
+
+    let root = session
+        .ctx
+        .project_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let index = match crate::indexer::load_codebase_index(&root) {
+        Some(idx) => idx,
+        None => {
+            println!("{}", ui::theme::paint_rail_empty(&t));
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_warning(&t, "no codebase index found")
+            );
+            println!(
+                "{} {}",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "run `rem index` first to build the search index")
+            );
+            println!("{}", ui::theme::paint_rail_empty(&t));
+            return;
+        }
+    };
+
+    let hits = crate::indexer::retrieve_relevant_chunks(&index, query, 10, 6000);
+
+    println!("{}", ui::theme::paint_rail_empty(&t));
+    println!(
+        "{} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_bright(&t, &format!("\u{203a} SEMANTIC  {}", query)),
+    );
+    println!(
+        "{} {} {}",
+        ui::theme::paint(&t, "accent", "\u{258C}", true),
+        ui::theme::paint_dim(&t, "in"),
+        ui::theme::paint_bright(&t, &format!("{}", root.display()))
+    );
+    println!("{}", ui::theme::paint_rail_empty(&t));
+
+    if hits.is_empty() {
+        println!(
+            "{} {}",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_warning(&t, "(no relevant chunks found)")
+        );
+        println!("{}", ui::theme::paint_rail_empty(&t));
+        return;
+    }
+
+    let mut buf = String::new();
+    for (i, c) in hits.iter().enumerate() {
+        let loc = if c.start_line > 0 && c.end_line > 0 {
+            format!("{}:{}-{}", c.path, c.start_line, c.end_line)
+        } else {
+            c.path.clone()
+        };
+        let type_tag = if !c.chunk_type.is_empty() && c.chunk_type != "file" {
+            format!(" ({})", c.chunk_type)
+        } else {
+            String::new()
+        };
+        buf.push_str(&format!(
+            "{} {}  {}{}\n",
+            ui::theme::paint(&t, "accent", "\u{258C}", true),
+            ui::theme::paint_dim(&t, &format!("#{}", i + 1)),
+            ui::theme::paint_bright(&t, &loc),
+            ui::theme::paint_dim(&t, &type_tag),
+        ));
+        for line in c.content.lines().take(5) {
+            let trimmed = if line.len() > 120 {
+                format!("{}…", &line[..120])
+            } else {
+                line.to_string()
+            };
+            buf.push_str(&format!(
+                "{} {}   {}\n",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
+                ui::theme::paint(&t, "text_faint", &trimmed, false),
+            ));
+        }
+        if c.content.lines().count() > 5 {
+            buf.push_str(&format!(
+                "{} {}   {} more lines\n",
+                ui::theme::paint(&t, "accent", "\u{258C}", true),
+                ui::theme::paint_dim(&t, "\u{251c}\u{2500}\u{2500}"),
+                c.content.lines().count() - 5,
+            ));
+        }
+        buf.push('\n');
+    }
+    buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(&t)));
+    let summary = format!(
+        "  {} chunk{} in {} · {} chunks indexed",
+        hits.len(),
+        if hits.len() == 1 { "" } else { "s" },
+        {
+            let mut files: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for c in &hits {
+                files.insert(&c.path);
+            }
+            files.len()
+        },
+        index.num_chunks,
+    );
+    buf.push_str(&ui::theme::paint_success_label(&t, &summary));
+    buf.push('\n');
+    buf.push_str(&format!("{}\n", ui::theme::paint_rail_empty(&t)));
+
+    if hits.len() > 5 {
+        crate::pager::maybe_page(&buf);
+    } else {
+        print!("{}", buf);
+    }
+}
+
 /// Truncates a string to a max number of characters for display.
 fn trim_for_display(s: &str, max: usize) -> String {
     if s.chars().count() <= max {

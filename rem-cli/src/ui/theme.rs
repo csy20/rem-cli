@@ -89,7 +89,7 @@ fn load_custom_theme(path: &PathBuf) -> Option<(String, Theme)> {
 
 /// Loads all custom themes from `~/.config/rem-cli/themes/`.
 fn load_custom_themes() {
-    if CUSTOM_THEMES_LOADED.swap(true, Ordering::SeqCst) {
+    if CUSTOM_THEMES_LOADED.swap(true, Ordering::AcqRel) {
         return;
     }
     let theme_dir = dirs::home_dir().map(|h| h.join(".config/rem-cli/themes"));

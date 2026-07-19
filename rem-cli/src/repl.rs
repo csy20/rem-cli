@@ -18,9 +18,9 @@ use crate::commands::{
     handle_model, handle_page, handle_ping, handle_plan, handle_plugin, handle_prompt_delete, handle_prompt_list,
     handle_prompt_save, handle_prompt_save_force, handle_provider, handle_pull_model, handle_reasoning,
     handle_refactor, handle_reload, handle_reset, handle_resume_session, handle_review, handle_save_session,
-    handle_search, handle_session_analytics, handle_status, handle_summary, handle_test, handle_theme, handle_tokens,
-    handle_undo, handle_vision, handle_why, handle_write, print_chat_help, print_command_help, print_last_files,
-    prompt_for_path,
+    handle_search, handle_semantic, handle_session_analytics, handle_status, handle_summary, handle_test, handle_theme,
+    handle_tokens, handle_undo, handle_vision, handle_why, handle_write, print_chat_help, print_command_help,
+    print_last_files, prompt_for_path,
 };
 use crate::config::first_run_setup;
 use crate::constants::{CHAT_SYSTEM_PROMPT_CODE, CHAT_SYSTEM_PROMPT_CONVERSATIONAL, CHAT_SYSTEM_PROMPT_PLAN};
@@ -214,9 +214,9 @@ fn read_user_input(session: &mut ChatSession, prompt: &str, t: &crate::ui::theme
             }
             Err(e) => {
                 if e.kind() == io::ErrorKind::Interrupted || e.kind() == io::ErrorKind::UnexpectedEof {
-                    crate::provider::STREAM_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+                    crate::provider::STREAM_CANCELLED.store(true, std::sync::atomic::Ordering::Relaxed);
 
-                    if interrupted_once || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::SeqCst) {
+                    if interrupted_once || crate::SHOULD_EXIT.load(std::sync::atomic::Ordering::Relaxed) {
                         println!("  {} Ctrl+C pressed twice -- bye!", ui::theme::paint_dim(t, "!"));
                         session.save_history();
                         session.auto_save_session();
@@ -422,6 +422,10 @@ async fn dispatch_slash_command(
         }
         "/find" => {
             handle_find(session, args);
+            return false;
+        }
+        "/semantic" => {
+            handle_semantic(session, args);
             return false;
         }
         "/save" => {
@@ -630,7 +634,7 @@ fn build_last_code_context(session: &ChatSession, trimmed: &str) -> String {
     if session.code_out.last_code.is_empty() && session.code_out.last_files.is_empty() {
         return String::new();
     }
-    let mod_triggers = [
+    const MOD_TRIGGERS: &[&str] = &[
         "add",
         "update",
         "change",
@@ -646,32 +650,47 @@ fn build_last_code_context(session: &ChatSession, trimmed: &str) -> String {
         "extend",
         "expand",
     ];
-    let lower_in = trimmed.to_lowercase();
-    let words: Vec<&str> = lower_in.split_whitespace().collect();
-    let has_trigger = mod_triggers.iter().any(|t| {
-        words
-            .iter()
-            .any(|w| w.trim_matches(|c: char| !c.is_alphanumeric()) == *t)
-    });
-    let has_qualifier = words.contains(&"also") || words.contains(&"more") || lower_in.contains("and then");
+
+    // Scan words in-place without allocating a Vec
+    let has_trigger = {
+        let mut matched = false;
+        for word in trimmed.split_whitespace() {
+            let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric());
+            if MOD_TRIGGERS.contains(&cleaned) {
+                matched = true;
+                break;
+            }
+        }
+        matched
+    };
+    let lower = trimmed.to_lowercase();
+    let has_qualifier = lower.starts_with("also ")
+        || lower.starts_with("more ")
+        || lower.contains("and then")
+        || lower.split_whitespace().any(|w| w == "also" || w == "more");
     if !has_trigger && !has_qualifier {
         return String::new();
     }
 
-    let mut ctx = String::new();
+    let mut ctx = String::with_capacity(512);
     if !session.code_out.last_code.is_empty() {
         let truncated = crate::truncate_bytes(&session.code_out.last_code, 6000);
-        ctx = format!("\n[Last generated code (for reference)]:\n```\n{}\n```\n", truncated);
+        ctx.push_str("\n[Last generated code (for reference)]:\n```\n");
+        ctx.push_str(&truncated);
+        ctx.push_str("\n```\n");
     }
     if !session.code_out.last_files.is_empty() {
-        let mut files_ctx = String::from("\n[Last generated files]:\n");
+        ctx.push_str("\n[Last generated files]:\n");
         for f in &session.code_out.last_files {
             if !f.path.is_empty() {
                 let truncated = crate::truncate_bytes(&f.content, 3000);
-                files_ctx.push_str(&format!("\n### {}\n```\n{}\n```\n", f.path, truncated));
+                ctx.push_str("\n### ");
+                ctx.push_str(&f.path);
+                ctx.push_str("\n```\n");
+                ctx.push_str(&truncated);
+                ctx.push_str("\n```\n");
             }
         }
-        ctx.push_str(&files_ctx);
     }
     ctx
 }
@@ -722,7 +741,7 @@ fn handle_llm_response(
             ui::theme::paint_warning(t, "\u{258C}"),
             ui::theme::paint_dim(t, "(empty response)")
         );
-    } else if crate::provider::HAD_STREAMING_OUTPUT.load(std::sync::atomic::Ordering::SeqCst) {
+    } else if crate::provider::HAD_STREAMING_OUTPUT.load(std::sync::atomic::Ordering::Relaxed) {
         // Content was already streamed to stdout line by line — skip re-display
     } else {
         display_text_output(&cleaned, t);
@@ -747,7 +766,7 @@ fn handle_llm_response(
 /// calls the LLM, and manages conversation history.
 pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose: bool) -> Result<()> {
     reset_ctrlc_count();
-    crate::REPL_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::REPL_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     crate::commands::init_plugin_manager();
     let mut session = initialize_session(client, cfg)?;
     let t = ui::theme::active();
@@ -774,7 +793,7 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         let line = match read_user_input(&mut session, &prompt, &t) {
             Some(l) => l,
             None => {
-                crate::REPL_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+                crate::REPL_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
                 return Ok(());
             }
         };
@@ -894,17 +913,17 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
         }
 
         // Reset cancellation and streaming tracking flags right before the LLM call
-        crate::provider::STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
-        crate::provider::HAD_STREAMING_OUTPUT.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::provider::STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        crate::provider::HAD_STREAMING_OUTPUT.store(false, std::sync::atomic::Ordering::Relaxed);
 
         // Spinner during LLM call (writes to stderr; tokens stream to stdout, no conflict)
         let _spinner = crate::ui::output::SpinnerGuard::new("thinking...");
 
-        crate::provider::STREAM_TOKENS.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::provider::STREAM_TOKENS.store(true, std::sync::atomic::Ordering::Relaxed);
         let result = client
             .complete_chat_stream(&full_prompt, &system_prompt, &history_ctx)
             .await;
-        crate::provider::STREAM_TOKENS.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::provider::STREAM_TOKENS.store(false, std::sync::atomic::Ordering::Relaxed);
 
         // Spinner stops automatically when _spinner is dropped
         let elapsed = start.elapsed();
@@ -946,7 +965,7 @@ pub(crate) async fn run_chat(client: &mut Provider, cfg: &mut AppConfig, verbose
             break;
         }
     }
-    crate::REPL_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::REPL_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 

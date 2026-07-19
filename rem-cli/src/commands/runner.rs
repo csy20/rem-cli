@@ -7,9 +7,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use clap::CommandFactory;
 use walkdir::WalkDir;
 
-use crate::cli::{AppConfig, AskArgs, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs, ThemeArgs};
+use crate::cli::{
+    AppConfig, AskArgs, Cli, CompletionsArgs, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs, ThemeArgs,
+};
 use crate::config;
 use crate::constants::CHAT_SYSTEM_PROMPT_CONVERSATIONAL;
 use crate::find;
@@ -137,6 +140,20 @@ pub(crate) fn run_pull(args: PullArgs, cfg: &AppConfig) -> Result<()> {
     } else {
         Err(anyhow!("failed to pull model '{}'", model))
     }
+}
+
+pub(crate) fn run_completions(args: CompletionsArgs) -> Result<()> {
+    use clap_complete::{generate, Shell};
+    let shell: Shell = args.shell.parse().map_err(|_| {
+        anyhow!(
+            "unknown shell '{}'. Supported: bash, zsh, fish, powershell, elvish",
+            args.shell
+        )
+    })?;
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    generate(shell, &mut cmd, name, &mut std::io::stdout());
+    Ok(())
 }
 
 pub(crate) async fn run_explain(client: &Provider, args: ExplainArgs) -> Result<()> {
@@ -411,7 +428,7 @@ mod tests {
 
     fn unique_dir(prefix: &str) -> (std::path::PathBuf, TempDir) {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("rem-unit-{}-{}-{}", prefix, std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         let guard = TempDir(dir.clone());

@@ -36,6 +36,9 @@ pub fn handle_page() {
 /// Initialized to 50 by default; can be overridden via config or `init_page_threshold`.
 static PAGE_THRESHOLD: LazyLock<RwLock<usize>> = LazyLock::new(|| RwLock::new(50));
 
+/// Timeout for pager process (30 minutes). Prevents indefinite hangs.
+static PAGER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
+
 /// Initialize the page threshold from config. Should be called at startup.
 pub fn init_page_threshold(threshold: usize) {
     let mut t = PAGE_THRESHOLD.write().unwrap_or_else(|e| e.into_inner());
@@ -73,7 +76,15 @@ pub fn maybe_page(text: &str) {
         let _ = stdin.write_all(text.as_bytes());
     }
 
-    let _ = child.wait();
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
+    if rx.recv_timeout(PAGER_TIMEOUT).is_err() {
+        tracing::warn!("pager timed out after 30 min, killing process {}", pid);
+        let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+    }
 }
 
 fn pager_args(cmd: &str) -> Vec<&str> {

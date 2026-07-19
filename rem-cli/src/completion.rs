@@ -157,7 +157,47 @@ impl Validator for RemHelper {
     }
 }
 
-impl Highlighter for RemHelper {}
+impl Highlighter for RemHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> std::borrow::Cow<'l, str> {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            return std::borrow::Cow::Borrowed(line);
+        }
+
+        let t = crate::ui::theme::active();
+
+        // Highlight slash commands (entire first token if it starts with /)
+        if trimmed.starts_with('/') {
+            let first_word = trimmed.split(' ').next().unwrap_or(trimmed);
+            if let Some(idx) = line.find(first_word) {
+                let before = &line[..idx];
+                let highlighted = crate::ui::theme::paint(&t, "accent", first_word, true);
+                let after = &line[idx + first_word.len()..];
+                return std::borrow::Cow::Owned(format!("{}{}{}", before, highlighted, after));
+            }
+        }
+
+        // Highlight @path references
+        if let Some(at_pos) = line.rfind('@') {
+            // Make sure it's not part of http://
+            if !line[..at_pos].ends_with("http:/") && !line[..at_pos].ends_with("https:/") {
+                let after_at = &line[at_pos + 1..];
+                let end = after_at
+                    .find(|c: char| c.is_whitespace() || c == '>' || c == '"' || c == '\'')
+                    .unwrap_or(after_at.len());
+                let ref_path = &after_at[..end];
+                if !ref_path.is_empty() && !ref_path.starts_with("http") {
+                    let before = &line[..at_pos];
+                    let after = &line[at_pos + 1 + end..];
+                    let painted_ref = crate::ui::theme::paint(&t, "accent_info", &format!("@{}", ref_path), true);
+                    return std::borrow::Cow::Owned(format!("{}{}{}", before, painted_ref, after));
+                }
+            }
+        }
+
+        std::borrow::Cow::Borrowed(line)
+    }
+}
 
 impl Helper for RemHelper {}
 
@@ -221,7 +261,7 @@ mod tests {
 
     #[test]
     fn complete_subcommands_session() {
-        let helper = RemHelper;
+        let _helper = RemHelper;
         // We can't easily test the Completer trait directly, but we can verify
         // the subcommand list is correct by checking the registry
         let reg = crate::commands::registry();

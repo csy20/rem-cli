@@ -1,18 +1,23 @@
-use std::collections::HashMap;
-use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Instant;
+//! LLM provider infrastructure.
+//!
+//! This module defines the provider abstraction layer including:
+//! - [`ProviderKind`] — enum over all supported LLM backends
+//! - [`ProviderContext`] — immutable shared state (URL, credentials, model)
+//! - [`ProviderBackend`] — async trait each provider implements
+//! - [`Provider`] — the public-facing client with retry & circuit-breaker
+//!
+//! Sub-modules group the remaining functionality:
+//! - [`provider_error`] — `ProviderError`, API error parsing, JSON fallback
+//! - [`provider_stream`] — streaming helpers, SSE handlers, inline markdown
+//! - [`provider_http`] — HTTP client, URL builders, OpenAI-compat wrappers
+//! - [`provider_retry`] — circuit breaker, transient-error detection, retry loop
 
-use rand::Rng;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use futures_util::StreamExt;
-use reqwest::Client;
-use serde::Deserialize;
-use serde_json::json;
-use tokio::time::{sleep, timeout, Duration};
+
+// ── Sub-modules ───────────────────────────────────────────────────────────
 
 pub mod anthropic;
 pub mod bedrock;
@@ -21,197 +26,32 @@ pub mod gemini;
 pub mod ollama;
 pub mod openai;
 pub(crate) mod openai_compat;
+pub(crate) mod provider_error;
+pub mod provider_http;
+pub(crate) mod provider_retry;
+pub(crate) mod provider_stream;
 pub mod tools;
 
 #[cfg(test)]
 mod tests;
 
-/// Structured error type for LLM provider operations.
-/// Each variant carries a human-readable description and supports
-/// downcast-based inspection in retry logic and error reporting.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ProviderError {
-    #[error("authentication failed: {0}")]
-    Auth(String),
-    #[error("rate limited: {0}")]
-    RateLimit(String),
-    #[error("request timed out: {0}")]
-    Timeout(String),
-    #[error("server error: {0}")]
-    ServerError(String),
-    #[error("cancelled by user")]
-    Cancelled,
-    #[error("response too large ({0} bytes)")]
-    ResponseTooLarge(u64),
-    #[error("{0}")]
-    Other(String),
-}
+// ── Re-exports from sub-modules ──────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-struct LlmErrorResponse {
-    #[serde(default)]
-    error: LlmErrorBody,
-}
+pub(crate) use crate::constants::MAX_RESPONSE_BYTES;
+pub(crate) use provider_error::{handle_ollama_error, parse_api_error, parse_json_fallback, ProviderError};
+#[allow(unused_imports)]
+pub(crate) use provider_http::{
+    add_openai_auth, build_messages_from_history, openai_chat_url, openai_compat_chat_stream,
+    openai_compat_chat_stream_with_tools, openai_compat_chat_stream_with_vision, openai_compat_complete_json,
+    openai_compat_list_models, openai_models_url, parse_history_turns,
+};
+pub(crate) use provider_retry::with_retry_and_circuit_breaker;
+pub(crate) use provider_stream::{
+    emit_token, stream_anthropic_sse, stream_buf, stream_gemini_sse, stream_sse_response, HAD_STREAMING_OUTPUT,
+    HTTP_CLIENT, STREAM_CANCELLED, STREAM_TOKENS,
+};
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(untagged)]
-enum LlmErrorBody {
-    #[default]
-    Empty,
-    String(String),
-    Object {
-        message: Option<String>,
-        r#type: Option<String>,
-    },
-}
-
-impl std::fmt::Display for LlmErrorBody {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LlmErrorBody::Empty => write!(f, "unknown error"),
-            LlmErrorBody::String(s) => write!(f, "{s}"),
-            LlmErrorBody::Object { message, r#type } => {
-                if let Some(msg) = message {
-                    write!(f, "{msg}")?;
-                }
-                if let Some(t) = r#type {
-                    if message.is_some() {
-                        write!(f, " ({t})")?;
-                    } else {
-                        write!(f, "{t}")?;
-                    }
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-pub(crate) static STREAM_CANCELLED: AtomicBool = AtomicBool::new(false);
-pub(crate) static STREAM_TOKENS: AtomicBool = AtomicBool::new(false);
-
-/// Tracks whether any streaming tokens were actually emitted to stdout.
-/// Used by the REPL to avoid re-displaying content that was already shown.
-pub(crate) static HAD_STREAMING_OUTPUT: AtomicBool = AtomicBool::new(false);
-
-/// Reusable HTTP client with connection pooling (no hard timeout — individual
-/// requests use their own per-call timeouts via tokio::time::timeout).
-pub(crate) static HTTP_CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
-    Client::builder()
-        .pool_max_idle_per_host(4)
-        .build()
-        .unwrap_or_else(|_| Client::new())
-});
-
-pub(crate) use crate::constants::{MAX_RESPONSE_BYTES, STREAM_CHUNK_TIMEOUT};
-
-// ── Circuit breaker for provider retries ─────────────────────────────────
-
-const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
-const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
-
-#[derive(Default)]
-struct CircuitState {
-    consecutive_failures: u32,
-    cooldown_until: Option<Instant>,
-}
-
-static CIRCUIT_BREAKER: LazyLock<Mutex<HashMap<ProviderKind, CircuitState>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn circuit_breaker_check(kind: ProviderKind) -> Result<()> {
-    let mut cb = CIRCUIT_BREAKER.lock().unwrap_or_else(|e| e.into_inner());
-    let state = cb.entry(kind).or_default();
-    if state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-        if let Some(cooldown) = state.cooldown_until {
-            if Instant::now() < cooldown {
-                return Err(anyhow!(
-                    "circuit breaker open for {} — too many transient errors ({} consecutive). Retry in ~{}s",
-                    kind.as_str(),
-                    state.consecutive_failures,
-                    cooldown.saturating_duration_since(Instant::now()).as_secs(),
-                ));
-            }
-            // Cooldown expired — reset
-            state.consecutive_failures = 0;
-            state.cooldown_until = None;
-        }
-    }
-    Ok(())
-}
-
-fn circuit_breaker_record_success(kind: ProviderKind) {
-    let mut cb = CIRCUIT_BREAKER.lock().unwrap_or_else(|e| e.into_inner());
-    let state = cb.entry(kind).or_default();
-    state.consecutive_failures = 0;
-    state.cooldown_until = None;
-}
-
-fn circuit_breaker_record_failure(kind: ProviderKind) {
-    let mut cb = CIRCUIT_BREAKER.lock().unwrap_or_else(|e| e.into_inner());
-    let state = cb.entry(kind).or_default();
-    state.consecutive_failures += 1;
-    if state.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD {
-        state.cooldown_until = Some(Instant::now() + Duration::from_secs(CIRCUIT_BREAKER_COOLDOWN_SECS));
-        tracing::warn!(
-            "circuit breaker tripped for {} — {} consecutive failures, cooling down for {}s",
-            kind.as_str(),
-            state.consecutive_failures,
-            CIRCUIT_BREAKER_COOLDOWN_SECS,
-        );
-    }
-}
-
-// ── ProviderContext: immutable shared state extracted from Provider ──────
-
-#[derive(Clone)]
-pub(crate) struct ProviderContext {
-    pub client: Client,
-    pub base_url: String,
-    pub model: String,
-    pub api_key: Option<String>,
-    pub model_ctx: usize,
-    pub kind: ProviderKind,
-    pub reasoning_config: crate::reasoning::ReasoningConfig,
-}
-
-impl ProviderContext {
-    pub fn new(
-        base_url: String,
-        model: String,
-        api_key: Option<String>,
-        model_ctx: usize,
-        kind: ProviderKind,
-        reasoning_config: crate::reasoning::ReasoningConfig,
-        client: Client,
-    ) -> Self {
-        Self {
-            client,
-            base_url,
-            model,
-            api_key,
-            model_ctx,
-            kind,
-            reasoning_config,
-        }
-    }
-
-    pub fn api_key_str(&self) -> &str {
-        self.api_key.as_deref().unwrap_or("")
-    }
-}
-
-impl std::fmt::Debug for ProviderContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderContext")
-            .field("base_url", &self.base_url)
-            .field("model", &self.model)
-            .field("model_ctx", &self.model_ctx)
-            .finish()
-    }
-}
-
-// ── Provider ─────────────────────────────────────────────────────────────
+// ── ProviderKind ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::upper_case_acronyms)]
@@ -264,6 +104,57 @@ impl ProviderKind {
     }
 }
 
+// ── ProviderContext ───────────────────────────────────────────────────────
+
+#[derive(Clone)]
+pub(crate) struct ProviderContext {
+    pub client: reqwest::Client,
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub model_ctx: usize,
+    pub kind: ProviderKind,
+    pub reasoning_config: crate::reasoning::ReasoningConfig,
+}
+
+impl ProviderContext {
+    pub fn new(
+        base_url: String,
+        model: String,
+        api_key: Option<String>,
+        model_ctx: usize,
+        kind: ProviderKind,
+        reasoning_config: crate::reasoning::ReasoningConfig,
+        client: reqwest::Client,
+    ) -> Self {
+        Self {
+            client,
+            base_url,
+            model,
+            api_key,
+            model_ctx,
+            kind,
+            reasoning_config,
+        }
+    }
+
+    pub fn api_key_str(&self) -> &str {
+        self.api_key.as_deref().unwrap_or("")
+    }
+}
+
+impl std::fmt::Debug for ProviderContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderContext")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("model_ctx", &self.model_ctx)
+            .finish()
+    }
+}
+
+// ── ProviderBackend trait ─────────────────────────────────────────────────
+
 #[async_trait]
 pub(crate) trait ProviderBackend: Send + Sync {
     async fn list_models(&self, ctx: &ProviderContext) -> Result<Vec<String>>;
@@ -299,6 +190,8 @@ pub(crate) trait ProviderBackend: Send + Sync {
     ) -> Result<tools::ToolResponse>;
 }
 
+// ── Provider struct ───────────────────────────────────────────────────────
+
 pub struct Provider {
     pub kind: ProviderKind,
     pub ctx: ProviderContext,
@@ -308,16 +201,7 @@ pub struct Provider {
     backend: Box<dyn ProviderBackend>,
 }
 
-impl Provider {
-    /// Builds a ProviderContext with the current reasoning_config synced.
-    fn build_ctx(&self) -> ProviderContext {
-        let mut ctx = self.ctx.clone();
-        ctx.reasoning_config = self.reasoning_config;
-        ctx
-    }
-}
-
-// ── Default base URLs and models ─────────────────────────────────────────
+// ── Default config tables ─────────────────────────────────────────────────
 
 const DEFAULT_BASE_URLS: &[(ProviderKind, &str)] = &[
     (ProviderKind::Ollama, "http://localhost:11434"),
@@ -392,13 +276,13 @@ struct UnsupportedBackend;
 #[async_trait]
 impl ProviderBackend for UnsupportedBackend {
     async fn list_models(&self, _ctx: &ProviderContext) -> Result<Vec<String>> {
-        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
+        Err(anyhow::anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
     async fn complete_json(&self, _ctx: &ProviderContext, _sp: &str, _up: &str) -> Result<crate::ModelReply> {
-        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
+        Err(anyhow::anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
     async fn complete_chat_stream(&self, _ctx: &ProviderContext, _sp: &str, _up: &str, _hist: &str) -> Result<String> {
-        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
+        Err(anyhow::anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
     async fn complete_chat_stream_with_vision(
         &self,
@@ -409,7 +293,7 @@ impl ProviderBackend for UnsupportedBackend {
         _mime: &str,
         _b64: &str,
     ) -> Result<String> {
-        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
+        Err(anyhow::anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
     async fn complete_chat_stream_with_tools(
         &self,
@@ -419,19 +303,11 @@ impl ProviderBackend for UnsupportedBackend {
         _hist: &str,
         _tools: &[tools::ToolSpec],
     ) -> Result<tools::ToolResponse> {
-        Err(anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
+        Err(anyhow::anyhow!("AWS Bedrock not compiled (enable 'bedrock' feature)"))
     }
 }
 
 // ─── Provider implementation ─────────────────────────────────────────────
-
-fn build_client(timeout_s: u64) -> Client {
-    Client::builder()
-        .pool_max_idle_per_host(4)
-        .timeout(std::time::Duration::from_secs(timeout_s))
-        .build()
-        .unwrap_or_else(|_| HTTP_CLIENT.clone())
-}
 
 impl Provider {
     pub fn new(
@@ -443,7 +319,7 @@ impl Provider {
         api_key: Option<String>,
         model_ctx: usize,
     ) -> Self {
-        let client = build_client(timeout_s);
+        let client = provider_http::build_client(timeout_s);
         let reasoning_config = crate::reasoning::ReasoningConfig::default();
         let ctx = ProviderContext::new(base_url, model, api_key, model_ctx, kind, reasoning_config, client);
         let last_usage = Arc::new(Mutex::new(anthropic::AnthropicUsage::default()));
@@ -488,6 +364,12 @@ impl Provider {
         }
     }
 
+    fn build_ctx(&self) -> ProviderContext {
+        let mut ctx = self.ctx.clone();
+        ctx.reasoning_config = self.reasoning_config;
+        ctx
+    }
+
     pub fn supports_tools(&self) -> bool {
         tools::provider_supports_tools(&self.kind)
     }
@@ -512,130 +394,25 @@ impl Provider {
         }
     }
 
-    // ─── Retry logic ────────────────────────────────────────────────────
-
-    fn is_transient_error(e: &anyhow::Error) -> bool {
-        let err_str = e.to_string();
-        // Check for ProviderError variants
-        if let Some(pe) = e.downcast_ref::<ProviderError>() {
-            return matches!(
-                pe,
-                ProviderError::Timeout(_) | ProviderError::RateLimit(_) | ProviderError::ServerError(_)
-            );
-        }
-        if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
-            return true;
-        }
-        if let Some(req_err) = e.downcast_ref::<reqwest::Error>() {
-            if req_err.is_timeout() || req_err.is_connect() {
-                return true;
-            }
-            if let Some(status) = req_err.status() {
-                let code = status.as_u16();
-                if code == 429 || (500..=504).contains(&code) {
-                    return true;
-                }
-            }
-        }
-        err_str.contains("connection refused")
-            || err_str.contains("connection reset")
-            || err_str.contains("timed out")
-            // Match HTTP 429 and 5xx status codes precisely (not substring)
-            || err_str.contains("429 ")
-            || err_str.contains("429,")
-            || err_str.contains("500 ")
-            || err_str.contains("501 ")
-            || err_str.contains("502 ")
-            || err_str.contains("503 ")
-            || err_str.contains("504 ")
-    }
-
-    async fn with_retry<F, Fut, T>(f: F) -> Result<T>
-    where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<T>>,
-    {
-        // If stream was cancelled (e.g. Ctrl+C), don't retry
-        if STREAM_CANCELLED.load(Ordering::SeqCst) {
-            return Err(anyhow!(ProviderError::Cancelled));
-        }
-        let mut last_err = None;
-        for attempt in 0..crate::constants::LLM_RETRY_MAX_ATTEMPTS as usize {
-            // Check cancellation before each retry attempt
-            if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                return Err(anyhow!(ProviderError::Cancelled));
-            }
-            match f().await {
-                Ok(v) => return Ok(v),
-                Err(e) => {
-                    if !Self::is_transient_error(&e) || attempt == crate::constants::LLM_RETRY_MAX_ATTEMPTS as usize - 1
-                    {
-                        return Err(e);
-                    }
-                    last_err = Some(e);
-                    let base_delay_ms = crate::constants::LLM_RETRY_BASE_DELAY_MS * 2u64.pow(attempt as u32);
-                    // Random jitter: multiplier in [0.5, 1.5) to prevent thundering herd
-                    let jitter = rand::thread_rng().gen_range(0.5_f64..1.5);
-                    let delay_ms = (base_delay_ms as f64 * jitter) as u64;
-                    let delay = Duration::from_millis(delay_ms.max(100));
-                    // Poll STREAM_CANCELLED during backoff sleep (avoids redundant signal listener)
-                    let poll_interval = Duration::from_millis(100);
-                    let mut remaining = delay;
-                    while remaining > Duration::ZERO {
-                        if STREAM_CANCELLED.load(Ordering::SeqCst) {
-                            return Err(anyhow!(ProviderError::Cancelled));
-                        }
-                        let step = remaining.min(poll_interval);
-                        sleep(step).await;
-                        remaining = remaining.saturating_sub(step);
-                    }
-                }
-            }
-        }
-        Err(last_err.unwrap_or_else(|| anyhow!(ProviderError::Other("retry exhausted".into()))))
-    }
-
-    // ─── Circuit-breaker-aware retry wrapper ──────────────────────────
-
-    async fn with_retry_and_circuit_breaker<F, Fut, T>(kind: ProviderKind, f: F) -> Result<T>
-    where
-        F: Fn() -> Fut,
-        Fut: Future<Output = Result<T>>,
-    {
-        circuit_breaker_check(kind)?;
-        match Self::with_retry(f).await {
-            Ok(v) => {
-                circuit_breaker_record_success(kind);
-                Ok(v)
-            }
-            Err(e) => {
-                if Self::is_transient_error(&e) {
-                    circuit_breaker_record_failure(kind);
-                }
-                Err(e)
-            }
-        }
-    }
-
-    // ─── Public API ─────────────────────────────────────────────────────
+    // ─── Public API (with retry + circuit breaker) ──────────────────────
 
     pub async fn list_models(&self) -> Result<Vec<String>> {
-        STREAM_CANCELLED.store(false, Ordering::SeqCst);
-        Self::with_retry_and_circuit_breaker(self.kind, || self.backend.list_models(&self.ctx)).await
+        STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        with_retry_and_circuit_breaker(self.kind, || self.backend.list_models(&self.ctx)).await
     }
 
     pub async fn complete_json(&self, user_prompt: &str) -> Result<crate::ModelReply> {
-        STREAM_CANCELLED.store(false, Ordering::SeqCst);
-        Self::with_retry_and_circuit_breaker(self.kind, || {
+        STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::Relaxed);
+        with_retry_and_circuit_breaker(self.kind, || {
             self.backend.complete_json(&self.ctx, &self.system_prompt, user_prompt)
         })
         .await
     }
 
     pub async fn complete_chat_stream(&self, user_prompt: &str, system_prompt: &str, history: &str) -> Result<String> {
-        STREAM_CANCELLED.store(false, Ordering::SeqCst);
+        STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::Relaxed);
         let ctx = self.build_ctx();
-        Self::with_retry_and_circuit_breaker(self.kind, || {
+        with_retry_and_circuit_breaker(self.kind, || {
             self.backend
                 .complete_chat_stream(&ctx, system_prompt, user_prompt, history)
         })
@@ -650,9 +427,9 @@ impl Provider {
         mime_type: &str,
         base64_data: &str,
     ) -> Result<String> {
-        STREAM_CANCELLED.store(false, Ordering::SeqCst);
+        STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::Relaxed);
         let ctx = self.build_ctx();
-        Self::with_retry_and_circuit_breaker(self.kind, || {
+        with_retry_and_circuit_breaker(self.kind, || {
             self.backend.complete_chat_stream_with_vision(
                 &ctx,
                 system_prompt,
@@ -672,9 +449,9 @@ impl Provider {
         history: &str,
         tool_specs: &[tools::ToolSpec],
     ) -> Result<tools::ToolResponse> {
-        STREAM_CANCELLED.store(false, Ordering::SeqCst);
+        STREAM_CANCELLED.store(false, std::sync::atomic::Ordering::Relaxed);
         let ctx = self.build_ctx();
-        Self::with_retry_and_circuit_breaker(self.kind, || {
+        with_retry_and_circuit_breaker(self.kind, || {
             self.backend
                 .complete_chat_stream_with_tools(&ctx, system_prompt, user_prompt, history, tool_specs)
         })
@@ -684,669 +461,9 @@ impl Provider {
     pub(crate) fn anthropic_usage(&self) -> anthropic::AnthropicUsage {
         self.last_usage.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
-}
 
-/// Parses the history string from [`build_chat_history`] into
-/// `(user_content, assistant_content)` pairs so providers can construct
-/// proper message arrays instead of lumping everything into a single user message.
-/// Within each turn, internal `\n` characters are escaped as `\\n` and unescaped here.
-fn parse_history_turns(history: &str) -> Vec<(String, String)> {
-    if history.is_empty() {
-        return Vec::new();
-    }
-    let mut turns = Vec::new();
-    for block in history.split("\n\n") {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
-        }
-        // Find the REM: boundary within the block (allows multi-line messages)
-        // Uses a unique marker unlikely to appear in user content.
-        const BOUNDARY: &str = "\n<<<REM:BOUNDARY>>>\n";
-        const BOUNDARY_STRIP: &str = "<<<REM:BOUNDARY>>>\n";
-        let (user_part, assistant_part) = if let Some(rem_idx) = block.find(BOUNDARY) {
-            let user = &block[..rem_idx];
-            let assistant = &block[rem_idx + BOUNDARY.len()..];
-            (user, assistant)
-        } else if let Some(rem_idx) = block.strip_prefix(BOUNDARY_STRIP) {
-            ("", rem_idx)
-        } else {
-            (block, "")
-        };
-        let user_content = user_part.strip_prefix("User: ").unwrap_or(user_part).trim();
-        let assistant_content = assistant_part.trim();
-        if !user_content.is_empty() || !assistant_content.is_empty() {
-            turns.push((
-                user_content.replace("\\n", "\n"),
-                assistant_content.replace("\\n", "\n"),
-            ));
-        }
-    }
-    turns
-}
-
-/// Builds a messages array from history and a user prompt.
-/// Shared across providers to eliminate 8+ duplications of the same pattern.
-pub(crate) fn build_messages_from_history(
-    history: &str,
-    user_prompt: &str,
-    system_prompt: Option<&str>,
-) -> Vec<serde_json::Value> {
-    let mut messages: Vec<serde_json::Value> = Vec::new();
-    if let Some(sp) = system_prompt {
-        messages.push(json!({"role": "system", "content": sp}));
-    }
-    if !history.is_empty() {
-        for (user_msg, assistant_msg) in parse_history_turns(history) {
-            messages.push(json!({"role": "user", "content": user_msg}));
-            if !assistant_msg.is_empty() {
-                messages.push(json!({"role": "assistant", "content": assistant_msg}));
-            }
-        }
-    }
-    messages.push(json!({"role": "user", "content": user_prompt}));
-    messages
-}
-
-// ─── Shared streaming / utility functions ────────────────────────────────
-
-pub fn openai_chat_url(base_url: &str, kind: ProviderKind, model: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    match kind {
-        ProviderKind::Azure => {
-            format!("{base}/openai/deployments/{model}/chat/completions?api-version=2024-02-15-preview")
-        }
-        _ => format!("{base}/chat/completions"),
-    }
-}
-
-pub fn openai_models_url(base_url: &str) -> String {
-    format!("{}/models", base_url.trim_end_matches('/'))
-}
-
-pub fn add_openai_auth(req: reqwest::RequestBuilder, api_key: &str, kind: ProviderKind) -> reqwest::RequestBuilder {
-    match kind {
-        ProviderKind::Azure => req.header("api-key", api_key),
-        _ => req.header("Authorization", format!("Bearer {api_key}")),
-    }
-}
-
-pub(super) async fn openai_compat_list_models(ctx: &ProviderContext, provider_name: &str) -> Result<Vec<String>> {
-    let url = openai_models_url(&ctx.base_url);
-    let resp = add_openai_auth(ctx.client.get(&url), ctx.api_key_str(), ctx.kind)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow!(ProviderError::Other(format!(
-            "{provider_name} API unreachable at {}",
-            ctx.base_url
-        ))));
-    }
-    let parsed: openai::OpenAIModelsResponse = resp
-        .json()
-        .await
-        .with_context(|| format!("invalid {provider_name} models response"))?;
-    Ok(parsed.data.into_iter().map(|m| m.id).collect())
-}
-
-/// Applies lightweight inline Markdown formatting (code, bold, italic) using ANSI codes.
-/// Only formats non-code-fence lines. Uses simple character scanning (no regex dependency).
-fn render_inline_markdown(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 32);
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '`' => {
-                let mut code = String::new();
-                loop {
-                    match chars.next() {
-                        Some('`') => break,
-                        Some(c) => code.push(c),
-                        None => break,
-                    }
-                }
-                if code.is_empty() {
-                    out.push_str("\x1b[32m``\x1b[0m");
-                } else {
-                    out.push_str("\x1b[32m");
-                    out.push_str(&code);
-                    out.push_str("\x1b[0m");
-                }
-            }
-            '*' => {
-                if chars.peek() == Some(&'*') {
-                    chars.next();
-                    let mut bold = String::new();
-                    loop {
-                        match chars.next() {
-                            Some('*') if chars.peek() == Some(&'*') => {
-                                chars.next();
-                                out.push_str("\x1b[1m");
-                                out.push_str(&bold);
-                                out.push_str("\x1b[0m");
-                                break;
-                            }
-                            Some(c) => bold.push(c),
-                            None => {
-                                out.push_str("**");
-                                out.push_str(&bold);
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    let mut italic = String::new();
-                    loop {
-                        match chars.next() {
-                            Some('*') => {
-                                out.push_str("\x1b[3m");
-                                out.push_str(&italic);
-                                out.push_str("\x1b[0m");
-                                break;
-                            }
-                            Some(c) => italic.push(c),
-                            None => {
-                                out.push('*');
-                                out.push_str(&italic);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-pub fn emit_token(text: &str) {
-    if STREAM_TOKENS.load(Ordering::SeqCst) {
-        HAD_STREAMING_OUTPUT.store(true, Ordering::SeqCst);
-        use std::io::Write;
-        let rendered = render_inline_markdown(text);
-        let _ = std::io::stdout().write(rendered.as_bytes());
-        if text.contains('\n') {
-            let _ = std::io::stdout().flush();
-        }
-    }
-}
-
-pub(crate) async fn stream_buf<F>(resp: reqwest::Response, mut on_line: F) -> Result<()>
-where
-    F: FnMut(&str) -> Result<bool>,
-{
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
-    let mut offset = 0usize;
-
-    loop {
-        if STREAM_CANCELLED.load(Ordering::SeqCst) {
-            return Err(anyhow!(ProviderError::Cancelled));
-        }
-        let chunk = match timeout(STREAM_CHUNK_TIMEOUT, stream.next()).await {
-            Ok(Some(Ok(c))) => c,
-            Ok(Some(Err(e))) => return Err(anyhow!(ProviderError::Other(format!("stream read error: {e}")))),
-            Ok(None) => break,
-            Err(_) => {
-                return Err(anyhow!(ProviderError::Timeout(
-                    "stream timed out (no data for 60s)".into()
-                )))
-            }
-        };
-        if offset > 0 && buf.len() > crate::constants::INITIAL_BUF_CAPACITY * 2 {
-            // split_off is O(1) — just adjusts length pointer without copying data
-            buf = buf.split_off(offset);
-            offset = 0;
-        }
-        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
-            return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
-        }
-        buf.extend_from_slice(&chunk);
-        loop {
-            let tail = &buf[offset..];
-            match tail.iter().position(|&b| b == b'\n') {
-                Some(pos) => {
-                    let trimmed = std::str::from_utf8(&tail[..pos]).map(|s| s.trim()).unwrap_or("");
-                    offset += pos + 1;
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if !on_line(trimmed)? {
-                        return Ok(());
-                    }
-                }
-                None => break,
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn stream_lines<F>(resp: reqwest::Response, mut on_line: F) -> Result<String>
-where
-    F: FnMut(&str, &mut String) -> Result<bool>,
-{
-    let mut full = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
-    stream_buf(resp, |trimmed| {
-        if !on_line(trimmed, &mut full)? {
-            return Ok(false);
-        }
-        Ok(true)
-    })
-    .await?;
-    Ok(full)
-}
-
-pub(super) async fn stream_sse_response(resp: reqwest::Response) -> Result<String> {
-    stream_lines(resp, |trimmed, full| {
-        if trimmed.as_bytes().starts_with(b"data: ") {
-            let data = &trimmed[6..];
-            if data == "[DONE]" {
-                return Ok(false);
-            }
-            if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
-                if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
-                    if !content.is_empty() {
-                        full.push_str(content);
-                        emit_token(content);
-                        if full.len() > MAX_RESPONSE_BYTES {
-                            return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
-                        }
-                    }
-                }
-            }
-        }
-        Ok(true)
-    })
-    .await
-}
-
-pub(super) async fn stream_anthropic_sse(
-    resp: reqwest::Response,
-    last_usage: &Mutex<anthropic::AnthropicUsage>,
-    show_reasoning: bool,
-) -> Result<String> {
-    stream_lines(resp, |trimmed, full| {
-        if trimmed.starts_with("event: ") {
-            return Ok(true);
-        }
-        if let Some(data) = trimmed.strip_prefix("data: ") {
-            if let Ok(chunk) = serde_json::from_str::<anthropic::AnthropicStreamChunk>(data) {
-                match chunk.chunk_type.as_deref() {
-                    Some("content_block_delta") => {
-                        if let Some(ref delta) = chunk.delta {
-                            let is_thinking = delta.delta_type.as_deref() == Some("thinking_delta");
-                            if is_thinking && !show_reasoning {
-                                return Ok(true);
-                            }
-                            if let Some(ref text) = delta.text {
-                                full.push_str(text);
-                                emit_token(text);
-                            } else if let Some(ref thinking) = delta.thinking {
-                                full.push_str(thinking);
-                                emit_token(thinking);
-                            }
-                        }
-                    }
-                    Some("content_block_start") => {
-                        if let Some(ref block) = chunk.content_block {
-                            let is_thinking = block.block_type.as_deref() == Some("thinking");
-                            if is_thinking && !show_reasoning {
-                                return Ok(true);
-                            }
-                            if let Some(ref text) = block.text {
-                                full.push_str(text);
-                                emit_token(text);
-                            }
-                        }
-                    }
-                    Some("message_start") => {
-                        if let Some(usage) = chunk.message.and_then(|m| m.usage) {
-                            let mut last = last_usage.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(t) = usage.input_tokens {
-                                last.input_tokens = t;
-                            }
-                            if let Some(t) = usage.cache_creation_input_tokens {
-                                last.cache_creation_input_tokens = t;
-                            }
-                            if let Some(t) = usage.cache_read_input_tokens {
-                                last.cache_read_input_tokens = t;
-                            }
-                        }
-                    }
-                    Some("message_delta") => {
-                        if let Some(usage) = chunk.usage {
-                            let mut last = last_usage.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(t) = usage.output_tokens {
-                                last.output_tokens = t;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                if full.len() > MAX_RESPONSE_BYTES {
-                    return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
-                }
-            }
-        }
-        Ok(true)
-    })
-    .await
-}
-
-pub(super) async fn handle_ollama_error(resp: reqwest::Response, url: &str, model: &str) -> anyhow::Error {
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_else(|e| format!("(read error: {e})"));
-    let err_msg = serde_json::from_str::<LlmErrorResponse>(&body)
-        .map(|v| v.error.to_string())
-        .unwrap_or_else(|_| body.clone());
-    let code = status.as_u16();
-    if code == 404 && err_msg.to_lowercase().contains("model") {
-        return anyhow!(ProviderError::Other(format!(
-            "Model '{model}' not found. Pull it: `ollama pull {model}`"
-        )));
-    }
-    if code == 404 {
-        return anyhow!(ProviderError::Other(format!(
-            "Endpoint not found (404 at {url}). Check --ollama-url"
-        )));
-    }
-    if code == 429 {
-        return anyhow!(ProviderError::RateLimit(format!(
-            "Ollama rate limited ({code}): {err_msg}"
-        )));
-    }
-    if (500..=504).contains(&code) {
-        return anyhow!(ProviderError::ServerError(format!(
-            "Ollama server error ({code}): {err_msg}"
-        )));
-    }
-    anyhow!(ProviderError::Other(format!("Ollama failed: {status} — {err_msg}")))
-}
-
-pub(super) async fn stream_gemini_sse(resp: reqwest::Response) -> Result<String> {
-    stream_lines(resp, |trimmed, full| {
-        if trimmed.is_empty() || trimmed.starts_with(':') {
-            return Ok(true);
-        }
-        if let Some(data) = trimmed.strip_prefix("data: ") {
-            if let Ok(chunk) = serde_json::from_str::<gemini::GeminiStreamChunk>(data) {
-                if let Some(text) = chunk
-                    .candidates
-                    .and_then(|c| c.into_iter().next())
-                    .and_then(|c| c.content)
-                    .and_then(|c| c.parts)
-                    .and_then(|p| p.into_iter().next())
-                    .and_then(|p| p.text)
-                {
-                    full.push_str(&text);
-                    emit_token(&text);
-                    if full.len() > MAX_RESPONSE_BYTES {
-                        return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
-                    }
-                }
-            }
-        }
-        Ok(true)
-    })
-    .await
-}
-
-pub(super) fn parse_json_fallback(text: &str) -> Result<crate::ModelReply> {
-    match serde_json::from_str::<crate::ModelReply>(text.trim()) {
-        Ok(parsed) => Ok(parsed),
-        Err(e) => {
-            tracing::warn!("JSON parse failed — falling back: {e}");
-            Ok(crate::ModelReply::fallback(text.trim()))
-        }
-    }
-}
-
-/// Redacts sensitive information (API keys, tokens) from error message strings.
-fn redact_api_key(msg: &str, api_key: Option<&str>) -> String {
-    let mut s = msg.to_string();
-    if let Some(key) = api_key {
-        if !key.is_empty() && s.contains(key) {
-            s = s.replace(key, "***");
-        }
-    }
-    s
-}
-
-fn status_code_text(code: u16) -> &'static str {
-    match code {
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        402 => "Payment Required",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        408 => "Request Timeout",
-        409 => "Conflict",
-        429 => "Too Many Requests",
-        500 => "Internal Server Error",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        _ => "",
-    }
-}
-
-pub(super) async fn parse_api_error(
-    provider_name: &str,
-    resp: reqwest::Response,
-    api_key: Option<&str>,
-) -> anyhow::Error {
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    let redacted_body = redact_api_key(&body, api_key);
-    let err_msg = serde_json::from_str::<LlmErrorResponse>(&redacted_body)
-        .map(|v| v.error.to_string())
-        .unwrap_or_else(|_| {
-            redacted_body
-                .chars()
-                .take(crate::constants::API_ERROR_BODY_MAX_CHARS)
-                .collect()
-        });
-    let code = status.as_u16();
-    let text = status_code_text(code);
-    let code_str = if text.is_empty() {
-        format!("{}", code)
-    } else {
-        format!("{} {}", code, text)
-    };
-    match code {
-        429 => {
-            let hint = " — reduce request rate or wait before retrying";
-            anyhow!(ProviderError::RateLimit(format!(
-                "{provider_name} rate limited ({code_str}): {err_msg}{hint}"
-            )))
-        }
-        401 | 403 => {
-            let hint = " — check your API key in ~/.config/rem-cli/config.toml or the REMOTE_API_KEY env var";
-            anyhow!(ProviderError::Auth(format!(
-                "{provider_name} auth failed ({code_str}): {err_msg}{hint}"
-            )))
-        }
-        500..=504 => anyhow!(ProviderError::ServerError(format!(
-            "{provider_name} server error ({code_str}): {err_msg}"
-        ))),
-        _ => anyhow!(ProviderError::Other(format!(
-            "{provider_name} API failed ({code_str}): {err_msg}"
-        ))),
-    }
-}
-
-pub(super) async fn openai_compat_complete_json(
-    ctx: &ProviderContext,
-    kind: ProviderKind,
-    provider_name: &str,
-    system_prompt: &str,
-    user_prompt: &str,
-) -> Result<crate::ModelReply> {
-    let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
-    let resp = add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), kind)
-        .json(&json!({
-            "model": ctx.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": format!("{}\n\nReturn JSON only.", user_prompt)}
-            ],
-            "temperature": crate::constants::JSON_TEMPERATURE,
-            "max_tokens": crate::constants::JSON_MAX_TOKENS,
-            "response_format": {"type": "json_object"}
-        }))
-        .send()
-        .await
-        .with_context(|| format!("failed to call {provider_name} API"))?;
-    if !resp.status().is_success() {
-        return Err(parse_api_error(provider_name, resp, Some(ctx.api_key_str())).await);
-    }
-    let parsed: openai::OpenAIResponse = resp
-        .json()
-        .await
-        .with_context(|| format!("invalid {provider_name} response"))?;
-    let content = parsed
-        .choices
-        .first()
-        .and_then(|c| c.message.content.as_deref())
-        .unwrap_or("");
-    parse_json_fallback(content)
-}
-
-pub(super) async fn openai_compat_chat_stream(
-    ctx: &ProviderContext,
-    kind: ProviderKind,
-    provider_name: &str,
-    user_prompt: &str,
-    system_prompt: &str,
-    history: &str,
-) -> Result<String> {
-    let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
-    let messages = build_messages_from_history(history, user_prompt, Some(system_prompt));
-    let resp = add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), kind)
-        .json(&json!({
-            "model": ctx.model,
-            "messages": messages,
-            "stream": true,
-            "temperature": crate::constants::DEFAULT_TEMPERATURE,
-            "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
-        }))
-        .send()
-        .await
-        .with_context(|| format!("failed to call {provider_name} API"))?;
-    if !resp.status().is_success() {
-        return Err(parse_api_error(provider_name, resp, Some(ctx.api_key_str())).await);
-    }
-    stream_sse_response(resp).await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn openai_compat_chat_stream_with_vision(
-    ctx: &ProviderContext,
-    kind: ProviderKind,
-    provider_name: &str,
-    user_prompt: &str,
-    system_prompt: &str,
-    history: &str,
-    mime_type: &str,
-    base64_data: &str,
-) -> Result<String> {
-    let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
-    let data_uri = format!("data:{mime_type};base64,{base64_data}");
-    // Build history messages via shared helper (without the final user prompt, which is special for vision)
-    let mut messages = build_messages_from_history(history, "", Some(system_prompt));
-    // Replace the empty final user message with the vision content
-    messages.pop();
-    messages.push(json!({
-        "role": "user",
-        "content": [
-            {"type": "text", "text": user_prompt},
-            {"type": "image_url", "image_url": {"url": data_uri}}
-        ]
-    }));
-    let resp = add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), kind)
-        .json(&json!({
-            "model": ctx.model,
-            "messages": messages,
-            "stream": true,
-            "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
-        }))
-        .send()
-        .await
-        .with_context(|| format!("failed to call {provider_name} vision API"))?;
-    if !resp.status().is_success() {
-        return Err(parse_api_error(provider_name, resp, Some(ctx.api_key_str())).await);
-    }
-    stream_sse_response(resp).await
-}
-
-pub(super) async fn openai_compat_chat_stream_with_tools(
-    ctx: &ProviderContext,
-    kind: ProviderKind,
-    provider_name: &str,
-    user_prompt: &str,
-    system_prompt: &str,
-    history: &str,
-    tool_specs: &[tools::ToolSpec],
-) -> Result<tools::ToolResponse> {
-    let url = openai_chat_url(&ctx.base_url, kind, &ctx.model);
-    let messages = build_messages_from_history(history, user_prompt, Some(system_prompt));
-    let tools_json: Vec<serde_json::Value> = tool_specs.iter().map(|t| t.to_openai_tool()).collect();
-    let mut payload = json!({
-        "model": ctx.model,
-        "messages": messages,
-        "stream": true,
-        "temperature": crate::constants::DEFAULT_TEMPERATURE,
-        "max_tokens": crate::constants::DEFAULT_MAX_TOKENS,
-    });
-    if !tools_json.is_empty() {
-        payload["tools"] = json!(tools_json);
-        payload["tool_choice"] = json!("auto");
-    }
-    let resp = add_openai_auth(ctx.client.post(&url), ctx.api_key_str(), kind)
-        .json(&payload)
-        .send()
-        .await
-        .with_context(|| format!("failed to call {provider_name} API"))?;
-    if !resp.status().is_success() {
-        return Err(parse_api_error(provider_name, resp, Some(ctx.api_key_str())).await);
-    }
-    stream_openai_tool_response(resp).await
-}
-
-pub(crate) async fn stream_openai_tool_response(resp: reqwest::Response) -> Result<tools::ToolResponse> {
-    let mut full_text = String::with_capacity(crate::constants::INITIAL_BUF_CAPACITY);
-    let mut tool_acc = openai::AccumulatedToolCalls::default();
-
-    stream_buf(resp, |trimmed| {
-        if !trimmed.starts_with("data: ") {
-            return Ok(true);
-        }
-        let data = &trimmed[6..];
-        if data == "[DONE]" {
-            return Ok(false);
-        }
-        if let Ok(chunk) = serde_json::from_str::<openai::OpenAIStreamChunk>(data) {
-            if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_deref()) {
-                full_text.push_str(content);
-                emit_token(content);
-            }
-            if let Some(tool_calls) = chunk.choices.first().and_then(|c| c.delta.tool_calls.as_ref()) {
-                tool_acc.absorb_chunk(tool_calls);
-            }
-        }
-        if full_text.len() > MAX_RESPONSE_BYTES {
-            return Err(anyhow!(ProviderError::ResponseTooLarge(MAX_RESPONSE_BYTES as u64)));
-        }
-        Ok(true)
-    })
-    .await?;
-
-    if !tool_acc.is_empty() {
-        Ok(tools::ToolResponse::ToolCalls(tool_acc.to_tool_calls()))
-    } else {
-        Ok(tools::ToolResponse::Text(full_text))
+    #[allow(dead_code)]
+    pub fn is_transient_error(e: &anyhow::Error) -> bool {
+        provider_retry::is_transient_error(e)
     }
 }

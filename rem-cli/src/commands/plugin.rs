@@ -38,17 +38,27 @@ pub(crate) fn init_plugin_manager() {
     });
 }
 
-fn manager() -> &'static crate::plugin::PluginManager {
-    PLUGIN_MANAGER.get().expect("plugin manager not initialized")
+fn manager() -> Option<&'static crate::plugin::PluginManager> {
+    PLUGIN_MANAGER.get()
 }
 
 /// Handles the `/plugin` command: list, run.
 pub(crate) fn handle_plugin(_session: &ChatSession, args: &str) {
     let t = ui::theme::active();
+    let mgr = match manager() {
+        Some(m) => m,
+        None => {
+            println!(
+                "{} plugin manager not initialized",
+                ui::theme::paint_warning(&t, "\u{258C}")
+            );
+            return;
+        }
+    };
     let sub = args.trim();
 
     if sub == "list" || sub.is_empty() {
-        let plugins = manager().list();
+        let plugins = mgr.list();
         if plugins.is_empty() {
             println!(
                 "{} {}",
@@ -89,8 +99,8 @@ pub(crate) fn handle_plugin(_session: &ChatSession, args: &str) {
         (sub, "")
     };
 
-    if !manager().has(name) {
-        let nearest = find_nearest_plugin(name);
+    if !mgr.has(name) {
+        let nearest = find_nearest_plugin(name, mgr);
         if let Some(hint) = nearest {
             println!(
                 "{} unknown plugin '{}' — did you mean '{}'?",
@@ -108,11 +118,11 @@ pub(crate) fn handle_plugin(_session: &ChatSession, args: &str) {
         return;
     }
 
-    manager().execute(name, plugin_args);
+    mgr.execute(name, plugin_args);
 }
 
-fn find_nearest_plugin(name: &str) -> Option<String> {
-    let plugins = manager().list();
+fn find_nearest_plugin(name: &str, mgr: &crate::plugin::PluginManager) -> Option<String> {
+    let plugins = mgr.list();
     plugins
         .iter()
         .map(|(n, _)| crate::text_util::levenshtein_distance(name, n))
@@ -130,6 +140,6 @@ mod tests {
     fn plugin_manager_init_does_not_panic() {
         init_plugin_manager();
         let mgr = manager();
-        assert!(mgr.len() == 0 || mgr.len() > 0);
+        assert!(mgr.is_some());
     }
 }
