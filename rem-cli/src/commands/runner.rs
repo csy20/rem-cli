@@ -11,13 +11,15 @@ use clap::CommandFactory;
 use walkdir::WalkDir;
 
 use crate::cli::{
-    AppConfig, AskArgs, Cli, CompletionsArgs, ExplainArgs, IndexArgs, NewArgs, PatchArgs, PullArgs, ThemeArgs,
+    AppConfig, AskArgs, Cli, CompletionsArgs, ExplainArgs, IndexArgs, NewArgs, ObserveArgs, PatchArgs, PullArgs,
+    ThemeArgs,
 };
 use crate::config;
 use crate::constants::CHAT_SYSTEM_PROMPT_CONVERSATIONAL;
 use crate::find;
 use crate::indexer;
 use crate::intent::{classify_intent, TaskIntent};
+use crate::mcp::signoz::{SignozClient, SignozConfig};
 use crate::provider::Provider;
 use crate::templates;
 use crate::text_util::truncate_bytes;
@@ -59,6 +61,63 @@ pub(crate) async fn run_pipe(client: &Provider, _cfg: &AppConfig, input: &str, v
         }
         Err(e) => Err(e),
     }
+}
+
+/// `rem observe "<query>"` — SigNoz MCP → LLM answer (non-interactive).
+pub(crate) async fn run_observe(client: &Provider, cfg: &AppConfig, args: ObserveArgs) -> Result<()> {
+    let t = theme::active();
+    let query = args.query.trim();
+    if query.is_empty() {
+        return Err(anyhow!("usage: rem observe \"<query>\""));
+    }
+
+    println!(
+        "{} {} SigNoz MCP observe: {}",
+        theme::paint_rail_empty(&t),
+        theme::paint(&t, "accent", "📡", true),
+        query
+    );
+
+    let signoz_cfg = SignozConfig::from_app(
+        Some(cfg.signoz_mcp_url.as_str()),
+        cfg.signoz_api_key.as_deref(),
+        cfg.signoz_url.as_deref(),
+        Some(cfg.signoz_service.as_str()),
+    );
+    let mut mcp = SignozClient::new(signoz_cfg)?;
+    let context = mcp.observe_context(query).await.context("SigNoz MCP observe_context")?;
+
+    println!(
+        "{} fetched {} chars of telemetry context from {}",
+        theme::paint_rail_empty(&t),
+        context.len(),
+        cfg.signoz_mcp_url
+    );
+
+    let prompt = format!(
+        "You are an SRE sidekick debugging the router-agent service using REAL OpenTelemetry \
+         span data from SigNoz (via MCP). Answer the user's question using ONLY the provided \
+         context. Cite concrete span attributes (task_id, category, stage, accepted, confidence, \
+         tokens_prompt, tokens_completion, latency_ms, model). If the context is insufficient, \
+         say what is missing — do NOT invent traces.\n\n\
+         USER QUESTION:\n{query}\n\n\
+         SIGNOZ CONTEXT:\n{context}"
+    );
+
+    let _spinner = SpinnerGuard::new("analyzing traces...");
+    let response = client
+        .complete_chat_stream(
+            &prompt,
+            "[MODE: CHAT] You are an observability SRE assistant. Cite real span attributes. \
+             No code generation. Be concise and structured.",
+            "",
+        )
+        .await?;
+
+    println!();
+    println!("{}", response.trim());
+    println!();
+    Ok(())
 }
 
 pub(crate) async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: bool) -> Result<()> {

@@ -57,6 +57,17 @@ pub enum Commands {
     Theme(ThemeArgs),
     #[command(about = "Generate shell completion scripts")]
     Completions(CompletionsArgs),
+    #[command(
+        about = "Query SigNoz observability (MCP) and answer with the active LLM — e.g. `rem observe \"which tasks used fireworks\"`"
+    )]
+    Observe(ObserveArgs),
+}
+
+/// Arguments for `rem observe`.
+#[derive(Args, Debug)]
+pub struct ObserveArgs {
+    #[arg(help = "Natural-language observability question about router-agent / SigNoz traces")]
+    pub query: String,
 }
 
 /// Arguments for `rem ask`.
@@ -195,6 +206,26 @@ pub struct AppConfig {
     pub auto_resume: bool,
     #[serde(default = "default_true")]
     pub show_perf: bool,
+    /// SigNoz MCP HTTP endpoint (self-host default: http://localhost:8000/mcp).
+    #[serde(default = "default_signoz_mcp_url")]
+    pub signoz_mcp_url: String,
+    /// Optional SigNoz service-account API key for MCP auth.
+    #[serde(default)]
+    pub signoz_api_key: Option<String>,
+    /// Optional SigNoz UI/API base URL (header X-SigNoz-URL).
+    #[serde(default)]
+    pub signoz_url: Option<String>,
+    /// service.name filter for observe queries (default: router-agent).
+    #[serde(default = "default_signoz_service")]
+    pub signoz_service: String,
+}
+
+fn default_signoz_mcp_url() -> String {
+    "http://localhost:8000/mcp".to_string()
+}
+
+fn default_signoz_service() -> String {
+    "router-agent".to_string()
 }
 
 fn default_true() -> bool {
@@ -225,6 +256,10 @@ impl fmt::Debug for AppConfig {
             .field("page_threshold", &self.page_threshold)
             .field("auto_resume", &self.auto_resume)
             .field("show_perf", &self.show_perf)
+            .field("signoz_mcp_url", &self.signoz_mcp_url)
+            .field("signoz_api_key", &self.signoz_api_key.as_deref().map(|_| "***"))
+            .field("signoz_url", &self.signoz_url)
+            .field("signoz_service", &self.signoz_service)
             .finish()
     }
 }
@@ -273,6 +308,10 @@ impl Default for AppConfig {
             page_threshold: default_page_threshold(),
             auto_resume: default_auto_resume(),
             show_perf: default_true(),
+            signoz_mcp_url: default_signoz_mcp_url(),
+            signoz_api_key: None,
+            signoz_url: None,
+            signoz_service: default_signoz_service(),
         }
     }
 }
@@ -304,6 +343,10 @@ pub struct PartialConfig {
     pub page_threshold: Option<usize>,
     pub auto_resume: Option<bool>,
     pub show_perf: Option<bool>,
+    pub signoz_mcp_url: Option<String>,
+    pub signoz_api_key: Option<String>,
+    pub signoz_url: Option<String>,
+    pub signoz_service: Option<String>,
 }
 
 impl fmt::Debug for PartialConfig {
@@ -330,6 +373,10 @@ impl fmt::Debug for PartialConfig {
             .field("page_threshold", &self.page_threshold)
             .field("auto_resume", &self.auto_resume)
             .field("show_perf", &self.show_perf)
+            .field("signoz_mcp_url", &self.signoz_mcp_url)
+            .field("signoz_api_key", &self.signoz_api_key.as_deref().map(|_| "***"))
+            .field("signoz_url", &self.signoz_url)
+            .field("signoz_service", &self.signoz_service)
             .finish()
     }
 }
@@ -400,6 +447,18 @@ impl AppConfig {
         if let Some(v) = part.show_perf {
             self.show_perf = v;
         }
+        if let Some(v) = part.signoz_mcp_url {
+            self.signoz_mcp_url = v;
+        }
+        if let Some(v) = part.signoz_api_key {
+            self.signoz_api_key = Some(v);
+        }
+        if let Some(v) = part.signoz_url {
+            self.signoz_url = Some(v);
+        }
+        if let Some(v) = part.signoz_service {
+            self.signoz_service = v;
+        }
     }
 }
 
@@ -459,6 +518,10 @@ mod tests {
             page_threshold: Some(75),
             auto_resume: Some(true),
             show_perf: Some(true),
+            signoz_mcp_url: Some("http://mcp.example/mcp".to_string()),
+            signoz_api_key: Some("sk".to_string()),
+            signoz_url: Some("http://signoz.example".to_string()),
+            signoz_service: Some("svc".to_string()),
         };
         config.apply_partial(partial);
         assert_eq!(config.model, "m1");
@@ -473,6 +536,10 @@ mod tests {
         assert_eq!(config.api_key, Some("ak".to_string()));
         assert_eq!(config.theme, "t1");
         assert_eq!(config.mode, "m1");
+        assert_eq!(config.signoz_mcp_url, "http://mcp.example/mcp");
+        assert_eq!(config.signoz_api_key, Some("sk".to_string()));
+        assert_eq!(config.signoz_url, Some("http://signoz.example".to_string()));
+        assert_eq!(config.signoz_service, "svc");
         assert!(config.providers.is_empty());
         assert_eq!(config.reasoning_effort, Some("re".to_string()));
         assert_eq!(config.thinking_budget, Some(42));

@@ -21,6 +21,7 @@ mod find;
 mod highlight;
 mod indexer;
 mod intent;
+mod mcp;
 mod memory;
 mod pager;
 mod parsing;
@@ -201,6 +202,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Ask(args)) => run_ask(&client, &cfg, args, verbose).await,
+        Some(Commands::Observe(args)) => run_observe(&client, &cfg, args).await,
         Some(Commands::Explain(args)) => run_explain(&client, args).await,
         Some(Commands::Patch(args)) => run_patch(&client, &cfg, args).await,
         Some(Commands::Theme(args)) => run_theme(args),

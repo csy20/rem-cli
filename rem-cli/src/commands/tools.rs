@@ -1,10 +1,11 @@
-//! Tool commands (`/search`, `/explain`, `/test`, `/refactor`, `/lint`, `/find`).
+//! Tool commands (`/search`, `/explain`, `/test`, `/refactor`, `/lint`, `/find`, `/observe`).
 //! Handlers for commands that invoke external tools or LLM-powered analysis.
 
 use crate::agentic::{format_tool_output, run_lint};
 use crate::chat::ChatSession;
 use crate::cli::AppConfig;
 use crate::find::{find_matches, FindOptions};
+use crate::mcp::signoz::{SignozClient, SignozConfig};
 use crate::pager::maybe_page;
 use crate::parsing::extract_code_block;
 use crate::provider::Provider;
@@ -12,6 +13,119 @@ use crate::search::{perform_web_search, print_search_results, provider_from_conf
 use crate::truncate_to_lines;
 use crate::ui;
 use std::fs;
+
+/// Query SigNoz via MCP and answer with the active LLM (`/observe` command).
+pub(crate) async fn handle_observe(client: &Provider, session: &mut ChatSession, cfg: &AppConfig, query: &str) {
+    let t = ui::theme::active();
+    if query.trim().is_empty() {
+        println!("{} usage: /observe <query>", ui::theme::paint_warning(&t, "│"));
+        println!("{} examples:", ui::theme::paint_rail_empty(&t));
+        println!(
+            "{}   /observe which tasks used fireworks and why",
+            ui::theme::paint_rail_empty(&t)
+        );
+        println!(
+            "{}   /observe show me the slowest task in the last run",
+            ui::theme::paint_rail_empty(&t)
+        );
+        return;
+    }
+
+    println!(
+        "{} {} querying SigNoz MCP...",
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint(&t, "accent", "📡", true)
+    );
+
+    let signoz_cfg = SignozConfig::from_app(
+        Some(cfg.signoz_mcp_url.as_str()),
+        cfg.signoz_api_key.as_deref(),
+        cfg.signoz_url.as_deref(),
+        Some(cfg.signoz_service.as_str()),
+    );
+
+    let mut mcp = match SignozClient::new(signoz_cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("{} {}", ui::theme::paint_error_label(&t, "│  observe init failed:"), e);
+            return;
+        }
+    };
+
+    let context = match mcp.observe_context(query).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            println!("{} {}", ui::theme::paint_error_label(&t, "│  SigNoz MCP failed:"), e);
+            println!(
+                "{} tip: set signoz_mcp_url / SIGNOZ_MCP_URL (default http://localhost:8000/mcp)",
+                ui::theme::paint_warning(&t, "│")
+            );
+            println!(
+                "{}      and ensure the MCP server is running (Foundry mcp.enabled=true)",
+                ui::theme::paint_warning(&t, "│")
+            );
+            return;
+        }
+    };
+
+    // Show a short preview of raw context (truncated)
+    let preview: String = context.chars().take(600).collect();
+    println!(
+        "{} {} fetched {} chars of trace context",
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint(&t, "accent", "✓", true),
+        context.len()
+    );
+    if !preview.is_empty() {
+        println!(
+            "{} {}",
+            ui::theme::paint_dim(&t, "│"),
+            ui::theme::paint_dim(&t, &preview.replace('\n', " · "))
+        );
+    }
+
+    println!(
+        "{} {} analyzing with {}...",
+        ui::theme::paint_rail_empty(&t),
+        ui::theme::paint(&t, "accent", "🤖", true),
+        client.provider_label()
+    );
+
+    let prompt = format!(
+        "You are an SRE sidekick debugging the router-agent service using REAL OpenTelemetry \
+         span data from SigNoz (via MCP). Answer the user's question using ONLY the provided \
+         context. Cite concrete span attributes (task_id, category, stage, accepted, confidence, \
+         tokens_prompt, tokens_completion, latency_ms, model). If the context is insufficient, \
+         say what is missing — do NOT invent traces.\n\n\
+         USER QUESTION:\n{query}\n\n\
+         SIGNOZ CONTEXT:\n{context}"
+    );
+
+    match client
+        .complete_chat_stream(
+            &prompt,
+            "[MODE: CHAT] You are an observability SRE assistant. Cite real span attributes. \
+             No code generation. Be concise and structured.",
+            "",
+        )
+        .await
+    {
+        Ok(response) => {
+            println!("\n{}", response);
+            session.add_history(&format!("/observe {}", query));
+            session.history_mgr.push_turn(format!("/observe {}", query), response);
+        }
+        Err(e) => {
+            println!("\n{} observe LLM failed: {}", ui::theme::paint_error_label(&t, "│"), e);
+            // Still dump raw context so the user can debug without the model
+            println!(
+                "\n{} raw SigNoz context follows:\n{}",
+                ui::theme::paint_warning(&t, "│"),
+                context
+            );
+        }
+    }
+}
 
 /// Performs a web search (`/search` command).
 pub(crate) async fn handle_search(_client: &Provider, session: &mut ChatSession, cfg: &AppConfig, query: &str) {

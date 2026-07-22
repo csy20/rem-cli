@@ -563,6 +563,15 @@ pub(crate) fn registry() -> CommandRegistry {
             },
         ),
         (
+            "/observe",
+            CommandInfo {
+                description: "Debug router-agent via SigNoz MCP",
+                usage: "/observe <query>",
+                long_description: "Queries the SigNoz MCP server for live traces/spans of service.name=router-agent, then asks the active LLM to answer using that real telemetry.\n\nExamples:\n  /observe which tasks used fireworks and why\n  /observe show me the slowest task in the last run\n  /observe why did task 3 escalate to fireworks\n\nConfig (config.toml or env):\n  signoz_mcp_url = \"http://localhost:8000/mcp\"  # or SIGNOZ_MCP_URL\n  signoz_api_key = \"...\"                          # optional SIGNOZ_API_KEY\n  signoz_url = \"http://localhost:3301\"            # optional SIGNOZ_URL\n  signoz_service = \"router-agent\"\n\nAlso available as a CLI subcommand: rem observe \"...\"",
+            category: CommandCategory::Tools,
+            },
+        ),
+        (
             "/explain",
             CommandInfo {
                 description: "Explain the selected code",
@@ -768,8 +777,8 @@ pub(crate) use session::{
     handle_save_session, handle_session_analytics, handle_summary, handle_tokens,
 };
 pub(crate) use tools::{
-    handle_explain, handle_find, handle_lint_with_fallback, handle_refactor, handle_search, handle_semantic,
-    handle_test,
+    handle_explain, handle_find, handle_lint_with_fallback, handle_observe, handle_refactor, handle_search,
+    handle_semantic, handle_test,
 };
 
 #[cfg(test)]

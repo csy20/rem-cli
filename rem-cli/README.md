@@ -94,7 +94,46 @@ Now with 30+ slash commands, persistent project memory, pipe mode, and autonomou
 | `/review` | AI code review of generated code |
 | `/find <query>` | Search text inside the project |
 | `/search <query>` | Search the web |
+| `/observe <query>` | **SRE Sidekick** — query SigNoz MCP (live traces) and answer with the active LLM |
 | `/watch` | Watch files for changes and auto-retry |
+
+### `/observe` — SigNoz MCP (router-agent debug)
+
+Query live OpenTelemetry traces from SigNoz via the [SigNoz MCP server](https://signoz.io/docs/ai/signoz-mcp-server/), then ground the active model (Ollama/Claude/…) on real span data.
+
+```bash
+# CLI (non-interactive)
+rem observe "which tasks used fireworks and why"
+rem observe "show me the slowest task in the last run"
+rem observe "why did task 3 escalate to fireworks"
+
+# Interactive
+rem chat
+rem> /observe which tasks used fireworks and why
+```
+
+**Config** (`~/.config/rem/config.toml` or env / `.env`):
+
+```toml
+signoz_mcp_url = "http://localhost:8000/mcp"   # self-host Foundry MCP; Cloud: https://mcp.<region>.signoz.cloud/mcp
+signoz_api_key = "..."                         # service-account key (SIGNOZ-API-KEY)
+signoz_url = "http://localhost:3301"           # optional X-SigNoz-URL
+signoz_service = "router-agent"
+```
+
+Env equivalents: `SIGNOZ_MCP_URL`, `SIGNOZ_API_KEY`, `SIGNOZ_URL`, `SIGNOZ_SERVICE_NAME`.
+
+**Architecture:** Command Handlers layer (next to `/search` and `/find`) → `src/mcp/signoz.rs` MCP JSON-RPC client → tools like `signoz_search_traces` / `signoz_aggregate_traces` → LLM answer path (same provider abstraction as other commands).
+
+**Demo transcript** (after router-agent sample run with OTel → SigNoz):
+
+```
+$ rem observe "which tasks used fireworks and why"
+📡 SigNoz MCP observe: which tasks used fireworks and why
+  fetched … chars of telemetry context from http://localhost:8000/mcp
+  …
+  → cites real stage=fireworks / llm.fireworks_call spans (task_id, tokens_*, category)
+```
 
 ### System & Info
 | Command | Description |
