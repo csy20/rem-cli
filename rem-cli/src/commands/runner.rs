@@ -78,12 +78,29 @@ pub(crate) async fn run_observe(client: &Provider, cfg: &AppConfig, args: Observ
         query
     );
 
+    // Prefer config, then env (SIGNOZ_API_KEY from .env / shell).
+    let api_key = cfg
+        .signoz_api_key
+        .clone()
+        .or_else(|| std::env::var("SIGNOZ_API_KEY").ok().filter(|s| !s.is_empty()));
+    let mcp_url = std::env::var("SIGNOZ_MCP_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| cfg.signoz_mcp_url.clone());
+
     let signoz_cfg = SignozConfig::from_app(
-        Some(cfg.signoz_mcp_url.as_str()),
-        cfg.signoz_api_key.as_deref(),
+        Some(mcp_url.as_str()),
+        api_key.as_deref(),
         cfg.signoz_url.as_deref(),
         Some(cfg.signoz_service.as_str()),
     );
+    if signoz_cfg.api_key.is_none() {
+        eprintln!(
+            "{} set SIGNOZ_API_KEY (service-account key). MCP is not a browser page.",
+            theme::paint_warning(&t, "warning:")
+        );
+    }
+
     let mut mcp = SignozClient::new(signoz_cfg)?;
     let context = mcp.observe_context(query).await.context("SigNoz MCP observe_context")?;
 
@@ -91,33 +108,107 @@ pub(crate) async fn run_observe(client: &Provider, cfg: &AppConfig, args: Observ
         "{} fetched {} chars of telemetry context from {}",
         theme::paint_rail_empty(&t),
         context.len(),
-        cfg.signoz_mcp_url
+        mcp_url
     );
 
+    let system = "[MODE: CHAT] You are an observability SRE assistant. Cite real span attributes. \
+         No code generation. Be concise and structured (bullets). Max 12 lines.";
     let prompt = format!(
-        "You are an SRE sidekick debugging the router-agent service using REAL OpenTelemetry \
-         span data from SigNoz (via MCP). Answer the user's question using ONLY the provided \
-         context. Cite concrete span attributes (task_id, category, stage, accepted, confidence, \
-         tokens_prompt, tokens_completion, latency_ms, model). If the context is insufficient, \
-         say what is missing — do NOT invent traces.\n\n\
+        "You are an SRE sidekick debugging router-agent using REAL OpenTelemetry span data \
+         from SigNoz MCP. Answer using ONLY the context. Cite stage, name, tokens_*, category \
+         when present. Do NOT invent traces.\n\n\
          USER QUESTION:\n{query}\n\n\
          SIGNOZ CONTEXT:\n{context}"
     );
 
-    let _spinner = SpinnerGuard::new("analyzing traces...");
-    let response = client
-        .complete_chat_stream(
-            &prompt,
-            "[MODE: CHAT] You are an observability SRE assistant. Cite real span attributes. \
-             No code generation. Be concise and structured.",
-            "",
-        )
-        .await?;
+    // Prefer non-streaming Ollama chat — streaming often dies on large MCP dumps
+    // with "error decoding response body".
+    let spinner = SpinnerGuard::new("analyzing traces...");
+    let response = match ollama_chat_nostream(&cfg.ollama_url, &cfg.model, system, &prompt).await {
+        Ok(text) if !text.trim().is_empty() => text,
+        Ok(_) => match client.complete_chat_stream(&prompt, system, "").await {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => format!("## Observe (MCP data, LLM empty)\n\nQuery: {query}\n\n{context}"),
+            Err(e) => {
+                eprintln!(
+                    "{} stream LLM failed ({e}); printing MCP telemetry summary",
+                    theme::paint_warning(&t, "warning:")
+                );
+                format!("## Observe (MCP data, LLM unavailable)\n\nQuery: {query}\n\n{context}")
+            }
+        },
+        Err(e1) => {
+            eprintln!(
+                "{} non-stream LLM failed ({e1}); trying stream…",
+                theme::paint_warning(&t, "warning:")
+            );
+            match client.complete_chat_stream(&prompt, system, "").await {
+                Ok(text) if !text.trim().is_empty() => text,
+                Ok(_) => format!("## Observe (MCP data, LLM empty)\n\nQuery: {query}\n\n{context}"),
+                Err(e2) => {
+                    eprintln!(
+                        "{} stream LLM failed ({e2}); printing MCP telemetry summary",
+                        theme::paint_warning(&t, "warning:")
+                    );
+                    format!("## Observe (MCP data, LLM unavailable)\n\nQuery: {query}\n\n{context}")
+                }
+            }
+        }
+    };
+    drop(spinner);
 
     println!();
     println!("{}", response.trim());
     println!();
     Ok(())
+}
+
+/// Non-streaming Ollama `/api/chat` — reliable for large observe prompts.
+pub(crate) async fn ollama_chat_nostream(base_url: &str, model: &str, system: &str, user: &str) -> Result<String> {
+    let base = base_url.trim_end_matches('/');
+    let url = if base.ends_with("/api") {
+        format!("{base}/chat")
+    } else {
+        format!("{base}/api/chat")
+    };
+    let payload = serde_json::json!({
+        "model": model,
+        "stream": false,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user}
+        ],
+        "options": {
+            "num_predict": 400,
+            "num_ctx": 8192,
+            "temperature": 0.2
+        }
+    });
+    let resp = crate::provider::HTTP_CLIENT
+        .post(&url)
+        .json(&payload)
+        .send()
+        .await
+        .context("ollama chat (non-stream) request")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "ollama chat HTTP {status}: {}",
+            body.chars().take(200).collect::<String>()
+        ));
+    }
+    let v: serde_json::Value = resp.json().await.context("ollama chat JSON")?;
+    let text = v
+        .pointer("/message/content")
+        .and_then(|c| c.as_str())
+        .or_else(|| v.get("response").and_then(|c| c.as_str()))
+        .unwrap_or("")
+        .to_string();
+    if text.is_empty() {
+        return Err(anyhow!("ollama returned empty content"));
+    }
+    Ok(text)
 }
 
 pub(crate) async fn run_ask(client: &Provider, cfg: &AppConfig, args: AskArgs, verbose: bool) -> Result<()> {

@@ -37,9 +37,18 @@ pub(crate) async fn handle_observe(client: &Provider, session: &mut ChatSession,
         ui::theme::paint(&t, "accent", "📡", true)
     );
 
+    let api_key = cfg
+        .signoz_api_key
+        .clone()
+        .or_else(|| std::env::var("SIGNOZ_API_KEY").ok().filter(|s| !s.is_empty()));
+    let mcp_url = std::env::var("SIGNOZ_MCP_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| cfg.signoz_mcp_url.clone());
+
     let signoz_cfg = SignozConfig::from_app(
-        Some(cfg.signoz_mcp_url.as_str()),
-        cfg.signoz_api_key.as_deref(),
+        Some(mcp_url.as_str()),
+        api_key.as_deref(),
         cfg.signoz_url.as_deref(),
         Some(cfg.signoz_service.as_str()),
     );
@@ -57,33 +66,27 @@ pub(crate) async fn handle_observe(client: &Provider, session: &mut ChatSession,
         Err(e) => {
             println!("{} {}", ui::theme::paint_error_label(&t, "│  SigNoz MCP failed:"), e);
             println!(
-                "{} tip: set signoz_mcp_url / SIGNOZ_MCP_URL (default http://localhost:8000/mcp)",
+                "{} tip: export SIGNOZ_MCP_URL=http://localhost:8000/mcp",
                 ui::theme::paint_warning(&t, "│")
             );
             println!(
-                "{}      and ensure the MCP server is running (Foundry mcp.enabled=true)",
+                "{}      export SIGNOZ_API_KEY=<service-account-key>",
+                ui::theme::paint_warning(&t, "│")
+            );
+            println!(
+                "{}      (do not open /mcp in a browser — needs API key header)",
                 ui::theme::paint_warning(&t, "│")
             );
             return;
         }
     };
 
-    // Show a short preview of raw context (truncated)
-    let preview: String = context.chars().take(600).collect();
     println!(
         "{} {} fetched {} chars of trace context",
         ui::theme::paint_rail_empty(&t),
         ui::theme::paint(&t, "accent", "✓", true),
         context.len()
     );
-    if !preview.is_empty() {
-        println!(
-            "{} {}",
-            ui::theme::paint_dim(&t, "│"),
-            ui::theme::paint_dim(&t, &preview.replace('\n', " · "))
-        );
-    }
-
     println!(
         "{} {} analyzing with {}...",
         ui::theme::paint_rail_empty(&t),
@@ -91,40 +94,29 @@ pub(crate) async fn handle_observe(client: &Provider, session: &mut ChatSession,
         client.provider_label()
     );
 
-    let prompt = format!(
-        "You are an SRE sidekick debugging the router-agent service using REAL OpenTelemetry \
-         span data from SigNoz (via MCP). Answer the user's question using ONLY the provided \
-         context. Cite concrete span attributes (task_id, category, stage, accepted, confidence, \
-         tokens_prompt, tokens_completion, latency_ms, model). If the context is insufficient, \
-         say what is missing — do NOT invent traces.\n\n\
-         USER QUESTION:\n{query}\n\n\
-         SIGNOZ CONTEXT:\n{context}"
-    );
+    let system = "[MODE: CHAT] Observability SRE. Cite real span attributes. Concise bullets.";
+    let prompt =
+        format!("Answer using ONLY SigNoz MCP context for router-agent.\n\nQUESTION: {query}\n\nCONTEXT:\n{context}");
 
-    match client
-        .complete_chat_stream(
-            &prompt,
-            "[MODE: CHAT] You are an observability SRE assistant. Cite real span attributes. \
-             No code generation. Be concise and structured.",
-            "",
-        )
-        .await
-    {
-        Ok(response) => {
-            println!("\n{}", response);
-            session.add_history(&format!("/observe {}", query));
-            session.history_mgr.push_turn(format!("/observe {}", query), response);
-        }
-        Err(e) => {
-            println!("\n{} observe LLM failed: {}", ui::theme::paint_error_label(&t, "│"), e);
-            // Still dump raw context so the user can debug without the model
-            println!(
-                "\n{} raw SigNoz context follows:\n{}",
-                ui::theme::paint_warning(&t, "│"),
-                context
-            );
-        }
-    }
+    let response =
+        match crate::commands::runner::ollama_chat_nostream(&cfg.ollama_url, &cfg.model, system, &prompt).await {
+            Ok(text) if !text.trim().is_empty() => text,
+            _ => match client.complete_chat_stream(&prompt, system, "").await {
+                Ok(text) => text,
+                Err(e) => {
+                    println!(
+                        "\n{} LLM failed: {} — showing MCP data",
+                        ui::theme::paint_error_label(&t, "│"),
+                        e
+                    );
+                    context.clone()
+                }
+            },
+        };
+
+    println!("\n{}", response);
+    session.add_history(&format!("/observe {}", query));
+    session.history_mgr.push_turn(format!("/observe {}", query), response);
 }
 
 /// Performs a web search (`/search` command).

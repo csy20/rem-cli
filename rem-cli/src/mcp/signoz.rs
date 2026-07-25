@@ -398,9 +398,9 @@ impl SignozClient {
             }
         }
 
-        // Keep context LLM-friendly (small local models choke on huge JSON dumps).
+        // Keep context LLM-friendly (1.5B local models + stream break on large dumps).
         let joined = sections.join("\n");
-        const MAX_CTX: usize = 12_000;
+        const MAX_CTX: usize = 6_000;
         if joined.len() > MAX_CTX {
             Ok(format!(
                 "{}\n\n…[truncated {} → {} chars for LLM context window]",
